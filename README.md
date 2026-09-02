@@ -1,71 +1,686 @@
-# m3 README
+# M3 Development Roadmap
 
-This is the README for your extension "m3". After writing up a brief description, we recommend including the following sections.
+## Current Development Stage
 
-## Features
+**Stage 1 — Foundation / Primary Pipeline**
 
-Describe specific features of your extension including screenshots of your extension in action. Image paths are relative to this README file.
+M3 is currently in the foundation and testing phase.
 
-For example if there is an image subfolder under your extension project workspace:
+The immediate goal is to make the existing local project intelligence pipeline reliable before implementing advanced autonomous investigation.
 
-\!\[feature X\]\(images/feature-x.png\)
+### Current Pipeline
 
-> Tip: Many popular extensions utilize animations. This is an excellent way to show off your extension! We recommend short, focused animations that are easy to follow.
+```text
+User Question
+     │
+     ▼
+   Chat UI
+     │
+     ▼
+   Local Agent
+     │
+     ├── Intent Detection
+     │
+     ├── Planning
+     │
+     ├── Tool Selection
+     │
+     ▼
+Project Intelligence
+     │
+     ├── Project Scanner
+     ├── Incremental Index
+     ├── Symbol Index
+     ├── Dependency Detection
+     ├── Search Engine
+     ├── Relevance Ranking
+     ├── Context Builder
+     └── Context Compression
+     │
+     ▼
+Relevant Project Context
+     │
+     ▼
+ Backend Client
+     │
+     │ HTTPS
+     ▼
+ M3 Go Backend
+     │
+     ▼
+   Gemini
+     │
+     ▼
+ AI Response
+```
 
-## Requirements
+### Important Principle
 
-If you have any requirements or dependencies, add a section describing those and how to install and configure them.
+M3 must **NOT** send the entire project to Gemini.
 
-## Extension Settings
+Instead:
 
-Include if your extension adds any VS Code settings through the `contributes.configuration` extension point.
+```text
+Project
+   │
+   ▼
+Local Project Intelligence
+   │
+   ▼
+Search
+   │
+   ▼
+Relevant Files
+   │
+   ▼
+Relevance Ranking
+   │
+   ▼
+Context Builder
+   │
+   ▼
+Only Useful Context
+   │
+   ▼
+M3 Backend
+   │
+   ▼
+Gemini
+```
 
-For example:
-
-This extension contributes the following settings:
-
-* `myExtension.enable`: Enable/disable this extension.
-* `myExtension.thing`: Set to `blah` to do something.
-
-## Known Issues
-
-Calling out known issues can help limit users opening duplicate issues against your extension.
-
-## Release Notes
-
-Users appreciate release notes as you update your extension.
-
-### 1.0.0
-
-Initial release of ...
-
-### 1.0.1
-
-Fixed issue #.
-
-### 1.1.0
-
-Added features X, Y, and Z.
+This keeps the system faster, cheaper, more private, and scalable.
 
 ---
 
-## Following extension guidelines
+# M3 Architecture
 
-Ensure that you've read through the extensions guidelines and follow the best practices for creating your extension.
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                    M3 VS CODE EXTENSION                     │
+│                  FAST LOCAL INTELLIGENCE                    │
+│                                                             │
+│  ┌──────────────── PROJECT INTELLIGENCE ─────────────────┐  │
+│  │                                                       │  │
+│  │ File Scanner                                          │  │
+│  │ Smart Incremental Index                               │  │
+│  │ Symbol Index                                          │  │
+│  │ Lightweight Dependency Detection                      │  │
+│  │ Keyword / Semantic Search                             │  │
+│  │ Local File Relevance Ranking                          │  │
+│  │ Context Builder                                       │  │
+│  │ Context Compression                                   │  │
+│  │ Changed-File Detection                                │  │
+│  │                                                       │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌────────────────── LOCAL AGENT ───────────────────────┐  │
+│  │                                                       │  │
+│  │ Intent Detection                                      │  │
+│  │ Lightweight Planning                                  │  │
+│  │ Tool Selection                                        │  │
+│  │ Read-only Tool Execution                              │  │
+│  │ Local Investigation                                   │  │
+│  │                                                       │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  ┌──────────────────── LOCAL STATE ─────────────────────┐  │
+│  │                                                       │  │
+│  │ Short-term Conversation                               │  │
+│  │ Index Cache                                           │  │
+│  │ Current Task State                                    │  │
+│  │ Project Metadata                                      │  │
+│  │                                                       │  │
+│  └───────────────────────────────────────────────────────┘  │
+│                                                             │
+│  Read-only Safety Layer                                    │
+│  UI / Chat                                                 │
+│  Local Token & Latency Tracking                            │
+│                                                             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               │ HTTPS
+                               ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       M3 BACKEND                            │
+│                 TRUSTED AI ORCHESTRATOR                     │
+│                                                             │
+│  ┌──────────────────── IDENTITY ─────────────────────────┐ │
+│  │ Authentication                                        │ │
+│  │ Authorization                                         │ │
+│  │ Subscription / Entitlements                           │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌──────────────────── AI ENGINE ────────────────────────┐ │
+│  │                                                       │ │
+│  │ Deep Planner                                          │ │
+│  │ Investigation Orchestrator                            │ │
+│  │ Context Strategy                                      │ │
+│  │ Multi-step Reasoning                                  │ │
+│  │ Model Routing                                         │ │
+│  │ Result Verification                                   │ │
+│  │                                                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌──────────────────── MEMORY ───────────────────────────┐ │
+│  │                                                       │ │
+│  │ Long-term Project Memory                              │ │
+│  │ Conversation Summaries                                │ │
+│  │ Important Decisions                                   │ │
+│  │ Known Bugs / Findings                                 │ │
+│  │ Project Architecture Knowledge                        │ │
+│  │                                                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌──────────────────── SECURITY ─────────────────────────┐ │
+│  │                                                       │ │
+│  │ Request Validation                                    │ │
+│  │ Rate Limiting                                         │ │
+│  │ Quota Management                                      │ │
+│  │ Abuse Protection                                      │ │
+│  │                                                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌──────────────────── BILLING ──────────────────────────┐ │
+│  │                                                       │ │
+│  │ Token Usage                                           │ │
+│  │ AI Request Usage                                      │ │
+│  │ Cost Calculation                                      │ │
+│  │ Billing                                               │ │
+│  │ Usage Analytics                                       │ │
+│  │                                                       │ │
+│  └────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  Gemini API Key                                             │
+│  AI Gateway                                                 │
+│                                                             │
+└──────────────────────────────┬──────────────────────────────┘
+                               │
+                               │ AI API
+                               ▼
+                    ┌─────────────────────┐
+                    │       Gemini        │
+                    │                     │
+                    │ Reasoning           │
+                    │ Code Analysis       │
+                    │ Bug Detection       │
+                    │ Code Understanding  │
+                    └─────────────────────┘
+```
 
-* [Extension Guidelines](https://code.visualstudio.com/api/references/extension-guidelines)
+---
 
-## Working with Markdown
+# M3 Development Stages
 
-You can author your README using Visual Studio Code. Here are some useful editor keyboard shortcuts:
+M3 will be developed progressively instead of implementing the complete Copilot-like system at once.
 
-* Split the editor (`Cmd+\` on macOS or `Ctrl+\` on Windows and Linux).
-* Toggle preview (`Shift+Cmd+V` on macOS or `Shift+Ctrl+V` on Windows and Linux).
-* Press `Ctrl+Space` (Windows, Linux, macOS) to see a list of Markdown snippets.
+```text
+Stage 1
+Foundation
+   │
+   ▼
+Stage 2
+Reliable Project Understanding
+   │
+   ▼
+Stage 3
+Deep Local Investigation
+   │
+   ▼
+Stage 4
+Adaptive AI Reasoning
+   │
+   ▼
+Stage 5
+Persistent Project Memory
+   │
+   ▼
+Stage 6
+Advanced Coding Agent
+   │
+   ▼
+Stage 7
+Safe Code Modification
+   │
+   ▼
+Stage 8
+Copilot-Level M3
+```
 
-## For more information
+---
 
-* [Visual Studio Code's Markdown Support](http://code.visualstudio.com/docs/languages/markdown)
-* [Markdown Syntax Reference](https://help.github.com/articles/markdown-basics/)
+# Stage 1 — Foundation
 
-**Enjoy!**
+**Status: CURRENT**
+
+The goal is to build and test the primary M3 pipeline.
+
+### Components
+
+```text
+Project Scanner
+       ↓
+Incremental Index
+       ↓
+Symbol Index
+       ↓
+Dependency Detection
+       ↓
+Search Engine
+       ↓
+Relevance Ranking
+       ↓
+Context Builder
+       ↓
+Context Compression
+       ↓
+Backend
+       ↓
+Gemini
+```
+
+### Local Agent
+
+```text
+Intent Detector
+Planner
+Tool Selector
+Read-only Tools
+```
+
+### Local State
+
+```text
+Conversation
+Index Cache
+Current Task
+Project Metadata
+```
+
+### Safety
+
+M3 is currently **read-only**.
+
+M3 must not:
+
+```text
+write_file
+edit_file
+delete_file
+rename_file
+```
+
+### Current Testing
+
+```text
+Scanning files...
+       ↓
+Building index...
+       ↓
+Finding symbols...
+       ↓
+Detecting dependencies...
+       ↓
+Index ready
+```
+
+The first priority is to make this pipeline stable and reliable.
+
+**Do not implement the advanced investigation loop until Stage 1 is properly tested.**
+
+---
+
+# Stage 2 — Reliable Project Understanding
+
+**Status: PLANNED**
+
+Improve the local project model.
+
+M3 should understand:
+
+```text
+Files
+Symbols
+Imports
+Dependencies
+Entry Points
+Modules
+Frameworks
+Configuration
+Tests
+Project Metadata
+```
+
+The objective is to make M3 understand the structure of a project before asking Gemini for reasoning.
+
+---
+
+# Stage 3 — Deep Local Investigation
+
+**Status: PLANNED / POSTPONED**
+
+This is the next major intelligence layer.
+
+Example:
+
+```text
+User
+ │
+ ▼
+Find bug in my project
+ │
+ ▼
+Intent Detector
+ │
+ ▼
+Investigation Plan
+ │
+ ▼
+Search Project
+ │
+ ▼
+Find Relevant Files
+ │
+ ▼
+Read File A
+ │
+ ▼
+Find Symbol
+ │
+ ▼
+Find Dependency
+ │
+ ▼
+Read File B
+ │
+ ▼
+Follow Dependency
+ │
+ ▼
+Build Evidence Graph
+ │
+ ▼
+Evidence Ranking
+ │
+ ▼
+Backend
+ │
+ ▼
+Gemini
+ │
+ ▼
+Root Cause Analysis
+```
+
+M3 should investigate locally before sending evidence to Gemini.
+
+This stage is intentionally postponed until the primary Stage 1 pipeline is tested.
+
+---
+
+# Stage 4 — Adaptive AI Reasoning
+
+**Status: PLANNED**
+
+M3 and Gemini will work together when deeper investigation is required.
+
+Example:
+
+```text
+M3 Investigation
+       ↓
+Gemini
+       ↓
+Needs auth/token.go
+       ↓
+M3 reads token.go
+       ↓
+Gemini
+       ↓
+Needs middleware.go
+       ↓
+M3 reads middleware.go
+       ↓
+Gemini
+       ↓
+Root Cause
+```
+
+The system will require:
+
+```text
+Token limits
+Tool-call limits
+Investigation limits
+Loop detection
+Confidence scoring
+Stopping conditions
+Evidence requirements
+```
+
+Simple questions should remain cheap.
+
+Complex questions can use multiple AI calls.
+
+---
+
+# Stage 5 — Persistent Project Memory
+
+**Status: PLANNED**
+
+M3 will remember useful project knowledge across conversations.
+
+Possible stored knowledge:
+
+```text
+Project Architecture
+Conversation Summaries
+Important Decisions
+Known Bugs
+Previous Findings
+Project Conventions
+Important Dependencies
+```
+
+The goal is to avoid rediscovering the same project information repeatedly.
+
+Source code should primarily remain on the user's machine. Long-term backend memory should focus on useful knowledge, summaries, findings, and decisions rather than unnecessarily storing entire source files.
+
+---
+
+# Stage 6 — Advanced Coding Agent
+
+**Status: PLANNED**
+
+M3 should handle more complex developer requests.
+
+Examples:
+
+```text
+Find the race condition.
+
+Why is this API slow?
+
+Explain this service.
+
+Where does this request originate?
+
+Why is this database query failing?
+
+Find possible memory leaks.
+
+Review this authentication system.
+
+Explain the architecture.
+
+Find all usages of this function.
+
+Find the root cause of this error.
+```
+
+M3 should automatically decide which local tools and project information are required.
+
+---
+
+# Stage 7 — Safe Code Modification
+
+**Status: PLANNED**
+
+Only after M3 has strong project understanding and investigation capabilities should code modification be introduced.
+
+The workflow should be:
+
+```text
+User
+ ↓
+Investigate
+ ↓
+Understand
+ ↓
+Find Root Cause
+ ↓
+Generate Patch
+ ↓
+Show Patch
+ ↓
+User Approves
+ ↓
+Apply Patch
+```
+
+M3 should not silently modify source code.
+
+The user should remain in control.
+
+---
+
+# Stage 8 — Copilot-Level M3
+
+**Status: LONG-TERM GOAL**
+
+The final goal is a complete AI coding assistant with:
+
+```text
+Project Understanding
+        +
+Context Awareness
+        +
+Cross-file Reasoning
+        +
+Symbol Understanding
+        +
+Dependency Reasoning
+        +
+Deep Bug Investigation
+        +
+Adaptive AI Reasoning
+        +
+Project Memory
+        +
+Conversation Memory
+        +
+Code Generation
+        +
+Patch Generation
+        +
+Patch Verification
+        +
+Test Understanding
+        +
+Git / Change Awareness
+        +
+Multi-step Reasoning
+        +
+Model Routing
+        +
+Token / Cost Optimization
+        +
+Safe Code Modification
+```
+
+The goal is not to copy one specific implementation of GitHub Copilot.
+
+The goal is to build an M3 architecture that provides a similar level of intelligent developer assistance while keeping project intelligence primarily local and using the backend as the trusted AI/service layer.
+
+---
+
+# Current Roadmap Position
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                                                             │
+│  STAGE 1  ████████████████████  CURRENT                     │
+│                                                             │
+│  STAGE 2  ░░░░░░░░░░░░░░░░░░░░  NEXT                       │
+│                                                             │
+│  STAGE 3  ░░░░░░░░░░░░░░░░░░░░  PLANNED                   │
+│                                                             │
+│  STAGE 4  ░░░░░░░░░░░░░░░░░░░░  PLANNED                   │
+│                                                             │
+│  STAGE 5  ░░░░░░░░░░░░░░░░░░░░  PLANNED                   │
+│                                                             │
+│  STAGE 6  ░░░░░░░░░░░░░░░░░░░░  PLANNED                   │
+│                                                             │
+│  STAGE 7  ░░░░░░░░░░░░░░░░░░░░  PLANNED                   │
+│                                                             │
+│  STAGE 8  ░░░░░░░░░░░░░░░░░░░░  COPILOT-LEVEL GOAL        │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
+```
+
+## Development Rule
+
+**Do not skip stages unnecessarily.**
+
+At every stage:
+
+```text
+Implement
+   ↓
+Build
+   ↓
+Test
+   ↓
+Debug
+   ↓
+Verify
+   ↓
+Update README
+   ↓
+Move to next stage
+```
+
+When returning to M3 development after a break, first identify the current stage from this README before implementing new architecture.
+
+---
+
+# Current Immediate Goal
+
+```text
+Stage 1
+   ↓
+Test existing primary code
+   ↓
+Fix errors
+   ↓
+Verify scanner
+   ↓
+Verify index
+   ↓
+Verify symbols
+   ↓
+Verify dependencies
+   ↓
+Verify search
+   ↓
+Verify ranking
+   ↓
+Verify context builder
+   ↓
+Verify backend communication
+   ↓
+Verify Gemini response
+   ↓
+Stage 1 complete
+```
+
+**Advanced local investigation, evidence graphs, and adaptive investigation loops are intentionally postponed.**

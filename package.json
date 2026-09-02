@@ -1,15 +1,19 @@
 {
-  "name": "m3",
+  "name": "m3-ai-agent",
   "displayName": "M3 AI Agent",
-  "description": "Read-only AI coding agent",
+  "description": "Read-only local-first AI coding agent for VS Code",
   "version": "0.0.1",
+  "publisher": "m3-ai",
+  "license": "MIT",
   "engines": {
-    "vscode": "^1.134.0"
+    "vscode": "^1.90.0"
   },
   "categories": [
-    "Other"
+    "Other",
+    "Machine Learning"
   ],
   "activationEvents": [
+    "onStartupFinished",
     "onView:m3.chat"
   ],
   "main": "./dist/extension.js",
@@ -19,7 +23,7 @@
         {
           "id": "m3",
           "title": "M3",
-          "icon": "media/mv2.svg"
+          "icon": "media/m3.svg"
         }
       ]
     },
@@ -27,40 +31,73 @@
       "m3": [
         {
           "id": "m3.chat",
-          "name": "AI Chat",
+          "name": "M3 AI Agent",
           "type": "webview"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "m3.scanProject",
+        "title": "M3: Scan Project"
+      },
+      {
+        "command": "m3.rebuildIndex",
+        "title": "M3: Rebuild Index"
+      },
+      {
+        "command": "m3.clearConversation",
+        "title": "M3: Clear Conversation"
+      }
+    ],
+    "configuration": {
+      "title": "M3 AI Agent",
+      "properties": {
+        "m3.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8080",
+          "description": "M3 backend URL"
+        },
+        "m3.maxContextChars": {
+          "type": "number",
+          "default": 300000,
+          "description": "Maximum source context sent to the backend"
+        },
+        "m3.maxFilesInContext": {
+          "type": "number",
+          "default": 30,
+          "description": "Maximum files selected for AI context"
+        },
+        "m3.enableAutoIndex": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically index the workspace"
+        }
+      }
+    },
+    "menus": {
+      "editor/context": [
+        {
+          "command": "m3.chat",
+          "when": "editorTextFocus"
         }
       ]
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run package",
     "compile": "npm run check-types && npm run lint && node esbuild.js",
-    "watch": "npm-run-all -p watch:*",
-    "watch:esbuild": "node esbuild.js --watch",
-    "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
-    "package": "npm run check-types && npm run lint && node esbuild.js --production",
-    "compile-tests": "tsc -p . --outDir out",
-    "watch-tests": "tsc -p . -w --outDir out",
-    "pretest": "npm run compile-tests && npm run compile && npm run lint",
     "check-types": "tsc --noEmit",
-    "lint": "eslint src",
-    "test": "vscode-test"
+    "lint": "eslint src --ext ts",
+    "watch": "npm run check-types && node esbuild.js --watch",
+    "package": "npm run compile"
   },
   "devDependencies": {
-    "@types/vscode": "^1.134.0",
-    "@types/mocha": "^10.0.10",
-    "@types/node": "24.x",
-    "typescript-eslint": "^8.61.1",
-    "eslint": "^10.5.0",
-    "esbuild": "^0.28.1",
-    "npm-run-all": "^4.1.5",
-    "typescript": "^6.0.3",
-    "@vscode/test-cli": "^0.0.15",
-    "@vscode/test-electron": "^3.0.0"
-  },
-  "overrides": {
-    "diff": "^8.0.4",
-    "serialize-javascript": "^7.0.6"
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.90.0",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "esbuild": "^0.25.0",
+    "eslint": "^9.0.0",
+    "typescript": "^5.7.0"
   }
 }
