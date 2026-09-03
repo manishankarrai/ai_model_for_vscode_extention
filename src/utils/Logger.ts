@@ -8,6 +8,7 @@ export class Logger {
   }
 
   info(message: string, data?: unknown): void {
+    
     this.write("INFO", message, data);
   }
 

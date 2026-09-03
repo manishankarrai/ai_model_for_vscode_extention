@@ -307,7 +307,7 @@ export class Agent {
       this.logger.info("answer of api call .........................." , response);
 
       this.taskState.setAICalls(
-        response.usage.aiApiCalls
+        response.usage.ai_api_calls
       );
 
       this.conversation.addAssistantMessage(
@@ -323,19 +323,19 @@ export class Agent {
           requestId,
 
           aiCalls:
-            response.usage.aiApiCalls,
+            response.usage.ai_api_calls,
 
           inputTokens:
-            response.usage.inputTokens,
+            response.usage.input_tokens,
 
           outputTokens:
-            response.usage.outputTokens,
+            response.usage.output_tokens,
 
           totalTokens:
-            response.usage.totalTokens,
+            response.usage.total_tokens,
 
           estimatedCost:
-            response.usage.estimatedCost,
+            response.usage.estimated_cost,
 
           latencyMs:
             Date.now() -

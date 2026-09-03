@@ -105,13 +105,6 @@ export interface TaskState {
   aiCalls: number;
 }
 
-export interface AIUsage {
-  inputTokens: number;
-  outputTokens: number;
-  totalTokens: number;
-  aiApiCalls: number;
-  estimatedCost: number;
-}
 
 export interface AIResponse {
   request_id: string;
@@ -119,6 +112,14 @@ export interface AIResponse {
   answer: string;
   model: string;
   usage: AIUsage;
+}
+
+export interface AIUsage {
+  input_tokens: number;
+  output_tokens: number;
+  total_tokens: number;
+  ai_api_calls: number;
+  estimated_cost: number;
 }
 
 export interface AIRequest {

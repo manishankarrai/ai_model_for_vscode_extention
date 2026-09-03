@@ -2,98 +2,89 @@ import * as vscode from "vscode";
 
 import { Agent } from "../agent/Agent";
 import { Logger } from "../utils/Logger";
+import {
+  AIResponse,
+  AIUsage,
+} from "../models/types";
 
 export class M3ViewProvider
-  implements vscode.WebviewViewProvider {
+  implements vscode.WebviewViewProvider
+{
+  public static readonly viewType = "m3.chat";
 
-  public static readonly viewType =
-    "m3.chat";
+  private view?: vscode.WebviewView;
 
-  private view:
-    vscode.WebviewView | undefined;
+  private isProcessing = false;
 
   constructor(
-    private readonly extensionUri:
-      vscode.Uri,
-
-    private readonly agent:
-      Agent,
-
-    private readonly logger:
-      Logger,
-
-    private readonly getAccessToken:
-      () => Promise<string>
+    private readonly extensionUri: vscode.Uri,
+    private readonly agent: Agent,
+    private readonly logger: Logger,
+    private readonly getAccessToken: () => Promise<string>
   ) {}
 
   resolveWebviewView(
     webviewView: vscode.WebviewView
   ): void {
-
-    this.view =
-      webviewView;
+    this.view = webviewView;
 
     webviewView.webview.options = {
       enableScripts: true,
 
       localResourceRoots: [
-        this.extensionUri
-      ]
+        this.extensionUri,
+      ],
     };
 
     webviewView.webview.html =
-      this.getHtml(
-        webviewView.webview
-      );
+      this.getHtml(webviewView.webview);
 
     webviewView.webview.onDidReceiveMessage(
-      async message => {
+      async (message: WebviewMessage) => {
+        try {
+          await this.handleMessage(message);
+        } catch (error) {
+          this.logger.error(
+            "Webview message handling failed",
+            error
+          );
 
-        await this.handleMessage(
-          message
-        );
-      }
+          this.post({
+            type: "error",
+            error: "Something went wrong while processing your request.",
+          });
+        }
+      },
+      undefined
     );
   }
 
   show(): void {
-
-    if (this.view) {
-      this.view.show?.(true);
-    }
+    this.view?.show?.(true);
   }
 
   private async handleMessage(
-    message: {
-      type: string;
-      value?: string;
-    }
+    message: WebviewMessage
   ): Promise<void> {
-
     switch (message.type) {
-
       case "send_message":
-
-        await this.handleQuestion(
-          message.value ?? ""
-        );
-
+        await this.handleQuestion(message.value);
         break;
 
       case "clear":
-
         this.agent.clearConversation();
 
         this.post({
-          type: "cleared"
+          type: "cleared",
         });
 
         break;
 
       case "open_output":
-
         this.logger.show();
+        break;
 
+      default:
         break;
     }
   }
@@ -101,64 +92,98 @@ export class M3ViewProvider
   private async handleQuestion(
     question: string
   ): Promise<void> {
+    const trimmedQuestion = question.trim();
 
-    if (!question.trim()) {
+    if (!trimmedQuestion) {
       return;
     }
 
+    /*
+     * Prevent multiple requests from being sent
+     * while another request is running.
+     */
+    if (this.isProcessing) {
+      this.post({
+        type: "error",
+        error: "M3 is already processing another request.",
+      });
+
+      return;
+    }
+
+    this.isProcessing = true;
+
     this.post({
-      type: "thinking"
+      type: "thinking",
     });
 
     try {
-
       const accessToken =
         await this.getAccessToken();
 
       if (!accessToken) {
-
-        throw new Error(
+        throw new AuthenticationError(
           "M3 authentication required."
         );
       }
 
-      const response =
+      const response: AIResponse =
         await this.agent.process(
-          question,
+          trimmedQuestion,
           accessToken
         );
 
       this.post({
         type: "answer",
-
-        answer:
-          response.answer,
-
-        usage:
-          response.usage,
-
-        requestId:
-          response.request_id
+        answer: response.answer,
+        usage: response.usage,
+        requestId: response.request_id,
+        model: response.model,
       });
-
     } catch (error) {
+      const message =
+        this.getErrorMessage(error);
 
       this.post({
         type: "error",
+        error: message,
+      });
 
-        error:
-          error instanceof Error
-            ? error.message
-            : String(error)
+      this.logger.error(
+        "M3 request failed",
+        error
+      );
+    } finally {
+      this.isProcessing = false;
+
+      this.post({
+        type: "ready",
       });
     }
   }
 
-  private post(
-    message: unknown
-  ): void {
+  private getErrorMessage(
+    error: unknown
+  ): string {
+    if (error instanceof AuthenticationError) {
+      return error.message;
+    }
 
-    this.view?.webview.postMessage(
+    if (error instanceof Error) {
+      return error.message;
+    }
+
+    return "An unexpected error occurred.";
+  }
+
+  private post(
+    message: WebviewResponse
+  ): void {
+    if (!this.view) {
+      return;
+    }
+
+    void this.view.webview.postMessage(
       message
     );
   }
@@ -166,9 +191,10 @@ export class M3ViewProvider
   private getHtml(
     webview: vscode.Webview
   ): string {
+    const nonce = this.getNonce();
 
-    const nonce =
-      this.getNonce();
+    const cspSource =
+      webview.cspSource;
 
     return `
 <!DOCTYPE html>
@@ -183,7 +209,7 @@ export class M3ViewProvider
   http-equiv="Content-Security-Policy"
   content="
     default-src 'none';
-    style-src 'unsafe-inline';
+    style-src 'unsafe-inline' ${cspSource};
     script-src 'nonce-${nonce}';
   "
 >
@@ -193,16 +219,24 @@ export class M3ViewProvider
   content="width=device-width, initial-scale=1.0"
 >
 
+<title>M3 AI Agent</title>
+
 <style>
 
-:root {
-  color-scheme: dark;
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  width: 100%;
+  height: 100%;
+
+  margin: 0;
+  padding: 0;
 }
 
 body {
-  padding: 0;
-  margin: 0;
-
   color:
     var(--vscode-foreground);
 
@@ -214,6 +248,8 @@ body {
 
   font-size:
     var(--vscode-font-size);
+
+  overflow: hidden;
 }
 
 .container {
@@ -225,13 +261,29 @@ body {
 }
 
 .header {
-  padding: 12px;
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  padding: 10px 12px;
 
   border-bottom:
     1px solid
     var(--vscode-panel-border);
 
   font-weight: 600;
+
+  user-select: none;
+}
+
+.header-title {
+  display: flex;
+
+  align-items: center;
+
+  gap: 6px;
 }
 
 .messages {
@@ -240,16 +292,20 @@ body {
   overflow-y: auto;
 
   padding: 12px;
+
+  scroll-behavior: smooth;
 }
 
 .message {
   margin-bottom: 12px;
 
-  padding: 10px;
+  padding: 10px 12px;
 
   border-radius: 8px;
 
   white-space: pre-wrap;
+
+  word-break: break-word;
 
   line-height: 1.5;
 }
@@ -257,28 +313,69 @@ body {
 .user {
   background:
     var(--vscode-textBlockQuote-background);
+
+  border:
+    1px solid
+    var(--vscode-textBlockQuote-border);
 }
 
 .assistant {
   background:
     var(--vscode-editor-background);
+
+  border:
+    1px solid
+    var(--vscode-panel-border);
 }
 
 .error {
   background:
     var(--vscode-inputValidation-errorBackground);
+
+  color:
+    var(--vscode-inputValidation-errorForeground);
+
+  border:
+    1px solid
+    var(--vscode-inputValidation-errorBorder);
 }
 
 .thinking {
   opacity: 0.7;
+
+  font-style: italic;
+}
+
+.usage {
+  margin-top: -6px;
+
+  margin-bottom: 12px;
+
+  padding-left: 4px;
+
+  font-size: 10px;
+
+  opacity: 0.6;
+}
+
+.status {
+  padding: 5px 10px;
+
+  font-size: 11px;
+
+  opacity: 0.7;
+
+  min-height: 24px;
 }
 
 .composer {
   display: flex;
 
-  padding: 10px;
+  align-items: flex-end;
 
   gap: 8px;
+
+  padding: 10px;
 
   border-top:
     1px solid
@@ -294,7 +391,7 @@ textarea {
 
   max-height: 150px;
 
-  padding: 8px;
+  padding: 8px 10px;
 
   color:
     var(--vscode-input-foreground);
@@ -309,14 +406,35 @@ textarea {
   border-radius: 5px;
 
   outline: none;
+
+  font-family:
+    var(--vscode-font-family);
+
+  font-size:
+    var(--vscode-font-size);
+
+  line-height: 1.4;
+}
+
+textarea:focus {
+  border-color:
+    var(--vscode-focusBorder);
+}
+
+textarea:disabled {
+  opacity: 0.6;
+
+  cursor: not-allowed;
 }
 
 button {
+  min-height: 42px;
+
   border: none;
 
   border-radius: 5px;
 
-  padding: 8px 12px;
+  padding: 8px 14px;
 
   color:
     var(--vscode-button-foreground);
@@ -325,27 +443,49 @@ button {
     var(--vscode-button-background);
 
   cursor: pointer;
+
+  font-family:
+    var(--vscode-font-family);
+
+  font-size:
+    var(--vscode-font-size);
 }
 
-button:hover {
+button:hover:not(:disabled) {
   background:
     var(--vscode-button-hoverBackground);
 }
 
-.status {
-  padding: 5px 10px;
+button:disabled {
+  opacity: 0.5;
 
-  font-size: 11px;
-
-  opacity: 0.7;
+  cursor: not-allowed;
 }
 
-.usage {
-  margin-top: 8px;
+.empty {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: center;
+
+  height: 100%;
+
+  text-align: center;
+
+  opacity: 0.5;
+
+  padding: 20px;
+}
+
+.model {
+  margin-left: auto;
 
   font-size: 10px;
 
-  opacity: 0.6;
+  opacity: 0.5;
+
+  font-weight: normal;
 }
 
 </style>
@@ -357,13 +497,31 @@ button:hover {
 <div class="container">
 
   <div class="header">
-    M3 AI Agent
+
+    <div class="header-title">
+      <span>M3 AI Agent</span>
+
+      <span
+        id="model"
+        class="model"
+      ></span>
+    </div>
+
   </div>
 
   <div
     id="messages"
     class="messages"
-  ></div>
+  >
+
+    <div
+      id="empty"
+      class="empty"
+    >
+      Ask M3 about your project.
+    </div>
+
+  </div>
 
   <div
     id="status"
@@ -376,10 +534,15 @@ button:hover {
 
     <textarea
       id="input"
+      rows="1"
       placeholder="Ask M3 about your project..."
+      aria-label="Ask M3"
     ></textarea>
 
-    <button id="send">
+    <button
+      id="send"
+      type="button"
+    >
       Send
     </button>
 
@@ -404,10 +567,19 @@ const messages =
 const status =
   document.getElementById("status");
 
-function addMessage(
-  text,
-  type
-) {
+const model =
+  document.getElementById("model");
+
+const empty =
+  document.getElementById("empty");
+
+let processing = false;
+
+function addMessage(text, type) {
+
+  if (empty) {
+    empty.remove();
+  }
 
   const element =
     document.createElement("div");
@@ -416,7 +588,7 @@ function addMessage(
     "message " + type;
 
   element.textContent =
-    text;
+    String(text ?? "");
 
   messages.appendChild(
     element
@@ -426,15 +598,73 @@ function addMessage(
     messages.scrollHeight;
 }
 
-function setStatus(
-  text
-) {
+function addUsage(usage) {
+
+  if (!usage) {
+    return;
+  }
+
+  const element =
+    document.createElement("div");
+
+  element.className =
+    "usage";
+
+  const aiApiCalls =
+    Number(usage.ai_api_calls ?? 0);
+
+  const totalTokens =
+    Number(usage.total_tokens ?? 0);
+
+  const estimatedCost =
+    Number(usage.estimated_cost ?? 0);
+
+  element.textContent =
+    "AI calls: " +
+    aiApiCalls +
+    " • Tokens: " +
+    totalTokens +
+    " • Cost: $" +
+    estimatedCost.toFixed(6);
+
+  messages.appendChild(
+    element
+  );
+
+  messages.scrollTop =
+    messages.scrollHeight;
+}
+
+function setStatus(text) {
 
   status.textContent =
-    text;
+    String(text ?? "");
+}
+
+function setProcessing(value) {
+
+  processing = value;
+
+  input.disabled =
+    value;
+
+  send.disabled =
+    value;
+
+  if (value) {
+    send.textContent =
+      "Working...";
+  } else {
+    send.textContent =
+      "Send";
+  }
 }
 
 function sendMessage() {
+
+  if (processing) {
+    return;
+  }
 
   const value =
     input.value.trim();
@@ -450,15 +680,15 @@ function sendMessage() {
 
   input.value = "";
 
+  setProcessing(true);
+
   setStatus(
     "M3 is investigating..."
   );
 
   vscode.postMessage({
-    type:
-      "send_message",
-
-    value
+    type: "send_message",
+    value: value
   });
 }
 
@@ -494,6 +724,8 @@ window.addEventListener(
 
       case "thinking":
 
+        setProcessing(true);
+
         setStatus(
           "Analyzing project..."
         );
@@ -502,43 +734,33 @@ window.addEventListener(
 
       case "answer":
 
+        setProcessing(false);
+
         addMessage(
           message.answer,
           "assistant"
         );
 
-        if (message.usage) {
+        addUsage(
+          message.usage
+        );
 
-          const usage =
-            document.createElement(
-              "div"
-            );
-
-          usage.className =
-            "usage";
-
-          usage.textContent =
-            "AI calls: " +
-            message.usage.aiApiCalls +
-            " • Tokens: " +
-            message.usage.totalTokens +
-            " • Cost: $" +
-            Number(
-              message.usage.estimatedCost
-            ).toFixed(6);
-
-          messages.appendChild(
-            usage
-          );
+        if (message.model) {
+          model.textContent =
+            message.model;
         }
 
         setStatus(
           "Ready"
         );
 
+        input.focus();
+
         break;
 
       case "error":
+
+        setProcessing(false);
 
         addMessage(
           message.error,
@@ -549,20 +771,56 @@ window.addEventListener(
           "Error"
         );
 
+        input.focus();
+
+        break;
+
+      case "ready":
+
+        setProcessing(false);
+
+        if (
+          status.textContent !== "Error"
+        ) {
+          setStatus("Ready");
+        }
+
         break;
 
       case "cleared":
 
         messages.innerHTML = "";
 
+        const newEmpty =
+          document.createElement("div");
+
+        newEmpty.id =
+          "empty";
+
+        newEmpty.className =
+          "empty";
+
+        newEmpty.textContent =
+          "Ask M3 about your project.";
+
+        messages.appendChild(
+          newEmpty
+        );
+
+        setProcessing(false);
+
         setStatus(
           "Ready"
         );
+
+        input.focus();
 
         break;
     }
   }
 );
+
+input.focus();
 
 </script>
 
@@ -573,23 +831,67 @@ window.addEventListener(
   }
 
   private getNonce(): string {
-
     const chars =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
     let result = "";
 
     for (let i = 0; i < 32; i++) {
-
       result +=
         chars.charAt(
           Math.floor(
-            Math.random() *
-            chars.length
+            Math.random() * chars.length
           )
         );
     }
 
     return result;
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Webview message types                                                      */
+/* -------------------------------------------------------------------------- */
+
+type WebviewMessage =
+  | {
+      type: "send_message";
+      value: string;
+    }
+  | {
+      type: "clear";
+    }
+  | {
+      type: "open_output";
+    };
+
+type WebviewResponse =
+  | {
+      type: "thinking";
+    }
+  | {
+      type: "answer";
+      answer: string;
+      usage: AIUsage;
+      requestId: string;
+      model: string;
+    }
+  | {
+      type: "error";
+      error: string;
+    }
+  | {
+      type: "ready";
+    }
+  | {
+      type: "cleared";
+    };
+
+class AuthenticationError extends Error {
+  constructor(message: string) {
+    super(message);
+
+    this.name =
+      "AuthenticationError";
   }
 }
