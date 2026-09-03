@@ -7,6 +7,10 @@ import {
 } from "../models/types";
 
 import {
+  ProjectModel
+} from "../project/project-model";
+
+import {
   readTextFile
 } from "../utils/FileUtils";
 
@@ -20,6 +24,7 @@ export class ContextBuilder {
   async build(
     index: ProjectIndex,
     rankedFiles: SearchResult[],
+    projectModel: ProjectModel | undefined,
     options: ContextOptions
   ): Promise<AIContext> {
 
@@ -91,7 +96,8 @@ export class ContextBuilder {
 
     const indexSummary =
       this.createIndexSummary(
-        index
+        index,
+        projectModel
       );
 
     return {
@@ -101,13 +107,14 @@ export class ContextBuilder {
   }
 
   private createIndexSummary(
-    index: ProjectIndex
+    index: ProjectIndex,
+    projectModel?: ProjectModel
   ): string {
 
     const lines: string[] = [];
 
     lines.push(
-      `Project root: ${index.rootPath}`
+      "Project Overview"
     );
 
     lines.push(
@@ -126,49 +133,72 @@ export class ContextBuilder {
       `Index version: ${index.version}`
     );
 
-    lines.push("");
-
-    lines.push("Files:");
-
-    for (
-      const file of index.files.values()
-    ) {
+    if (projectModel) {
+      lines.push("");
 
       lines.push(
-        `- ${file.file.path} (${file.file.language})`
+        `Languages: ${projectModel.languages.join(", ") || "unknown"}`
       );
-    }
-
-    lines.push("");
-
-    lines.push("Important symbols:");
-
-    for (
-      const symbol of index.symbols.slice(
-        0,
-        100
-      )
-    ) {
 
       lines.push(
-        `- ${symbol.name} [${symbol.kind}] ${symbol.filePath}:${symbol.line}`
+        `Frameworks: ${projectModel.frameworks.join(", ") || "none detected"}`
       );
-    }
-
-    lines.push("");
-
-    lines.push("Dependencies:");
-
-    for (
-      const dependency of index.dependencies.slice(
-        0,
-        100
-      )
-    ) {
 
       lines.push(
-        `- ${dependency.source} -> ${dependency.target}`
+        `Entry points: ${projectModel.entryPoints.length}`
       );
+
+      lines.push(
+        `Modules: ${projectModel.modules.length}`
+      );
+
+      lines.push(
+        `Configuration files: ${projectModel.configFiles.length}`
+      );
+
+      lines.push(
+        `Test files: ${projectModel.testFiles.length}`
+      );
+
+      if (projectModel.entryPoints.length > 0) {
+        lines.push("");
+        lines.push("Entry Points:");
+
+        for (const entryPoint of projectModel.entryPoints) {
+          lines.push(
+            `- ${entryPoint.filePath} (${entryPoint.type})`
+          );
+        }
+      }
+
+      if (projectModel.modules.length > 0) {
+        lines.push("");
+        lines.push("Modules:");
+
+        for (const module of projectModel.modules.slice(0, 30)) {
+          lines.push(
+            `- ${module.name}: ${module.path}`
+          );
+        }
+      }
+
+      if (projectModel.configFiles.length > 0) {
+        lines.push("");
+        lines.push("Configuration:");
+
+        for (const file of projectModel.configFiles.slice(0, 30)) {
+          lines.push(`- ${file}`);
+        }
+      }
+
+      if (projectModel.testFiles.length > 0) {
+        lines.push("");
+        lines.push("Tests:");
+
+        for (const file of projectModel.testFiles.slice(0, 30)) {
+          lines.push(`- ${file}`);
+        }
+      }
     }
 
     return lines.join("\n");

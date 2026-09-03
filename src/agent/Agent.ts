@@ -24,6 +24,7 @@ import { TokenEstimator } from "../utils/TokenEstimator";
 import { Logger } from "../utils/Logger";
 
 import { ReadOnlyGuard } from "../safety/ReadOnlyGuard";
+import { ProjectUnderstanding } from "../project/project-understanding";
 
 export class Agent {
 
@@ -53,6 +54,9 @@ export class Agent {
 
   constructor(
     private readonly indexer: ProjectIndexer,
+
+    private readonly projectUnderstanding:
+    ProjectUnderstanding,
 
     private readonly conversation:
       ConversationState,
@@ -200,12 +204,16 @@ export class Agent {
       // Rank
       // ------------------------------------------------------
 
-      const ranked =
-        this.ranker.rank(
-          question,
-          index,
-          searchResults
-        );
+     const projectModel =
+  this.projectUnderstanding.getModel();
+
+const ranked =
+  this.ranker.rank(
+    question,
+    index,
+    searchResults,
+    projectModel
+  );
 
       // ------------------------------------------------------
       // Context
@@ -231,6 +239,7 @@ export class Agent {
         await this.contextBuilder.build(
           index,
           ranked,
+          this.projectUnderstanding.getModel(),
           {
             maxFiles,
             maxChars

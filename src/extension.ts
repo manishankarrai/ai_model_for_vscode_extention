@@ -72,6 +72,7 @@ export function activate(
   const agent =
     new Agent(
       indexer,
+      projectUnderstanding,
       conversation,
       taskState,
       logger
