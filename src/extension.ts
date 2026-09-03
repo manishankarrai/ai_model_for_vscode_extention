@@ -15,6 +15,7 @@ import { TaskState } from "./state/TaskState";
 import { Agent } from "./agent/Agent";
 
 import { M3ViewProvider } from "./ui/M3ViewProvider";
+import { ProjectUnderstanding } from "./project/project-understanding";
 
 export function activate(
   context: vscode.ExtensionContext
@@ -48,7 +49,8 @@ export function activate(
     new IndexState(
       context.workspaceState
     );
-
+    const projectUnderstanding =
+    new ProjectUnderstanding();
   // ----------------------------------------------------------
   // Change detection
   // ----------------------------------------------------------
@@ -118,6 +120,7 @@ export function activate(
         await scanProject(
           indexer,
           indexState,
+           projectUnderstanding,
           logger
         );
       }
@@ -136,6 +139,7 @@ export function activate(
         await scanProject(
           indexer,
           indexState,
+           projectUnderstanding,
           logger,
           true
         );
@@ -160,7 +164,79 @@ export function activate(
       }
     )
   );
+     // ----------------------------------------------------------
+// Inspect project understanding
+// ----------------------------------------------------------
 
+context.subscriptions.push(
+  vscode.commands.registerCommand(
+    "m3.inspectProject",
+    () => {
+
+      const model =
+        projectUnderstanding.getModel();
+
+      if (!model) {
+
+        vscode.window.showWarningMessage(
+          "M3: Project understanding is not initialized."
+        );
+
+        return;
+      }
+
+      logger.info(
+        "Project Model",
+        {
+          rootPath:
+            model.rootPath,
+
+          languages:
+            model.languages,
+
+          frameworks:
+            model.frameworks,
+
+          files:
+            model.files.length,
+
+          symbols:
+            model.symbols.length,
+
+          imports:
+            model.imports.length,
+
+          dependencies:
+            model.dependencies.length,
+
+          entryPoints:
+            model.entryPoints.length,
+
+          modules:
+            model.modules.length,
+
+          configFiles:
+            model.configFiles.length,
+
+          testFiles:
+            model.testFiles.length
+        }
+      );
+
+      vscode.window.showInformationMessage(
+        [
+          `Languages: ${model.languages.join(", ") || "None"}`,
+          `Frameworks: ${model.frameworks.join(", ") || "None"}`,
+          `Files: ${model.files.length}`,
+          `Entry points: ${model.entryPoints.length}`,
+          `Modules: ${model.modules.length}`,
+          `Tests: ${model.testFiles.length}`,
+          `Config files: ${model.configFiles.length}`
+        ].join(" | ")
+      );
+    }
+  )
+);
   // ----------------------------------------------------------
   // Auto index
   // ----------------------------------------------------------
@@ -178,6 +254,7 @@ export function activate(
     void scanProject(
       indexer,
       indexState,
+       projectUnderstanding,
       logger
     );
   }
@@ -190,6 +267,7 @@ export function activate(
 async function scanProject(
   indexer: ProjectIndexer,
   indexState: IndexState,
+  projectUnderstanding: ProjectUnderstanding,
   logger: Logger,
   force = false
 ): Promise<void> {
@@ -220,6 +298,10 @@ async function scanProject(
       },
 
       async progress => {
+
+        // ----------------------------------------------------
+        // Stage 1 - Project Index
+        // ----------------------------------------------------
 
         progress.report({
           message:
@@ -256,11 +338,56 @@ async function scanProject(
           message:
             `${index.files.size} files indexed`
         });
+
+        // ----------------------------------------------------
+        // Stage 2 - Project Understanding
+        // ----------------------------------------------------
+
+        progress.report({
+          message:
+            "Building project understanding..."
+        });
+
+        const projectModel =
+          projectUnderstanding.initialize(
+            index
+          );
+
+        logger.info(
+          "Project understanding ready",
+          {
+            languages:
+              projectModel.languages,
+
+            frameworks:
+              projectModel.frameworks,
+
+            files:
+              projectModel.files.length,
+
+            entryPoints:
+              projectModel.entryPoints.length,
+
+            modules:
+              projectModel.modules.length,
+
+            configFiles:
+              projectModel.configFiles.length,
+
+            testFiles:
+              projectModel.testFiles.length
+          }
+        );
+
+        progress.report({
+          message:
+            "Project understanding ready"
+        });
       }
     );
 
     vscode.window.showInformationMessage(
-      "M3 project index is ready."
+      "M3 project index and project understanding are ready."
     );
 
   } catch (error) {

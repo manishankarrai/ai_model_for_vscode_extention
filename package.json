@@ -52,6 +52,10 @@
       {
         "command": "m3.clearConversation",
         "title": "M3: Clear Conversation"
+      } ,
+      {
+        "command": "m3.inspectProject",
+        "title": "M3: Inspect Project"
       }
     ],
     "configuration": {

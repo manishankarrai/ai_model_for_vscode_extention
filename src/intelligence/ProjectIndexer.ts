@@ -2,7 +2,6 @@ import * as vscode from "vscode";
 
 import {
   IndexedFile,
-  ProjectFile,
   ProjectIndex
 } from "../models/types";
 
