@@ -304,6 +304,7 @@ export class Agent {
           request,
           accessToken
         );
+      this.logger.info("answer of api call .........................." , response);
 
       this.taskState.setAICalls(
         response.usage.aiApiCalls
@@ -312,6 +313,7 @@ export class Agent {
       this.conversation.addAssistantMessage(
         response.answer
       );
+      //actions need here so we print all answers
 
       this.taskState.complete();
 

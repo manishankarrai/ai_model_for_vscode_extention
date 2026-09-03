@@ -13,7 +13,7 @@ export class Logger {
 
   warn(message: string, data?: unknown): void {
     this.write("WARN", message, data);
-  }
+  } //
 
   error(message: string, error?: unknown): void {
     this.write("ERROR", message, error);
