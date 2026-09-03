@@ -1,9 +1,6 @@
-import * as vscode from "vscode";
-
 import {
   ProjectIndex,
-  SearchResult,
-  SymbolInfo
+  SearchResult
 } from "../models/types";
 
 import {
@@ -15,11 +12,20 @@ import {
 } from "../intelligence/DependencyResolver";
 
 import {
-  SymbolRelationshipGraph,
-  SymbolRelationship
+  SymbolRelationshipGraph
 } from "../intelligence/SymbolRelationshipGraph";
 
+import {
+  Logger
+} from "../utils/Logger";
+
+import {
+  InvestigationState
+} from "../intelligence/InvestigationState";
+
+
 export interface InvestigationStep {
+
   step: number;
 
   action:
@@ -37,7 +43,9 @@ export interface InvestigationStep {
   completed: boolean;
 }
 
+
 export interface InvestigationEvidence {
+
   path: string;
 
   score: number;
@@ -53,7 +61,9 @@ export interface InvestigationEvidence {
   relatedSymbols?: string[];
 }
 
+
 export interface InvestigationResult {
+
   question: string;
 
   steps: InvestigationStep[];
@@ -71,15 +81,16 @@ export interface InvestigationResult {
     | "max_chars";
 }
 
+
 export interface InvestigationOptions {
+
   maxSteps?: number;
 
   maxFiles?: number;
 
   maxChars?: number;
-
-  maxSearchResults?: number;
 }
+
 
 export class InvestigationEngine {
 
@@ -89,14 +100,31 @@ export class InvestigationEngine {
   private readonly dependencyResolver =
     new DependencyResolver();
 
-  private readonly symbolGraph =
-    new SymbolRelationshipGraph();
+  private readonly symbolGraph:
+    SymbolRelationshipGraph;
+
+
+  constructor(
+    private readonly logger: Logger
+  ) {
+
+    this.symbolGraph =
+      new SymbolRelationshipGraph(
+        logger
+      );
+  }
+
 
   async investigate(
     question: string,
     index: ProjectIndex,
+    rankedResults: SearchResult[],
     options: InvestigationOptions = {}
   ): Promise<InvestigationResult> {
+
+    // --------------------------------------------------------
+    // Investigation limits
+    // --------------------------------------------------------
 
     const maxSteps =
       options.maxSteps ?? 10;
@@ -107,68 +135,90 @@ export class InvestigationEngine {
     const maxChars =
       options.maxChars ?? 30000;
 
-    const maxSearchResults =
-      options.maxSearchResults ?? 10;
 
-    /*
-     * Build the initial symbol graph from the
-     * already-existing ProjectIndex.
-     *
-     * No filesystem scan happens here.
-     */
-    this.symbolGraph.build(
-      index
-    );
+    const state =
+      new InvestigationState();
+
 
     const steps:
       InvestigationStep[] = [];
 
+
     const evidence:
       InvestigationEvidence[] = [];
 
-    const filesInvestigated =
-      new Set<string>();
 
-    const pendingFiles:
-      string[] = [];
+    // --------------------------------------------------------
+    // Start investigation
+    // --------------------------------------------------------
 
-    const queuedFiles =
-      new Set<string>();
+    this.logger.info(
+      "Starting investigation",
+      {
+        question,
 
-    const followedDependencies =
-      new Set<string>();
+        maxSteps,
 
-    const followedSymbols =
-      new Set<string>();
+        maxFiles,
 
-    let totalChars = 0;
+        maxChars,
 
-    /*
-     * ------------------------------------------------
-     * STEP 1: Initial search
-     * ------------------------------------------------
-     */
+        rankedResults:
+          rankedResults.length
+      }
+    );
+
+
+    // --------------------------------------------------------
+    // Build symbol relationship graph
+    // --------------------------------------------------------
+
+    this.logger.info(
+      "Building symbol relationship graph"
+    );
+
+
+    this.symbolGraph.build(
+      index
+    );
+
+
+    // ========================================================
+    // STEP 1
+    // Ranked search results
+    // ========================================================
+    //
+    // Search and ranking have already happened in Agent.
+    //
+    // Agent:
+    //
+    // SearchEngine
+    //      ↓
+    // RelevanceRanker
+    //      ↓
+    // rankedResults
+    //      ↓
+    // InvestigationEngine
+    //
+    // Therefore this engine does NOT search again.
+    // ========================================================
 
     if (
-      steps.length >= maxSteps
+      state.steps >= maxSteps
     ) {
+
       return this.createResult(
         question,
         steps,
         evidence,
-        filesInvestigated,
+        state,
         "max_steps"
       );
     }
 
-    const searchResults =
-      await this.tools.search.execute(
-        question,
-        index,
-        maxSearchResults
-      );
 
     steps.push({
+
       step:
         steps.length + 1,
 
@@ -179,112 +229,184 @@ export class InvestigationEngine {
         question,
 
       reason:
-        "find files relevant to the user's question",
+        "use ranked search results as investigation starting points",
 
       files:
-        searchResults.map(
-          result => result.path
+        rankedResults.map(
+          result =>
+            result.path
         ),
 
       completed:
         true
     });
 
-    /*
-     * Queue initial search results.
-     */
+
+    state.incrementSteps();
+
+
+    // --------------------------------------------------------
+    // Queue ranked files
+    // --------------------------------------------------------
+    //
+    // RelevanceRanker has already sorted these files.
+    //
+    // InvestigationState uses FIFO ordering.
+    //
+    // Therefore the highest-ranked files are investigated
+    // first.
+    // --------------------------------------------------------
+
     for (
-      const result of searchResults
+      const result of rankedResults
     ) {
 
-      if (
-        !queuedFiles.has(
-          result.path
-        )
-      ) {
-
-        pendingFiles.push(
-          result.path
-        );
-
-        queuedFiles.add(
-          result.path
-        );
-      }
+      state.queueFile(
+        result.path
+      );
     }
 
-    /*
-     * ------------------------------------------------
-     * Investigation loop
-     * ------------------------------------------------
-     */
+
+    this.logger.info(
+      "Ranked investigation results queued",
+      {
+        results:
+          rankedResults.length,
+
+        queuedFiles:
+          state.pendingCount
+      }
+    );
+
+
+    // ========================================================
+    // Investigation loop
+    // ========================================================
 
     while (
-      pendingFiles.length > 0
+      state.pendingCount > 0
     ) {
 
+      // ------------------------------------------------------
+      // Step budget
+      // ------------------------------------------------------
+
       if (
-        steps.length >= maxSteps
+        state.steps >= maxSteps
       ) {
+
+        this.logger.info(
+          "Investigation stopped: maximum steps reached",
+          {
+            steps:
+              state.steps,
+
+            maxSteps
+          }
+        );
+
 
         return this.createResult(
           question,
           steps,
           evidence,
-          filesInvestigated,
+          state,
           "max_steps"
         );
       }
 
+
+      // ------------------------------------------------------
+      // File budget
+      // ------------------------------------------------------
+
       if (
-        filesInvestigated.size >=
-        maxFiles
+        state.investigatedCount >= maxFiles
       ) {
+
+        this.logger.info(
+          "Investigation stopped: maximum files reached",
+          {
+            files:
+              state.investigatedCount,
+
+            maxFiles
+          }
+        );
+
 
         return this.createResult(
           question,
           steps,
           evidence,
-          filesInvestigated,
+          state,
           "max_files"
         );
       }
 
+
+      // ------------------------------------------------------
+      // Character budget
+      // ------------------------------------------------------
+
       if (
-        totalChars >= maxChars
+        state.totalChars >= maxChars
       ) {
+
+        this.logger.info(
+          "Investigation stopped: maximum characters reached",
+          {
+            totalChars:
+              state.totalChars,
+
+            maxChars
+          }
+        );
+
 
         return this.createResult(
           question,
           steps,
           evidence,
-          filesInvestigated,
+          state,
           "max_chars"
         );
       }
 
+
+      // ------------------------------------------------------
+      // Get next file
+      // ------------------------------------------------------
+
       const filePath =
-        pendingFiles.shift();
+        state.nextFile();
+
 
       if (!filePath) {
         break;
       }
 
+
+      // ------------------------------------------------------
+      // Prevent duplicate investigation
+      // ------------------------------------------------------
+
       if (
-        filesInvestigated.has(
+        state.isInvestigated(
           filePath
         )
       ) {
+
         continue;
       }
 
-      /*
-       * ------------------------------------------------
-       * Read file
-       * ------------------------------------------------
-       */
+
+      // ======================================================
+      // READ FILE
+      // ======================================================
 
       let content: string;
+
 
       try {
 
@@ -293,19 +415,60 @@ export class InvestigationEngine {
             filePath
           );
 
-      } catch {
+      } catch (error) {
+
+        this.logger.info(
+          "Failed to read investigation file",
+          {
+            file:
+              filePath,
+
+            error:
+              error instanceof Error
+                ? error.message
+                : String(error)
+          }
+        );
+
 
         continue;
       }
 
-      filesInvestigated.add(
+
+      // ------------------------------------------------------
+      // Track investigated file
+      // ------------------------------------------------------
+
+      state.markInvestigated(
         filePath
       );
 
-      totalChars +=
-        content.length;
+
+      state.addChars(
+        content.length
+      );
+
+
+      // ------------------------------------------------------
+      // Record read step
+      // ------------------------------------------------------
+
+      if (
+        state.steps >= maxSteps
+      ) {
+
+        return this.createResult(
+          question,
+          steps,
+          evidence,
+          state,
+          "max_steps"
+        );
+      }
+
 
       steps.push({
+
         step:
           steps.length + 1,
 
@@ -326,11 +489,34 @@ export class InvestigationEngine {
           true
       });
 
-      /*
-       * ------------------------------------------------
-       * Build symbol reference relationships
-       * ------------------------------------------------
-       */
+
+      state.incrementSteps();
+
+
+      this.logger.info(
+        "Investigation file completed",
+        {
+          file:
+            filePath,
+
+          steps:
+            state.steps,
+
+          investigatedFiles:
+            state.investigatedCount,
+
+          pendingFiles:
+            state.pendingCount,
+
+          totalChars:
+            state.totalChars
+        }
+      );
+
+
+      // ======================================================
+      // BUILD FILE RELATIONSHIPS
+      // ======================================================
 
       this.symbolGraph
         .addFileReferenceRelationships(
@@ -339,27 +525,48 @@ export class InvestigationEngine {
           index
         );
 
+
+      await this.symbolGraph
+        .buildCallRelationships(
+          filePath,
+          index
+        );
+
+
+      // ------------------------------------------------------
+      // Get indexed file
+      // ------------------------------------------------------
+
       const indexedFile =
         index.files.get(
           filePath
         );
 
+
       if (!indexedFile) {
+
+        this.logger.info(
+          "Indexed file metadata not found",
+          {
+            file:
+              filePath
+          }
+        );
+
         continue;
       }
 
-      /*
-       * ------------------------------------------------
-       * Create evidence
-       * ------------------------------------------------
-       */
+
+      // ======================================================
+      // CREATE EVIDENCE
+      // ======================================================
 
       const relatedSymbols:
         string[] = [];
 
+
       for (
-        const symbol
-          of indexedFile.symbols
+        const symbol of indexedFile.symbols
       ) {
 
         const relationships =
@@ -367,6 +574,7 @@ export class InvestigationEngine {
             .getRelatedSymbols(
               symbol
             );
+
 
         for (
           const relationship
@@ -379,6 +587,7 @@ export class InvestigationEngine {
         }
       }
 
+
       const uniqueRelatedSymbols =
         [
           ...new Set(
@@ -386,20 +595,22 @@ export class InvestigationEngine {
           )
         ];
 
+
       evidence.push({
+
         path:
           filePath,
 
         score:
           this.getEvidenceScore(
             filePath,
-            searchResults
+            rankedResults
           ),
 
         reason:
           this.getEvidenceReason(
             filePath,
-            searchResults
+            rankedResults
           ),
 
         content:
@@ -407,7 +618,7 @@ export class InvestigationEngine {
             content,
             maxChars -
               (
-                totalChars -
+                state.totalChars -
                 content.length
               )
           ),
@@ -428,11 +639,34 @@ export class InvestigationEngine {
           uniqueRelatedSymbols
       });
 
-      /*
-       * ------------------------------------------------
-       * Follow dependencies
-       * ------------------------------------------------
-       */
+
+      this.logger.info(
+        "Investigation evidence created",
+        {
+          file:
+            filePath,
+
+          score:
+            this.getEvidenceScore(
+              filePath,
+              rankedResults
+            ),
+
+          symbols:
+            indexedFile.symbols.length,
+
+          dependencies:
+            indexedFile.dependencies.length,
+
+          relatedSymbols:
+            uniqueRelatedSymbols.length
+        }
+      );
+
+
+      // ======================================================
+      // FOLLOW DEPENDENCIES
+      // ======================================================
 
       for (
         const dependency
@@ -440,28 +674,36 @@ export class InvestigationEngine {
       ) {
 
         if (
-          steps.length >= maxSteps
+          state.steps >= maxSteps
         ) {
           break;
         }
 
-        const dependencyKey =
-          [
-            dependency.source,
-            dependency.target
-          ].join("->");
+
+        // ----------------------------------------------------
+        // Dependency deduplication
+        // ----------------------------------------------------
 
         if (
-          followedDependencies.has(
-            dependencyKey
+          state.hasFollowedDependency(
+            dependency.source,
+            dependency.target
           )
         ) {
+
           continue;
         }
 
-        followedDependencies.add(
-          dependencyKey
+
+        state.markDependencyFollowed(
+          dependency.source,
+          dependency.target
         );
+
+
+        // ----------------------------------------------------
+        // Resolve dependency
+        // ----------------------------------------------------
 
         const resolvedFiles =
           await this.dependencyResolver.resolve(
@@ -469,11 +711,18 @@ export class InvestigationEngine {
             index
           );
 
+
         if (
           resolvedFiles.length === 0
         ) {
+
           continue;
         }
+
+
+        // ----------------------------------------------------
+        // Queue dependency files
+        // ----------------------------------------------------
 
         for (
           const resolvedFile
@@ -481,30 +730,34 @@ export class InvestigationEngine {
         ) {
 
           if (
-            filesInvestigated.has(
+            state.isInvestigated(
               resolvedFile
             )
           ) {
+
             continue;
           }
 
-          if (
-            !queuedFiles.has(
-              resolvedFile
-            )
-          ) {
 
-            pendingFiles.push(
-              resolvedFile
-            );
-
-            queuedFiles.add(
-              resolvedFile
-            );
-          }
+          state.queueFile(
+            resolvedFile
+          );
         }
 
+
+        // ----------------------------------------------------
+        // Record dependency step
+        // ----------------------------------------------------
+
+        if (
+          state.steps >= maxSteps
+        ) {
+          break;
+        }
+
+
         steps.push({
+
           step:
             steps.length + 1,
 
@@ -523,13 +776,42 @@ export class InvestigationEngine {
           completed:
             true
         });
+
+
+        state.incrementSteps();
+
+
+        this.logger.info(
+          "Following dependency",
+          {
+            source:
+              dependency.source,
+
+            target:
+              dependency.target,
+
+            resolvedFiles
+          }
+        );
       }
 
-      /*
-       * ------------------------------------------------
-       * Follow related symbols
-       * ------------------------------------------------
-       */
+
+      // ======================================================
+      // FOLLOW ACTUAL CALL RELATIONSHIPS
+      // ======================================================
+      //
+      // IMPORTANT:
+      //
+      // The graph may contain different relationship types:
+      //
+      // - call
+      // - same_file
+      // - name_reference
+      // - dependency
+      //
+      // Investigation must only follow actual CALL edges
+      // when performing call-chain exploration.
+      // ======================================================
 
       for (
         const symbol
@@ -537,29 +819,11 @@ export class InvestigationEngine {
       ) {
 
         if (
-          steps.length >= maxSteps
+          state.steps >= maxSteps
         ) {
           break;
         }
 
-        const symbolKey =
-          [
-            symbol.filePath,
-            symbol.name,
-            symbol.line
-          ].join(":");
-
-        if (
-          followedSymbols.has(
-            symbolKey
-          )
-        ) {
-          continue;
-        }
-
-        followedSymbols.add(
-          symbolKey
-        );
 
         const relationships =
           this.symbolGraph
@@ -567,44 +831,99 @@ export class InvestigationEngine {
               symbol
             );
 
+
+        // ----------------------------------------------------
+        // Only actual calls
+        // ----------------------------------------------------
+
+        const callRelationships =
+          relationships.filter(
+            relationship =>
+              relationship.type === "call"
+          );
+
+
         for (
           const relationship
-            of relationships
+            of callRelationships
         ) {
 
           if (
-            steps.length >= maxSteps
+            state.steps >= maxSteps
           ) {
             break;
           }
 
+
           const targetFile =
             relationship.to.filePath;
 
+
+          // --------------------------------------------------
+          // Already investigated
+          // --------------------------------------------------
+
           if (
-            filesInvestigated.has(
+            state.isInvestigated(
               targetFile
             )
           ) {
+
             continue;
           }
 
+
+          // --------------------------------------------------
+          // Already followed
+          // --------------------------------------------------
+
           if (
-            !queuedFiles.has(
-              targetFile
+            state.hasFollowedCall(
+              relationship.from.filePath,
+              relationship.from.name,
+              relationship.to.filePath,
+              relationship.to.name
             )
           ) {
 
-            pendingFiles.push(
-              targetFile
-            );
-
-            queuedFiles.add(
-              targetFile
-            );
+            continue;
           }
 
+
+          state.markCallFollowed(
+
+            relationship.from.filePath,
+
+            relationship.from.name,
+
+            relationship.to.filePath,
+
+            relationship.to.name
+          );
+
+
+          // --------------------------------------------------
+          // Queue target file
+          // --------------------------------------------------
+
+          const queued =
+            state.queueFile(
+              targetFile
+            );
+
+
+          if (!queued) {
+
+            continue;
+          }
+
+
+          // --------------------------------------------------
+          // Record call step
+          // --------------------------------------------------
+
           steps.push({
+
             step:
               steps.length + 1,
 
@@ -624,50 +943,117 @@ export class InvestigationEngine {
             completed:
               true
           });
+
+
+          state.incrementSteps();
+
+
+          this.logger.info(
+            "Following call relationship",
+            {
+              from:
+                relationship.from.name,
+
+              fromFile:
+                relationship.from.filePath,
+
+              to:
+                relationship.to.name,
+
+              toFile:
+                relationship.to.filePath
+            }
+          );
         }
       }
     }
+
+
+    // ========================================================
+    // INVESTIGATION COMPLETED
+    // ========================================================
+
+    this.logger.info(
+      "Investigation completed",
+      {
+        question,
+
+        steps:
+          state.steps,
+
+        investigatedFiles:
+          state.investigatedCount,
+
+        totalChars:
+          state.totalChars,
+
+        evidence:
+          evidence.length
+      }
+    );
+
 
     return this.createResult(
       question,
       steps,
       evidence,
-      filesInvestigated,
+      state,
       "completed"
     );
   }
 
+
+  // ========================================================
+  // Evidence score
+  // ========================================================
+
   private getEvidenceScore(
     filePath: string,
-    searchResults: SearchResult[]
+    rankedResults: SearchResult[]
   ): number {
 
     const result =
-      searchResults.find(
+      rankedResults.find(
         item =>
           item.path === filePath
       );
+
 
     return result?.score ?? 0;
   }
 
+
+  // ========================================================
+  // Evidence reason
+  // ========================================================
+
   private getEvidenceReason(
     filePath: string,
-    searchResults: SearchResult[]
+    rankedResults: SearchResult[]
   ): string {
 
     const result =
-      searchResults.find(
+      rankedResults.find(
         item =>
           item.path === filePath
       );
 
+
     if (!result) {
-      return "file discovered through project relationships";
+
+      return (
+        "file discovered through project relationships"
+      );
     }
+
 
     return result.reason;
   }
+
+
+  // ========================================================
+  // Limit content
+  // ========================================================
 
   private limitContent(
     content: string,
@@ -677,8 +1063,10 @@ export class InvestigationEngine {
     if (
       remainingChars <= 0
     ) {
+
       return "";
     }
+
 
     return content.slice(
       0,
@@ -689,11 +1077,20 @@ export class InvestigationEngine {
     );
   }
 
+
+  // ========================================================
+  // Create result
+  // ========================================================
+
   private createResult(
     question: string,
+
     steps: InvestigationStep[],
+
     evidence: InvestigationEvidence[],
-    filesInvestigated: Set<string>,
+
+    state: InvestigationState,
+
     stoppedReason:
       | "completed"
       | "max_steps"
@@ -702,6 +1099,7 @@ export class InvestigationEngine {
   ): InvestigationResult {
 
     return {
+
       question,
 
       steps,
@@ -709,7 +1107,7 @@ export class InvestigationEngine {
       evidence,
 
       filesInvestigated:
-        [...filesInvestigated],
+        state.getInvestigatedFiles(),
 
       completed:
         stoppedReason ===

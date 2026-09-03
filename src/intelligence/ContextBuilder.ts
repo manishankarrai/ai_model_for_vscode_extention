@@ -14,27 +14,41 @@ import {
   readTextFile
 } from "../utils/FileUtils";
 
+
 export interface ContextOptions {
   maxFiles: number;
   maxChars: number;
 }
 
+
 export interface InvestigationContextEvidence {
   path: string;
+
   score: number;
+
   reason: string;
+
   content?: string;
+
   symbols?: string[];
+
   dependencies?: string[];
+
   relatedSymbols?: string[];
 }
+
 
 interface ContextRegion {
   startLine: number;
   endLine: number;
 }
 
+
 export class ContextBuilder {
+
+  // ========================================================
+  // Build final AI context
+  // ========================================================
 
   async build(
     index: ProjectIndex,
@@ -45,18 +59,25 @@ export class ContextBuilder {
       InvestigationContextEvidence[] = []
   ): Promise<AIContext> {
 
-    const files = [];
+    const files: {
+      path: string;
+      content: string;
+    }[] = [];
+
 
     let totalChars = 0;
 
-    /*
-     * --------------------------------------------------------
-     * Merge normal ranking with investigation evidence.
-     *
-     * Investigation-discovered files receive a strong
-     * relevance boost and are moved toward the front.
-     * --------------------------------------------------------
-     */
+
+    this.logContextStart(
+      rankedFiles,
+      investigationEvidence,
+      options
+    );
+
+
+    // --------------------------------------------------------
+    // Merge normal ranking + investigation evidence
+    // --------------------------------------------------------
 
     const finalRankedFiles =
       this.mergeInvestigationEvidence(
@@ -64,25 +85,48 @@ export class ContextBuilder {
         investigationEvidence
       );
 
+
+    this.logFinalRanking(
+      finalRankedFiles
+    );
+
+
+    // ========================================================
+    // Build context files
+    // ========================================================
+
     for (
       const result of finalRankedFiles
     ) {
+
+      // ------------------------------------------------------
+      // maxFiles
+      // ------------------------------------------------------
 
       if (
         files.length >=
         options.maxFiles
       ) {
+
         break;
       }
+
+
+      // ------------------------------------------------------
+      // Get indexed file
+      // ------------------------------------------------------
 
       const indexed =
         index.files.get(
           result.path
         );
 
+
       if (!indexed) {
+
         continue;
       }
+
 
       try {
 
@@ -93,13 +137,27 @@ export class ContextBuilder {
             )
           );
 
+
+        // ----------------------------------------------------
+        // maxChars
+        // ----------------------------------------------------
+
         const remaining =
           options.maxChars -
           totalChars;
 
-        if (remaining <= 0) {
+
+        if (
+          remaining <= 0
+        ) {
+
           break;
         }
+
+
+        // ----------------------------------------------------
+        // Build focused context
+        // ----------------------------------------------------
 
         const focusedContent =
           this.buildFocusedContent(
@@ -109,22 +167,52 @@ export class ContextBuilder {
             remaining
           );
 
-        if (!focusedContent) {
+
+        if (
+          !focusedContent
+        ) {
+
           continue;
         }
 
+
         files.push({
-          path: result.path,
-          content: focusedContent
+
+          path:
+            result.path,
+
+          content:
+            focusedContent
         });
+
 
         totalChars +=
           focusedContent.length;
 
-      } catch {
+
+        this.logFileAdded(
+          result,
+          focusedContent,
+          totalChars,
+          files.length
+        );
+
+
+      } catch (error) {
+
+        this.logFileReadFailure(
+          result.path,
+          error
+        );
+
         continue;
       }
     }
+
+
+    // ========================================================
+    // Project summary
+    // ========================================================
 
     const indexSummary =
       this.createIndexSummary(
@@ -133,18 +221,49 @@ export class ContextBuilder {
         investigationEvidence
       );
 
+
+    this.loggerInfo(
+      "ContextBuilder completed",
+      {
+        files:
+          files.length,
+
+        totalChars,
+
+        maxFiles:
+          options.maxFiles,
+
+        maxChars:
+          options.maxChars,
+
+        investigationEvidence:
+          investigationEvidence.length
+      }
+    );
+
+
     return {
+
       files,
+
       indexSummary,
 
       evidence:
         finalRankedFiles.map(
           result => ({
-            path: result.path,
-            score: result.score,
-            reason: result.reason,
+
+            path:
+              result.path,
+
+            score:
+              result.score,
+
+            reason:
+              result.reason,
+
             matchedSymbols:
               result.matchedSymbols ?? [],
+
             matchedTerms:
               result.matchedTerms ?? []
           })
@@ -152,9 +271,10 @@ export class ContextBuilder {
     };
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Merge investigation evidence
-  // ----------------------------------------------------------
+  // ========================================================
 
   private mergeInvestigationEvidence(
     rankedFiles: SearchResult[],
@@ -165,9 +285,11 @@ export class ContextBuilder {
     const resultMap =
       new Map<string, SearchResult>();
 
-    /*
-     * First keep the existing ranking.
-     */
+
+    // --------------------------------------------------------
+    // 1. Add normal search/ranked results
+    // --------------------------------------------------------
+
     for (
       const result of rankedFiles
     ) {
@@ -176,9 +298,11 @@ export class ContextBuilder {
         result.path,
         {
           ...result,
+
           matchedSymbols: [
             ...(result.matchedSymbols ?? [])
           ],
+
           matchedTerms: [
             ...(result.matchedTerms ?? [])
           ]
@@ -186,111 +310,486 @@ export class ContextBuilder {
       );
     }
 
-    /*
-     * Investigation evidence gets a strong boost.
-     *
-     * This means:
-     *
-     * normal search
-     *       +
-     * project relevance
-     *       +
-     * investigation evidence
-     *
-     * produces the final ranking.
-     */
+
+    // --------------------------------------------------------
+    // 2. Merge investigation evidence
+    // --------------------------------------------------------
+
     for (
-      const evidence
+      const investigation
         of investigationEvidence
     ) {
 
       const existing =
         resultMap.get(
-          evidence.path
+          investigation.path
         );
+
+
+      // ======================================================
+      // File already exists in search results
+      // ======================================================
 
       if (existing) {
 
-        existing.score += 25;
+        const investigationBoost =
+          this.calculateInvestigationBoost(
+            investigation
+          );
 
-        existing.reason +=
-          "; investigation evidence";
 
-        if (
-          evidence.symbols
-        ) {
+        existing.score +=
+          investigationBoost;
 
-          existing.matchedSymbols = [
-            ...(existing.matchedSymbols ?? []),
-            ...evidence.symbols
-          ];
-        }
 
-        if (
-          evidence.relatedSymbols
-        ) {
+        existing.reason =
+          this.mergeReasons(
+            existing.reason,
+            investigation.reason
+          );
 
-          existing.matchedSymbols = [
-            ...(existing.matchedSymbols ?? []),
-            ...evidence.relatedSymbols
-              .map(symbol =>
-                symbol.split(" ")[0]
-              )
-          ];
-        }
+
+        // ----------------------------------------------------
+        // Merge symbols
+        // ----------------------------------------------------
+
+        existing.matchedSymbols = [
+          ...(existing.matchedSymbols ?? []),
+
+          ...(investigation.symbols ?? [])
+        ];
+
+
+        // ----------------------------------------------------
+        // Merge related symbols
+        // ----------------------------------------------------
+
+        existing.matchedSymbols = [
+          ...(existing.matchedSymbols ?? []),
+
+          ...this.extractRelatedSymbolNames(
+            investigation.relatedSymbols ?? []
+          )
+        ];
+
 
         this.removeDuplicates(
           existing
         );
 
-      } else {
 
-        /*
-         * A file discovered by investigation may not
-         * have appeared in the original SearchEngine
-         * results.
-         *
-         * We still want it in the final context.
-         */
-        resultMap.set(
-          evidence.path,
-          {
-            path:
-              evidence.path,
-
-            score:
-              25 +
-              evidence.score,
-
-            matches:
-              0,
-
-            reason:
-              "investigation evidence",
-
-            matchedSymbols:
-              [
-                ...(evidence.symbols ?? [])
-              ],
-
-            matchedTerms:
-              []
-          }
-        );
+        continue;
       }
+
+
+      // ======================================================
+      // File discovered only by investigation
+      // ======================================================
+
+      const investigationScore =
+        this.calculateInvestigationScore(
+          investigation
+        );
+
+
+      resultMap.set(
+        investigation.path,
+        {
+
+          path:
+            investigation.path,
+
+          score:
+            investigationScore,
+
+          matches:
+            0,
+
+          reason:
+            this.buildInvestigationReason(
+              investigation
+            ),
+
+          matchedSymbols:
+            [
+              ...(investigation.symbols ?? []),
+
+              ...this.extractRelatedSymbolNames(
+                investigation.relatedSymbols ?? []
+              )
+            ],
+
+          matchedTerms:
+            []
+        }
+      );
     }
 
-    return Array.from(
-      resultMap.values()
-    ).sort(
-      (a, b) =>
-        b.score - a.score
+
+    // --------------------------------------------------------
+    // 3. Final cleanup
+    // --------------------------------------------------------
+
+    const results =
+      Array.from(
+        resultMap.values()
+      );
+
+
+    for (
+      const result of results
+    ) {
+
+      this.removeDuplicates(
+        result
+      );
+    }
+
+
+    // --------------------------------------------------------
+    // 4. Sort by final relevance
+    // --------------------------------------------------------
+
+    results.sort(
+      (a, b) => {
+
+        if (
+          b.score !== a.score
+        ) {
+
+          return b.score - a.score;
+        }
+
+
+        // If scores are equal, prefer files with
+        // more matched symbols.
+
+        const aSymbols =
+          a.matchedSymbols?.length ?? 0;
+
+        const bSymbols =
+          b.matchedSymbols?.length ?? 0;
+
+
+        if (
+          bSymbols !== aSymbols
+        ) {
+
+          return bSymbols - aSymbols;
+        }
+
+
+        // Finally keep deterministic ordering.
+
+        return a.path.localeCompare(
+          b.path
+        );
+      }
+    );
+
+
+    return results;
+  }
+
+
+  // ========================================================
+  // Investigation boost
+  // ========================================================
+
+  private calculateInvestigationBoost(
+    evidence:
+      InvestigationContextEvidence
+  ): number {
+
+    /*
+     * Investigation evidence should matter more than
+     * a simple boolean "+25".
+     *
+     * Base boost:
+     *   20
+     *
+     * Evidence score:
+     *   up to 30 additional points
+     *
+     * Symbol evidence:
+     *   +5
+     *
+     * Dependency evidence:
+     *   +5
+     *
+     * Related symbol evidence:
+     *   +5
+     */
+
+    const baseBoost =
+      20;
+
+
+    const scoreBoost =
+      Math.min(
+        Math.max(
+          evidence.score,
+          0
+        ),
+        30
+      );
+
+
+    const symbolBoost =
+      (
+        evidence.symbols?.length ?? 0
+      ) > 0
+        ? 5
+        : 0;
+
+
+    const dependencyBoost =
+      (
+        evidence.dependencies?.length ?? 0
+      ) > 0
+        ? 5
+        : 0;
+
+
+    const relatedSymbolBoost =
+      (
+        evidence.relatedSymbols?.length ?? 0
+      ) > 0
+        ? 5
+        : 0;
+
+
+    return (
+      baseBoost +
+      scoreBoost +
+      symbolBoost +
+      dependencyBoost +
+      relatedSymbolBoost
     );
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
+  // Investigation-only file score
+  // ========================================================
+
+  private calculateInvestigationScore(
+    evidence:
+      InvestigationContextEvidence
+  ): number {
+
+    /*
+     * Investigation-only files did not appear in the
+     * original search results.
+     *
+     * Give them a meaningful score so they can enter
+     * the final context.
+     */
+
+    const baseScore =
+      30;
+
+
+    const evidenceScore =
+      Math.min(
+        Math.max(
+          evidence.score,
+          0
+        ),
+        30
+      );
+
+
+    const symbolScore =
+      Math.min(
+        (evidence.symbols?.length ?? 0) * 3,
+        15
+      );
+
+
+    const dependencyScore =
+      Math.min(
+        (evidence.dependencies?.length ?? 0) * 2,
+        10
+      );
+
+
+    const relatedSymbolScore =
+      Math.min(
+        (evidence.relatedSymbols?.length ?? 0) * 2,
+        10
+      );
+
+
+    return (
+      baseScore +
+      evidenceScore +
+      symbolScore +
+      dependencyScore +
+      relatedSymbolScore
+    );
+  }
+
+
+  // ========================================================
+  // Investigation reason
+  // ========================================================
+
+  private buildInvestigationReason(
+    evidence:
+      InvestigationContextEvidence
+  ): string {
+
+    const reasons: string[] = [];
+
+
+    reasons.push(
+      "discovered during investigation"
+    );
+
+
+    if (
+      evidence.reason
+    ) {
+
+      reasons.push(
+        evidence.reason
+      );
+    }
+
+
+    if (
+      (
+        evidence.symbols?.length ?? 0
+      ) > 0
+    ) {
+
+      reasons.push(
+        `${evidence.symbols!.length} relevant symbols`
+      );
+    }
+
+
+    if (
+      (
+        evidence.dependencies?.length ?? 0
+      ) > 0
+    ) {
+
+      reasons.push(
+        `${evidence.dependencies!.length} dependencies`
+      );
+    }
+
+
+    if (
+      (
+        evidence.relatedSymbols?.length ?? 0
+      ) > 0
+    ) {
+
+      reasons.push(
+        `${evidence.relatedSymbols!.length} related symbols`
+      );
+    }
+
+
+    return reasons.join(
+      "; "
+    );
+  }
+
+
+  // ========================================================
+  // Merge reasons
+  // ========================================================
+
+  private mergeReasons(
+    existingReason: string,
+    investigationReason: string
+  ): string {
+
+    if (
+      !investigationReason
+    ) {
+
+      return existingReason;
+    }
+
+
+    if (
+      existingReason.includes(
+        investigationReason
+      )
+    ) {
+
+      return existingReason;
+    }
+
+
+    if (
+      existingReason
+    ) {
+
+      return (
+        `${existingReason}; investigation: ${investigationReason}`
+      );
+    }
+
+
+    return (
+      `investigation: ${investigationReason}`
+    );
+  }
+
+
+  // ========================================================
+  // Extract related symbol names
+  // ========================================================
+
+  private extractRelatedSymbolNames(
+    relatedSymbols: string[]
+  ): string[] {
+
+    return relatedSymbols
+      .map(
+        symbol => {
+
+          /*
+           * Relationship metadata currently looks like:
+           *
+           * "authenticate (call)"
+           *
+           * or:
+           *
+           * "UserService (dependency)"
+           *
+           * Keep the symbol name and remove the relationship
+           * suffix.
+           */
+
+          const match =
+            symbol.match(
+              /^(.+?)\s+\([^)]+\)$/
+            );
+
+
+          if (match) {
+
+            return match[1].trim();
+          }
+
+
+          return symbol.trim();
+        }
+      )
+      .filter(Boolean);
+  }
+
+
+  // ========================================================
   // Focused context
-  // ----------------------------------------------------------
+  // ========================================================
 
   private buildFocusedContent(
     content: string,
@@ -302,13 +801,18 @@ export class ContextBuilder {
     const lines =
       content.split(/\r?\n/);
 
-    if (lines.length === 0) {
+
+    if (
+      lines.length === 0
+    ) {
+
       return "";
     }
 
+
     // --------------------------------------------------------
     // Priority 1:
-    // Focus around matched symbols.
+    // Matched symbols
     // --------------------------------------------------------
 
     const symbolRegions =
@@ -318,7 +822,10 @@ export class ContextBuilder {
         lines.length
       );
 
-    if (symbolRegions.length > 0) {
+
+    if (
+      symbolRegions.length > 0
+    ) {
 
       const focused =
         this.extractRegions(
@@ -326,12 +833,15 @@ export class ContextBuilder {
           symbolRegions
         );
 
+
       if (
         focused.length <=
         maxChars
       ) {
+
         return focused;
       }
+
 
       return this.limitFocusedContent(
         lines,
@@ -340,9 +850,10 @@ export class ContextBuilder {
       );
     }
 
+
     // --------------------------------------------------------
     // Priority 2:
-    // Focus around matched term occurrences.
+    // Matched terms
     // --------------------------------------------------------
 
     const termRegions =
@@ -352,7 +863,10 @@ export class ContextBuilder {
         lines
       );
 
-    if (termRegions.length > 0) {
+
+    if (
+      termRegions.length > 0
+    ) {
 
       const focused =
         this.extractRegions(
@@ -360,12 +874,15 @@ export class ContextBuilder {
           termRegions
         );
 
+
       if (
         focused.length <=
         maxChars
       ) {
+
         return focused;
       }
+
 
       return this.limitFocusedContent(
         lines,
@@ -374,9 +891,10 @@ export class ContextBuilder {
       );
     }
 
+
     // --------------------------------------------------------
     // Priority 3:
-    // Beginning-of-file fallback.
+    // Beginning of file
     // --------------------------------------------------------
 
     return content.slice(
@@ -385,9 +903,10 @@ export class ContextBuilder {
     );
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Find symbol locations
-  // ----------------------------------------------------------
+  // ========================================================
 
   private findSymbolRegions(
     result: SearchResult,
@@ -400,14 +919,18 @@ export class ContextBuilder {
         result.matchedSymbols ?? []
       );
 
+
     if (
       matchedSymbols.size === 0
     ) {
+
       return [];
     }
 
+
     const regions:
       ContextRegion[] = [];
+
 
     for (
       const symbol of index.symbols
@@ -417,16 +940,20 @@ export class ContextBuilder {
         symbol.filePath !==
         result.path
       ) {
+
         continue;
       }
+
 
       if (
         !matchedSymbols.has(
           symbol.name
         )
       ) {
+
         continue;
       }
+
 
       const line =
         Math.max(
@@ -434,11 +961,13 @@ export class ContextBuilder {
           symbol.line - 1
         );
 
+
       const startLine =
         Math.max(
           0,
           line - 15
         );
+
 
       const endLine =
         Math.min(
@@ -446,20 +975,23 @@ export class ContextBuilder {
           line + 35
         );
 
+
       regions.push({
         startLine,
         endLine
       });
     }
 
+
     return this.mergeRegions(
       regions
     );
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Find matched term locations
-  // ----------------------------------------------------------
+  // ========================================================
 
   private findTermRegions(
     result: SearchResult,
@@ -471,27 +1003,35 @@ export class ContextBuilder {
       [
         ...new Set(
           (result.matchedTerms ?? [])
-            .map(term =>
-              term.toLowerCase().trim()
+            .map(
+              term =>
+                term
+                  .toLowerCase()
+                  .trim()
             )
             .filter(Boolean)
         )
       ];
 
+
     if (
       matchedTerms.length === 0
     ) {
+
       return [];
     }
 
+
     const regions:
       ContextRegion[] = [];
+
 
     for (
       const term of matchedTerms
     ) {
 
       let occurrences = 0;
+
 
       for (
         let lineIndex = 0;
@@ -502,20 +1042,28 @@ export class ContextBuilder {
         const line =
           lines[lineIndex];
 
+
         const lowerLine =
           line.toLowerCase();
 
+
         if (
-          !lowerLine.includes(term)
+          !lowerLine.includes(
+            term
+          )
         ) {
+
           continue;
         }
+
 
         if (
           occurrences >= 3
         ) {
+
           break;
         }
+
 
         const startLine =
           Math.max(
@@ -523,37 +1071,46 @@ export class ContextBuilder {
             lineIndex - 8
           );
 
+
         const endLine =
           Math.min(
             totalLines - 1,
             lineIndex + 12
           );
 
+
         regions.push({
           startLine,
           endLine
         });
 
+
         occurrences++;
       }
     }
+
 
     return this.mergeRegions(
       regions
     );
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Merge overlapping regions
-  // ----------------------------------------------------------
+  // ========================================================
 
   private mergeRegions(
     regions: ContextRegion[]
   ): ContextRegion[] {
 
-    if (regions.length <= 1) {
+    if (
+      regions.length <= 1
+    ) {
+
       return regions;
     }
+
 
     const sorted =
       [...regions].sort(
@@ -562,8 +1119,10 @@ export class ContextBuilder {
           b.startLine
       );
 
+
     const merged:
       ContextRegion[] = [];
+
 
     for (
       const region of sorted
@@ -574,6 +1133,7 @@ export class ContextBuilder {
           merged.length - 1
         ];
 
+
       if (!previous) {
 
         merged.push({
@@ -582,6 +1142,7 @@ export class ContextBuilder {
 
         continue;
       }
+
 
       if (
         region.startLine <=
@@ -602,12 +1163,14 @@ export class ContextBuilder {
       }
     }
 
+
     return merged;
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Extract regions
-  // ----------------------------------------------------------
+  // ========================================================
 
   private extractRegions(
     lines: string[],
@@ -615,6 +1178,7 @@ export class ContextBuilder {
   ): string {
 
     const output: string[] = [];
+
 
     for (
       const region of regions
@@ -629,10 +1193,14 @@ export class ContextBuilder {
         );
       }
 
+
       for (
         let line =
           region.startLine;
-        line <= region.endLine;
+
+        line <=
+        region.endLine;
+
         line++
       ) {
 
@@ -642,12 +1210,16 @@ export class ContextBuilder {
       }
     }
 
-    return output.join("\n");
+
+    return output.join(
+      "\n"
+    );
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Enforce character limit
-  // ----------------------------------------------------------
+  // ========================================================
 
   private limitFocusedContent(
     lines: string[],
@@ -657,17 +1229,22 @@ export class ContextBuilder {
 
     const output: string[] = [];
 
+
     let totalChars = 0;
+
 
     for (
       const region of regions
     ) {
 
       if (
-        totalChars >= maxChars
+        totalChars >=
+        maxChars
       ) {
+
         break;
       }
+
 
       if (
         output.length > 0
@@ -676,36 +1253,46 @@ export class ContextBuilder {
         const separator =
           "\n// ... omitted unrelated code ...\n";
 
+
         if (
           totalChars +
           separator.length >
           maxChars
         ) {
+
           break;
         }
+
 
         output.push(
           separator
         );
 
+
         totalChars +=
           separator.length;
       }
 
+
       for (
         let line =
           region.startLine;
-        line <= region.endLine;
+
+        line <=
+        region.endLine;
+
         line++
       ) {
 
         const lineContent =
           lines[line];
 
+
         const addition =
           output.length === 0
             ? lineContent
             : `\n${lineContent}`;
+
 
         if (
           totalChars +
@@ -717,7 +1304,10 @@ export class ContextBuilder {
             maxChars -
             totalChars;
 
-          if (remaining > 0) {
+
+          if (
+            remaining > 0
+          ) {
 
             output.push(
               addition.slice(
@@ -727,53 +1317,69 @@ export class ContextBuilder {
             );
           }
 
+
           return output.join("");
         }
+
 
         output.push(
           addition
         );
+
 
         totalChars +=
           addition.length;
       }
     }
 
+
     return output.join("");
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Project summary
-  // ----------------------------------------------------------
+  // ========================================================
 
   private createIndexSummary(
     index: ProjectIndex,
-    projectModel: ProjectModel | undefined,
+    projectModel:
+      ProjectModel | undefined,
     investigationEvidence:
       InvestigationContextEvidence[] = []
   ): string {
 
     const lines: string[] = [];
 
+
     lines.push(
       "Project Overview"
     );
+
 
     lines.push(
       `Indexed files: ${index.files.size}`
     );
 
+
     lines.push(
       `Symbols: ${index.symbols.length}`
     );
+
 
     lines.push(
       `Dependencies: ${index.dependencies.length}`
     );
 
+
     lines.push(
       `Index version: ${index.version}`
     );
+
+
+    // --------------------------------------------------------
+    // Investigation summary
+    // --------------------------------------------------------
 
     if (
       investigationEvidence.length > 0
@@ -785,13 +1391,18 @@ export class ContextBuilder {
         `Investigation evidence files: ${investigationEvidence.length}`
       );
 
+
       lines.push(
         "Files discovered during investigation:"
       );
 
+
       for (
         const evidence
-          of investigationEvidence.slice(0, 20)
+          of investigationEvidence.slice(
+            0,
+            20
+          )
       ) {
 
         lines.push(
@@ -800,46 +1411,80 @@ export class ContextBuilder {
       }
     }
 
-    if (projectModel) {
+
+    // --------------------------------------------------------
+    // Project model
+    // --------------------------------------------------------
+
+    if (
+      projectModel
+    ) {
 
       lines.push("");
 
-      lines.push(
-        `Languages: ${projectModel.languages.join(", ") || "unknown"}`
-      );
 
       lines.push(
-        `Frameworks: ${projectModel.frameworks.join(", ") || "none detected"}`
+        `Languages: ${
+          projectModel.languages.join(", ") ||
+          "unknown"
+        }`
       );
 
-      lines.push(
-        `Entry points: ${projectModel.entryPoints.length}`
-      );
 
       lines.push(
-        `Modules: ${projectModel.modules.length}`
+        `Frameworks: ${
+          projectModel.frameworks.join(", ") ||
+          "none detected"
+        }`
       );
 
-      lines.push(
-        `Configuration files: ${projectModel.configFiles.length}`
-      );
 
       lines.push(
-        `Test files: ${projectModel.testFiles.length}`
+        `Entry points: ${
+          projectModel.entryPoints.length
+        }`
       );
+
+
+      lines.push(
+        `Modules: ${
+          projectModel.modules.length
+        }`
+      );
+
+
+      lines.push(
+        `Configuration files: ${
+          projectModel.configFiles.length
+        }`
+      );
+
+
+      lines.push(
+        `Test files: ${
+          projectModel.testFiles.length
+        }`
+      );
+
+
+      // ------------------------------------------------------
+      // Entry points
+      // ------------------------------------------------------
 
       if (
         projectModel.entryPoints.length > 0
       ) {
 
         lines.push("");
+
         lines.push(
           "Entry Points:"
         );
 
+
         for (
-          const entryPoint of
-          projectModel.entryPoints
+          const entryPoint
+            of projectModel.entryPoints
         ) {
 
           lines.push(
@@ -848,18 +1493,28 @@ export class ContextBuilder {
         }
       }
 
+
+      // ------------------------------------------------------
+      // Modules
+      // ------------------------------------------------------
+
       if (
         projectModel.modules.length > 0
       ) {
 
         lines.push("");
+
         lines.push(
           "Modules:"
         );
 
+
         for (
-          const module of
-          projectModel.modules.slice(0, 30)
+          const module
+            of projectModel.modules.slice(
+              0,
+              30
+            )
         ) {
 
           lines.push(
@@ -868,18 +1523,28 @@ export class ContextBuilder {
         }
       }
 
+
+      // ------------------------------------------------------
+      // Configuration
+      // ------------------------------------------------------
+
       if (
         projectModel.configFiles.length > 0
       ) {
 
         lines.push("");
+
         lines.push(
           "Configuration:"
         );
 
+
         for (
-          const file of
-          projectModel.configFiles.slice(0, 30)
+          const file
+            of projectModel.configFiles.slice(
+              0,
+              30
+            )
         ) {
 
           lines.push(
@@ -888,18 +1553,28 @@ export class ContextBuilder {
         }
       }
 
+
+      // ------------------------------------------------------
+      // Tests
+      // ------------------------------------------------------
+
       if (
         projectModel.testFiles.length > 0
       ) {
 
         lines.push("");
+
         lines.push(
           "Tests:"
         );
 
+
         for (
-          const file of
-          projectModel.testFiles.slice(0, 30)
+          const file
+            of projectModel.testFiles.slice(
+              0,
+              30
+            )
         ) {
 
           lines.push(
@@ -909,12 +1584,16 @@ export class ContextBuilder {
       }
     }
 
-    return lines.join("\n");
+
+    return lines.join(
+      "\n"
+    );
   }
 
-  // ----------------------------------------------------------
+
+  // ========================================================
   // Remove duplicate metadata
-  // ----------------------------------------------------------
+  // ========================================================
 
   private removeDuplicates(
     result: SearchResult
@@ -927,11 +1606,145 @@ export class ContextBuilder {
         )
       ];
 
+
     result.matchedSymbols =
       [
         ...new Set(
           result.matchedSymbols ?? []
         )
       ];
+  }
+
+
+  // ========================================================
+  // Logging helpers
+  // ========================================================
+
+  private logContextStart(
+    rankedFiles: SearchResult[],
+    investigationEvidence:
+      InvestigationContextEvidence[],
+    options: ContextOptions
+  ): void {
+
+    this.loggerInfo(
+      "ContextBuilder starting",
+      {
+        rankedFiles:
+          rankedFiles.length,
+
+        investigationEvidence:
+          investigationEvidence.length,
+
+        maxFiles:
+          options.maxFiles,
+
+        maxChars:
+          options.maxChars
+      }
+    );
+  }
+
+
+  private logFinalRanking(
+    results: SearchResult[]
+  ): void {
+
+    this.loggerInfo(
+      "Final context ranking created",
+      {
+        total:
+          results.length,
+
+        topFiles:
+          results
+            .slice(0, 10)
+            .map(
+              result => ({
+                path:
+                  result.path,
+
+                score:
+                  result.score,
+
+                reason:
+                  result.reason
+              })
+            )
+      }
+    );
+  }
+
+
+  private logFileAdded(
+    result: SearchResult,
+    content: string,
+    totalChars: number,
+    fileCount: number
+  ): void {
+
+    this.loggerInfo(
+      "Context file added",
+      {
+        path:
+          result.path,
+
+        score:
+          result.score,
+
+        characters:
+          content.length,
+
+        totalChars,
+
+        fileCount
+      }
+    );
+  }
+
+
+  private logFileReadFailure(
+    filePath: string,
+    error: unknown
+  ): void {
+
+    this.loggerInfo(
+      "Failed to read context file",
+      {
+        file:
+          filePath,
+
+        error:
+          error instanceof Error
+            ? error.message
+            : String(error)
+      }
+    );
+  }
+
+
+  /*
+   * ContextBuilder does not currently receive Logger
+   * through its constructor.
+   *
+   * Keep logging optional so this class remains compatible
+   * with the existing Agent construction:
+   *
+   *     new ContextBuilder()
+   *
+   * If Logger is injected later, this method can be replaced
+   * with this.logger.info(...).
+   */
+  private loggerInfo(
+    message: string,
+    data?: unknown
+  ): void {
+
+    // Intentionally empty.
+    //
+    // Agent already logs the major ContextBuilder stages.
+    //
+    // Keeping this helper allows detailed logging to be added
+    // later without changing the ContextBuilder API.
   }
 }

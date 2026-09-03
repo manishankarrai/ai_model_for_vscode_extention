@@ -1,15 +1,28 @@
+import * as vscode from "vscode";
+
 import {
   ProjectIndex,
   SymbolInfo
 } from "../models/types";
 
+import {
+  Logger
+} from "../utils/Logger";
+
 export interface SymbolRelationship {
   from: SymbolInfo;
   to: SymbolInfo;
+
   type:
     | "same_file"
     | "name_reference"
+    | "call"
     | "dependency";
+
+  direction:
+    | "outgoing"
+    | "incoming";
+
   reason: string;
 }
 
@@ -18,16 +31,27 @@ export class SymbolRelationshipGraph {
   private readonly relationships =
     new Map<string, SymbolRelationship[]>();
 
+  constructor(
+    private readonly logger: Logger
+  ) {}
+
   build(
     index: ProjectIndex
   ): void {
 
     this.relationships.clear();
 
-    /*
-     * Build relationships between symbols that belong
-     * to the same file.
-     */
+    this.logger.info(
+      "Building symbol relationship graph",
+      {
+        files:
+          index.files.size,
+
+        symbols:
+          index.symbols.length
+      }
+    );
+
     for (
       const indexed of index.files.values()
     ) {
@@ -58,9 +82,18 @@ export class SymbolRelationshipGraph {
             symbols[j];
 
           this.addRelationship({
-            from: source,
-            to: target,
-            type: "same_file",
+            from:
+              source,
+
+            to:
+              target,
+
+            type:
+              "same_file",
+
+            direction:
+              "outgoing",
+
             reason:
               "symbols are defined in the same file"
           });
@@ -68,70 +101,148 @@ export class SymbolRelationshipGraph {
       }
     }
 
-    /*
-     * Build relationships based on symbol names
-     * appearing in other indexed files.
-     *
-     * Example:
-     *
-     * GenerateToken()
-     *      ↓
-     * JwtSecret
-     */
+    this.logger.info(
+      "Symbol relationship graph built",
+      {
+        relationships:
+          this.getRelationshipCount()
+      }
+    );
+  }
+
+  async buildCallRelationships(
+    filePath: string,
+    index: ProjectIndex
+  ): Promise<void> {
+
+    const indexedFile =
+      index.files.get(
+        filePath
+      );
+
+    if (!indexedFile) {
+      return;
+    }
+
+    const symbols =
+      indexedFile.symbols;
+
+    if (
+      symbols.length === 0
+    ) {
+      return;
+    }
+
+    this.logger.info(
+      "Building call relationships",
+      {
+        file:
+          filePath,
+
+        symbols:
+          symbols.length
+      }
+    );
+
+    const document =
+      await vscode.workspace.openTextDocument(
+        vscode.Uri.file(
+          indexedFile.file.absolutePath
+        )
+      );
+
+    let discovered =
+      0;
+
     for (
-      const indexed of index.files.values()
+      const symbol of symbols
     ) {
 
-      const contentSymbols =
-        indexed.symbols;
+      try {
 
-      for (
-        const source of contentSymbols
-      ) {
+        const position =
+          new vscode.Position(
+            Math.max(
+              0,
+              symbol.line - 1
+            ),
+            Math.max(
+              0,
+              symbol.character
+            )
+          );
+
+        const hierarchy =
+          await vscode.commands.executeCommand<
+            vscode.CallHierarchyItem[] | undefined
+          >(
+            "vscode.prepareCallHierarchy",
+            document.uri,
+            position
+          );
+
+        if (
+          !hierarchy ||
+          hierarchy.length === 0
+        ) {
+          continue;
+        }
 
         for (
-          const target of index.symbols
+          const item of hierarchy
         ) {
 
-          if (
-            source.name === target.name
-          ) {
-            continue;
-          }
+          await this.addOutgoingCalls(
+            item,
+            symbol,
+            index
+          );
 
-          if (
-            source.filePath ===
-            target.filePath
-          ) {
-            continue;
-          }
+          await this.addIncomingCalls(
+            item,
+            symbol,
+            index
+          );
 
-          /*
-           * We cannot know the exact call/reference
-           * relationship from the symbol index alone.
-           *
-           * Therefore this graph only creates a
-           * relationship when the target symbol's
-           * name appears in the source symbol's file.
-           */
-          const sourceFile =
-            index.files.get(
-              source.filePath
-            );
-
-          if (!sourceFile) {
-            continue;
-          }
-
-          /*
-           * The actual source text is not stored in
-           * ProjectIndex, so this relationship is
-           * intentionally handled by the async method
-           * below instead.
-           */
+          discovered++;
         }
+
+      } catch (error) {
+
+        this.logger.info(
+          "Call hierarchy unavailable for symbol",
+          {
+            file:
+              filePath,
+
+            symbol:
+              symbol.name,
+
+            error:
+              error instanceof Error
+                ? error.message
+                : String(error)
+          }
+        );
       }
     }
+
+    this.logger.info(
+      "Call relationships built",
+      {
+        file:
+          filePath,
+
+        symbols:
+          symbols.length,
+
+        hierarchyItems:
+          discovered,
+
+        relationships:
+          this.getRelationshipCount()
+      }
+    );
   }
 
   addFileReferenceRelationships(
@@ -175,9 +286,18 @@ export class SymbolRelationshipGraph {
       ) {
 
         this.addRelationship({
-          from: source,
-          to: target,
-          type: "name_reference",
+          from:
+            source,
+
+          to:
+            target,
+
+          type:
+            "name_reference",
+
+          direction:
+            "outgoing",
+
           reason:
             `symbol "${target.name}" is referenced from ${filePath}`
         });
@@ -214,9 +334,18 @@ export class SymbolRelationshipGraph {
         ) {
 
           this.addRelationship({
-            from: source,
-            to: target,
-            type: "dependency",
+            from:
+              source,
+
+            to:
+              target,
+
+            type:
+              "dependency",
+
+            direction:
+              "outgoing",
+
             reason:
               `${sourceFile} depends on ${targetFile}`
           });
@@ -229,11 +358,12 @@ export class SymbolRelationshipGraph {
     symbol: SymbolInfo
   ): SymbolRelationship[] {
 
-    const key =
-      this.symbolKey(symbol);
-
     return [
-      ...(this.relationships.get(key) ?? [])
+      ...(
+        this.relationships.get(
+          this.symbolKey(symbol)
+        ) ?? []
+      )
     ];
   }
 
@@ -250,7 +380,8 @@ export class SymbolRelationshipGraph {
     ) {
 
       for (
-        const relationship of relationships
+        const relationship
+          of relationships
       ) {
 
         if (
@@ -276,7 +407,8 @@ export class SymbolRelationshipGraph {
     return results;
   }
 
-  getRelationships(): SymbolRelationship[] {
+  getRelationships():
+    SymbolRelationship[] {
 
     const results:
       SymbolRelationship[] = [];
@@ -292,6 +424,182 @@ export class SymbolRelationshipGraph {
     }
 
     return results;
+  }
+
+  private async addOutgoingCalls(
+    item: vscode.CallHierarchyItem,
+    sourceSymbol: SymbolInfo,
+    index: ProjectIndex
+  ): Promise<void> {
+
+    const calls =
+      await vscode.commands.executeCommand<
+        vscode.CallHierarchyOutgoingCall[] | undefined
+      >(
+        "vscode.provideOutgoingCalls",
+        item
+      );
+
+    if (!calls) {
+      return;
+    }
+
+    for (
+      const call of calls
+    ) {
+
+      const target =
+        this.findSymbol(
+          call.to,
+          index
+        );
+
+      if (!target) {
+        continue;
+      }
+
+      this.addRelationship({
+        from:
+          sourceSymbol,
+
+        to:
+          target,
+
+        type:
+          "call",
+
+        direction:
+          "outgoing",
+
+        reason:
+          `${sourceSymbol.name} calls ${target.name}`
+      });
+    }
+  }
+
+  private async addIncomingCalls(
+    item: vscode.CallHierarchyItem,
+    targetSymbol: SymbolInfo,
+    index: ProjectIndex
+  ): Promise<void> {
+
+    const calls =
+      await vscode.commands.executeCommand<
+        vscode.CallHierarchyIncomingCall[] | undefined
+      >(
+        "vscode.provideIncomingCalls",
+        item
+      );
+
+    if (!calls) {
+      return;
+    }
+
+    for (
+      const call of calls
+    ) {
+
+      const source =
+        this.findSymbol(
+          call.from,
+          index
+        );
+
+      if (!source) {
+        continue;
+      }
+
+      this.addRelationship({
+        from:
+          source,
+
+        to:
+          targetSymbol,
+
+        type:
+          "call",
+
+        direction:
+          "incoming",
+
+        reason:
+          `${source.name} calls ${targetSymbol.name}`
+      });
+    }
+  }
+
+  private findSymbol(
+    item: vscode.CallHierarchyItem,
+    index: ProjectIndex
+  ): SymbolInfo | undefined {
+
+    const filePath =
+      this.getRelativePath(
+        item.uri,
+        index
+      );
+
+    if (!filePath) {
+      return undefined;
+    }
+
+    const line =
+      item.range.start.line + 1;
+
+    const sameLine =
+      index.symbols.filter(
+        symbol =>
+          symbol.filePath === filePath &&
+          symbol.line === line
+      );
+
+    if (
+      sameLine.length === 1
+    ) {
+      return sameLine[0];
+    }
+
+    const sameName =
+      index.symbols.find(
+        symbol =>
+          symbol.filePath === filePath &&
+          symbol.name === item.name
+      );
+
+    return sameName;
+  }
+
+  private getRelativePath(
+    uri: vscode.Uri,
+    index: ProjectIndex
+  ): string | undefined {
+
+    const absolutePath =
+      uri.fsPath.replace(
+        /\\/g,
+        "/"
+      );
+
+    for (
+      const indexed of index.files.values()
+    ) {
+
+      const indexedPath =
+        indexed.file.absolutePath
+          .replace(
+            /\\/g,
+            "/"
+          );
+
+      if (
+        indexedPath === absolutePath
+      ) {
+
+        return indexed.file.path;
+      }
+    }
+
+    return undefined;
   }
 
   private addRelationship(
@@ -316,7 +624,9 @@ export class SymbolRelationshipGraph {
           item.to.name ===
             relationship.to.name &&
           item.type ===
-            relationship.type
+            relationship.type &&
+          item.direction ===
+            relationship.direction
       );
 
     if (
@@ -369,5 +679,21 @@ export class SymbolRelationshipGraph {
       symbol.name,
       symbol.line
     ].join(":");
+  }
+
+  private getRelationshipCount(): number {
+
+    let count = 0;
+
+    for (
+      const relationships
+        of this.relationships.values()
+    ) {
+
+      count +=
+        relationships.length;
+    }
+
+    return count;
   }
 }

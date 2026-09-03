@@ -43,6 +43,7 @@ export class SymbolIndexer {
       return result;
 
     } catch {
+
       return [];
     }
   }
@@ -56,7 +57,8 @@ export class SymbolIndexer {
     for (const symbol of symbols) {
 
       result.push({
-        name: symbol.name,
+        name:
+          symbol.name,
 
         kind:
           vscode.SymbolKind[
@@ -66,10 +68,15 @@ export class SymbolIndexer {
         filePath,
 
         line:
-          symbol.range.start.line + 1
+          symbol.range.start.line + 1,
+
+        character:
+          symbol.range.start.character
       });
 
-      if (symbol.children.length > 0) {
+      if (
+        symbol.children.length > 0
+      ) {
 
         this.flatten(
           symbol.children,

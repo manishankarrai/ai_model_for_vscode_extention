@@ -23,6 +23,7 @@ export interface SymbolInfo {
   kind: string;
   filePath: string;
   line: number;
+  character: number;
 }
 
 export interface DependencyInfo {
