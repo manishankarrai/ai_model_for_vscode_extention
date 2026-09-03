@@ -1,3 +1,4 @@
+
 import * as vscode from "vscode";
 
 import { Agent } from "../agent/Agent";
@@ -51,7 +52,8 @@ export class M3ViewProvider
 
           this.post({
             type: "error",
-            error: "Something went wrong while processing your request.",
+            error:
+              "Something went wrong while processing your request.",
           });
         }
       },
@@ -92,20 +94,18 @@ export class M3ViewProvider
   private async handleQuestion(
     question: string
   ): Promise<void> {
-    const trimmedQuestion = question.trim();
+    const trimmedQuestion =
+      question.trim();
 
     if (!trimmedQuestion) {
       return;
     }
 
-    /*
-     * Prevent multiple requests from being sent
-     * while another request is running.
-     */
     if (this.isProcessing) {
       this.post({
         type: "error",
-        error: "M3 is already processing another request.",
+        error:
+          "M3 is already processing another request.",
       });
 
       return;
@@ -140,7 +140,9 @@ export class M3ViewProvider
         requestId: response.request_id,
         model: response.model,
       });
+
     } catch (error) {
+
       const message =
         this.getErrorMessage(error);
 
@@ -153,7 +155,9 @@ export class M3ViewProvider
         "M3 request failed",
         error
       );
+
     } finally {
+
       this.isProcessing = false;
 
       this.post({
@@ -165,11 +169,16 @@ export class M3ViewProvider
   private getErrorMessage(
     error: unknown
   ): string {
-    if (error instanceof AuthenticationError) {
+
+    if (
+      error instanceof AuthenticationError
+    ) {
       return error.message;
     }
 
-    if (error instanceof Error) {
+    if (
+      error instanceof Error
+    ) {
       return error.message;
     }
 
@@ -179,6 +188,7 @@ export class M3ViewProvider
   private post(
     message: WebviewResponse
   ): void {
+
     if (!this.view) {
       return;
     }
@@ -191,7 +201,9 @@ export class M3ViewProvider
   private getHtml(
     webview: vscode.Webview
   ): string {
-    const nonce = this.getNonce();
+
+    const nonce =
+      this.getNonce();
 
     const cspSource =
       webview.cspSource;
@@ -260,6 +272,10 @@ body {
   height: 100vh;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Header                                                                     */
+/* -------------------------------------------------------------------------- */
+
 .header {
   display: flex;
 
@@ -286,6 +302,20 @@ body {
   gap: 6px;
 }
 
+.model {
+  margin-left: auto;
+
+  font-size: 10px;
+
+  opacity: 0.5;
+
+  font-weight: normal;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Messages                                                                   */
+/* -------------------------------------------------------------------------- */
+
 .messages {
   flex: 1;
 
@@ -303,8 +333,6 @@ body {
 
   border-radius: 8px;
 
-  white-space: pre-wrap;
-
   word-break: break-word;
 
   line-height: 1.5;
@@ -317,6 +345,8 @@ body {
   border:
     1px solid
     var(--vscode-textBlockQuote-border);
+
+  white-space: pre-wrap;
 }
 
 .assistant {
@@ -326,6 +356,8 @@ body {
   border:
     1px solid
     var(--vscode-panel-border);
+
+  white-space: normal;
 }
 
 .error {
@@ -338,13 +370,216 @@ body {
   border:
     1px solid
     var(--vscode-inputValidation-errorBorder);
+
+  white-space: pre-wrap;
 }
 
-.thinking {
-  opacity: 0.7;
+/* -------------------------------------------------------------------------- */
+/* Markdown                                                                   */
+/* -------------------------------------------------------------------------- */
 
+.markdown {
+  width: 100%;
+}
+
+.markdown p {
+  margin:
+    0 0 10px 0;
+}
+
+.markdown p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4 {
+  margin-top: 16px;
+
+  margin-bottom: 8px;
+
+  line-height: 1.3;
+}
+
+.markdown h1 {
+  font-size: 1.35em;
+}
+
+.markdown h2 {
+  font-size: 1.2em;
+}
+
+.markdown h3 {
+  font-size: 1.08em;
+}
+
+.markdown h4 {
+  font-size: 1em;
+}
+
+.markdown strong {
+  font-weight: 700;
+}
+
+.markdown em {
   font-style: italic;
 }
+
+.markdown code.inline-code {
+  padding:
+    2px 5px;
+
+  border-radius: 4px;
+
+  background:
+    var(--vscode-textCodeBlock-background);
+
+  color:
+    var(--vscode-textPreformat-foreground);
+
+  font-family:
+    var(--vscode-editor-font-family);
+
+  font-size: 0.9em;
+}
+
+.markdown ul,
+.markdown ol {
+  margin-top: 6px;
+
+  margin-bottom: 10px;
+
+  padding-left: 24px;
+}
+
+.markdown li {
+  margin-bottom: 4px;
+}
+
+.markdown hr {
+  border: none;
+
+  border-top:
+    1px solid
+    var(--vscode-panel-border);
+
+  margin:
+    14px 0;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Code blocks                                                                */
+/* -------------------------------------------------------------------------- */
+
+.code-block {
+  margin:
+    12px 0;
+
+  border:
+    1px solid
+    var(--vscode-panel-border);
+
+  border-radius: 6px;
+
+  overflow: hidden;
+
+  background:
+    var(--vscode-textCodeBlock-background);
+}
+
+.code-header {
+  display: flex;
+
+  align-items: center;
+
+  justify-content: space-between;
+
+  min-height: 30px;
+
+  padding:
+    4px 8px;
+
+  border-bottom:
+    1px solid
+    var(--vscode-panel-border);
+
+  background:
+    var(--vscode-editorGroupHeader-tabsBackground);
+
+  font-size: 11px;
+
+  opacity: 0.9;
+}
+
+.code-language {
+  font-family:
+    var(--vscode-editor-font-family);
+
+  text-transform: lowercase;
+
+  opacity: 0.8;
+}
+
+.copy-button {
+  min-height: 24px;
+
+  padding:
+    3px 8px;
+
+  border:
+    1px solid
+    var(--vscode-button-border);
+
+  border-radius: 4px;
+
+  color:
+    var(--vscode-button-secondaryForeground);
+
+  background:
+    var(--vscode-button-secondaryBackground);
+
+  cursor: pointer;
+
+  font-size: 11px;
+}
+
+.copy-button:hover {
+  background:
+    var(--vscode-button-secondaryHoverBackground);
+}
+
+.code-content {
+  display: block;
+
+  margin: 0;
+
+  padding: 10px 12px;
+
+  overflow-x: auto;
+
+  white-space: pre;
+
+  font-family:
+    var(--vscode-editor-font-family);
+
+  font-size:
+    var(--vscode-editor-font-size);
+
+  line-height: 1.45;
+
+  color:
+    var(--vscode-editor-foreground);
+}
+
+.code-content code {
+  font-family:
+    inherit;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Usage                                                                      */
+/* -------------------------------------------------------------------------- */
 
 .usage {
   margin-top: -6px;
@@ -358,8 +593,13 @@ body {
   opacity: 0.6;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Status                                                                     */
+/* -------------------------------------------------------------------------- */
+
 .status {
-  padding: 5px 10px;
+  padding:
+    5px 10px;
 
   font-size: 11px;
 
@@ -367,6 +607,10 @@ body {
 
   min-height: 24px;
 }
+
+/* -------------------------------------------------------------------------- */
+/* Composer                                                                   */
+/* -------------------------------------------------------------------------- */
 
 .composer {
   display: flex;
@@ -391,7 +635,8 @@ textarea {
 
   max-height: 150px;
 
-  padding: 8px 10px;
+  padding:
+    8px 10px;
 
   color:
     var(--vscode-input-foreground);
@@ -434,7 +679,8 @@ button {
 
   border-radius: 5px;
 
-  padding: 8px 14px;
+  padding:
+    8px 14px;
 
   color:
     var(--vscode-button-foreground);
@@ -462,6 +708,10 @@ button:disabled {
   cursor: not-allowed;
 }
 
+/* -------------------------------------------------------------------------- */
+/* Empty state                                                                */
+/* -------------------------------------------------------------------------- */
+
 .empty {
   display: flex;
 
@@ -478,16 +728,6 @@ button:disabled {
   padding: 20px;
 }
 
-.model {
-  margin-left: auto;
-
-  font-size: 10px;
-
-  opacity: 0.5;
-
-  font-weight: normal;
-}
-
 </style>
 
 </head>
@@ -499,12 +739,16 @@ button:disabled {
   <div class="header">
 
     <div class="header-title">
-      <span>M3 AI Agent</span>
+
+      <span>
+        M3 AI Agent
+      </span>
 
       <span
         id="model"
         class="model"
       ></span>
+
     </div>
 
   </div>
@@ -575,7 +819,502 @@ const empty =
 
 let processing = false;
 
-function addMessage(text, type) {
+/* -------------------------------------------------------------------------- */
+/* HTML escaping                                                              */
+/* -------------------------------------------------------------------------- */
+
+function escapeHtml(value) {
+
+  return String(value ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#039;");
+}
+
+/* -------------------------------------------------------------------------- */
+/* Inline Markdown                                                            */
+/* -------------------------------------------------------------------------- */
+
+function renderInlineMarkdown(text) {
+
+  let value =
+    escapeHtml(text);
+
+  const inlineCodes = [];
+
+  value =
+    value.replace(
+      /\`([^\`]+)\`/g,
+      (_, code) => {
+
+        const index =
+          inlineCodes.length;
+
+        inlineCodes.push(
+          '<code class="inline-code">' +
+          code +
+          '</code>'
+        );
+
+        return (
+          "___M3_INLINE_CODE_" +
+          index +
+          "___"
+        );
+      }
+    );
+
+  value =
+    value.replace(
+      /\\*\\*([^*]+)\\*\\*/g,
+      "<strong>$1</strong>"
+    );
+
+  value =
+    value.replace(
+      /\\*([^*]+)\\*/g,
+      "<em>$1</em>"
+    );
+
+  value =
+    value.replace(
+      /___M3_INLINE_CODE_(\\d+)___/g,
+      (_, index) =>
+        inlineCodes[
+          Number(index)
+        ]
+    );
+
+  return value;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Markdown renderer                                                          */
+/* -------------------------------------------------------------------------- */
+
+function renderMarkdown(markdown) {
+
+  const text =
+    String(markdown ?? "")
+      .replace(/\\r\\n/g, "\\n")
+      .replace(/\\r/g, "\\n");
+
+  const codeBlocks = [];
+
+  const withoutCode =
+    text.replace(
+      /\`\`\`([a-zA-Z0-9_+#.-]*)\\n([\\s\\S]*?)\`\`\`/g,
+      (_, language, code) => {
+
+        const index =
+          codeBlocks.length;
+
+        codeBlocks.push({
+          language:
+            language || "code",
+
+          code:
+            code.replace(/\\n$/, "")
+        });
+
+        return (
+          "\\n___M3_CODE_BLOCK_" +
+          index +
+          "___\\n"
+        );
+      }
+    );
+
+  const lines =
+    withoutCode.split("\\n");
+
+  const output = [];
+
+  let paragraph = [];
+
+  let listType = null;
+
+  function flushParagraph() {
+
+    if (
+      paragraph.length === 0
+    ) {
+      return;
+    }
+
+    const content =
+      paragraph
+        .join("\\n")
+        .trim();
+
+    if (content) {
+
+      output.push(
+        "<p>" +
+        renderInlineMarkdown(
+          content
+        ).replace(/\\n/g, "<br>") +
+        "</p>"
+      );
+    }
+
+    paragraph = [];
+  }
+
+  function closeList() {
+
+    if (!listType) {
+      return;
+    }
+
+    output.push(
+      "</" +
+      listType +
+      ">"
+    );
+
+    listType = null;
+  }
+
+  for (
+    let i = 0;
+    i < lines.length;
+    i++
+  ) {
+
+    const line =
+      lines[i];
+
+    const trimmed =
+      line.trim();
+
+    if (!trimmed) {
+
+      flushParagraph();
+
+      closeList();
+
+      continue;
+    }
+
+    const codeMatch =
+      trimmed.match(
+        /^___M3_CODE_BLOCK_(\\d+)___$/
+      );
+
+    if (codeMatch) {
+
+      flushParagraph();
+
+      closeList();
+
+      const codeBlock =
+        codeBlocks[
+          Number(codeMatch[1])
+        ];
+
+      if (codeBlock) {
+
+        output.push(
+          createCodeBlock(
+            codeBlock.language,
+            codeBlock.code
+          )
+        );
+      }
+
+      continue;
+    }
+
+    const headingMatch =
+      line.match(
+        /^\\s*(#{1,4})\\s+(.+?)\\s*$/
+      );
+
+    if (headingMatch) {
+
+      flushParagraph();
+
+      closeList();
+
+      const level =
+        headingMatch[1].length;
+
+      output.push(
+        "<h" +
+        level +
+        ">" +
+        renderInlineMarkdown(
+          headingMatch[2]
+        ) +
+        "</h" +
+        level +
+        ">"
+      );
+
+      continue;
+    }
+
+    if (
+      /^\\s*(---+|\\*\\*\\*+)\\s*$/.test(line)
+    ) {
+
+      flushParagraph();
+
+      closeList();
+
+      output.push(
+        "<hr>"
+      );
+
+      continue;
+    }
+
+    const unorderedMatch =
+      line.match(
+        /^\\s*[-*]\\s+(.+)$/
+      );
+
+    if (unorderedMatch) {
+
+      flushParagraph();
+
+      if (listType !== "ul") {
+
+        closeList();
+
+        output.push("<ul>");
+
+        listType = "ul";
+      }
+
+      output.push(
+        "<li>" +
+        renderInlineMarkdown(
+          unorderedMatch[1]
+        ) +
+        "</li>"
+      );
+
+      continue;
+    }
+
+    const orderedMatch =
+      line.match(
+        /^\\s*\\d+[.)]\\s+(.+)$/
+      );
+
+    if (orderedMatch) {
+
+      flushParagraph();
+
+      if (listType !== "ol") {
+
+        closeList();
+
+        output.push("<ol>");
+
+        listType = "ol";
+      }
+
+      output.push(
+        "<li>" +
+        renderInlineMarkdown(
+          orderedMatch[1]
+        ) +
+        "</li>"
+      );
+
+      continue;
+    }
+
+    closeList();
+
+    paragraph.push(line);
+  }
+
+  flushParagraph();
+
+  closeList();
+
+  return output.join("");
+}
+
+/* -------------------------------------------------------------------------- */
+/* Code block                                                                 */
+/* -------------------------------------------------------------------------- */
+
+function createCodeBlock(
+  language,
+  code
+) {
+
+  const wrapper =
+    document.createElement("div");
+
+  wrapper.className =
+    "code-block";
+
+  const header =
+    document.createElement("div");
+
+  header.className =
+    "code-header";
+
+  const languageElement =
+    document.createElement("span");
+
+  languageElement.className =
+    "code-language";
+
+  languageElement.textContent =
+    language || "code";
+
+  const copyButton =
+    document.createElement("button");
+
+  copyButton.className =
+    "copy-button";
+
+  copyButton.type =
+    "button";
+
+  copyButton.textContent =
+    "Copy";
+
+  copyButton.addEventListener(
+    "click",
+    async () => {
+
+      try {
+
+        await copyText(code);
+
+        copyButton.textContent =
+          "Copied";
+
+        setTimeout(
+          () => {
+            copyButton.textContent =
+              "Copy";
+          },
+          1500
+        );
+
+      } catch {
+
+        copyButton.textContent =
+          "Copy failed";
+
+        setTimeout(
+          () => {
+            copyButton.textContent =
+              "Copy";
+          },
+          1500
+        );
+      }
+    }
+  );
+
+  header.appendChild(
+    languageElement
+  );
+
+  header.appendChild(
+    copyButton
+  );
+
+  const pre =
+    document.createElement("pre");
+
+  pre.className =
+    "code-content";
+
+  const codeElement =
+    document.createElement("code");
+
+  codeElement.textContent =
+    code;
+
+  pre.appendChild(
+    codeElement
+  );
+
+  wrapper.appendChild(
+    header
+  );
+
+  wrapper.appendChild(
+    pre
+  );
+
+  return wrapper.outerHTML;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Copy code                                                                  */
+/* -------------------------------------------------------------------------- */
+
+async function copyText(text) {
+
+  if (
+    navigator.clipboard &&
+    navigator.clipboard.writeText
+  ) {
+
+    await navigator.clipboard.writeText(
+      text
+    );
+
+    return;
+  }
+
+  const textarea =
+    document.createElement("textarea");
+
+  textarea.value =
+    text;
+
+  textarea.style.position =
+    "fixed";
+
+  textarea.style.opacity =
+    "0";
+
+  document.body.appendChild(
+    textarea
+  );
+
+  textarea.focus();
+
+  textarea.select();
+
+  const successful =
+    document.execCommand(
+      "copy"
+    );
+
+  textarea.remove();
+
+  if (!successful) {
+
+    throw new Error(
+      "Copy failed"
+    );
+  }
+}
+
+/* -------------------------------------------------------------------------- */
+/* Add message                                                                */
+/* -------------------------------------------------------------------------- */
+
+function addMessage(
+  text,
+  type
+) {
 
   if (empty) {
     empty.remove();
@@ -587,8 +1326,30 @@ function addMessage(text, type) {
   element.className =
     "message " + type;
 
-  element.textContent =
-    String(text ?? "");
+  if (
+    type === "assistant"
+  ) {
+
+    const markdown =
+      document.createElement("div");
+
+    markdown.className =
+      "markdown";
+
+    markdown.innerHTML =
+      renderMarkdown(
+        String(text ?? "")
+      );
+
+    element.appendChild(
+      markdown
+    );
+
+  } else {
+
+    element.textContent =
+      String(text ?? "");
+  }
 
   messages.appendChild(
     element
@@ -598,7 +1359,13 @@ function addMessage(text, type) {
     messages.scrollHeight;
 }
 
-function addUsage(usage) {
+/* -------------------------------------------------------------------------- */
+/* Usage                                                                      */
+/* -------------------------------------------------------------------------- */
+
+function addUsage(
+  usage
+) {
 
   if (!usage) {
     return;
@@ -611,13 +1378,19 @@ function addUsage(usage) {
     "usage";
 
   const aiApiCalls =
-    Number(usage.ai_api_calls ?? 0);
+    Number(
+      usage.ai_api_calls ?? 0
+    );
 
   const totalTokens =
-    Number(usage.total_tokens ?? 0);
+    Number(
+      usage.total_tokens ?? 0
+    );
 
   const estimatedCost =
-    Number(usage.estimated_cost ?? 0);
+    Number(
+      usage.estimated_cost ?? 0
+    );
 
   element.textContent =
     "AI calls: " +
@@ -635,15 +1408,28 @@ function addUsage(usage) {
     messages.scrollHeight;
 }
 
-function setStatus(text) {
+/* -------------------------------------------------------------------------- */
+/* Status                                                                     */
+/* -------------------------------------------------------------------------- */
+
+function setStatus(
+  text
+) {
 
   status.textContent =
     String(text ?? "");
 }
 
-function setProcessing(value) {
+/* -------------------------------------------------------------------------- */
+/* Processing                                                                 */
+/* -------------------------------------------------------------------------- */
 
-  processing = value;
+function setProcessing(
+  value
+) {
+
+  processing =
+    value;
 
   input.disabled =
     value;
@@ -652,13 +1438,20 @@ function setProcessing(value) {
     value;
 
   if (value) {
+
     send.textContent =
       "Working...";
+
   } else {
+
     send.textContent =
       "Send";
   }
 }
+
+/* -------------------------------------------------------------------------- */
+/* Send message                                                               */
+/* -------------------------------------------------------------------------- */
 
 function sendMessage() {
 
@@ -678,9 +1471,12 @@ function sendMessage() {
     "user"
   );
 
-  input.value = "";
+  input.value =
+    "";
 
-  setProcessing(true);
+  setProcessing(
+    true
+  );
 
   setStatus(
     "M3 is investigating..."
@@ -691,6 +1487,10 @@ function sendMessage() {
     value: value
   });
 }
+
+/* -------------------------------------------------------------------------- */
+/* Events                                                                     */
+/* -------------------------------------------------------------------------- */
 
 send.addEventListener(
   "click",
@@ -720,11 +1520,15 @@ window.addEventListener(
     const message =
       event.data;
 
-    switch (message.type) {
+    switch (
+      message.type
+    ) {
 
       case "thinking":
 
-        setProcessing(true);
+        setProcessing(
+          true
+        );
 
         setStatus(
           "Analyzing project..."
@@ -734,7 +1538,9 @@ window.addEventListener(
 
       case "answer":
 
-        setProcessing(false);
+        setProcessing(
+          false
+        );
 
         addMessage(
           message.answer,
@@ -746,6 +1552,7 @@ window.addEventListener(
         );
 
         if (message.model) {
+
           model.textContent =
             message.model;
         }
@@ -760,7 +1567,9 @@ window.addEventListener(
 
       case "error":
 
-        setProcessing(false);
+        setProcessing(
+          false
+        );
 
         addMessage(
           message.error,
@@ -777,22 +1586,31 @@ window.addEventListener(
 
       case "ready":
 
-        setProcessing(false);
+        setProcessing(
+          false
+        );
 
         if (
-          status.textContent !== "Error"
+          status.textContent !==
+          "Error"
         ) {
-          setStatus("Ready");
+
+          setStatus(
+            "Ready"
+          );
         }
 
         break;
 
       case "cleared":
 
-        messages.innerHTML = "";
+        messages.innerHTML =
+          "";
 
         const newEmpty =
-          document.createElement("div");
+          document.createElement(
+            "div"
+          );
 
         newEmpty.id =
           "empty";
@@ -807,7 +1625,9 @@ window.addEventListener(
           newEmpty
         );
 
-        setProcessing(false);
+        setProcessing(
+          false
+        );
 
         setStatus(
           "Ready"
@@ -831,12 +1651,19 @@ input.focus();
   }
 
   private getNonce(): string {
+
     const chars =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
 
-    let result = "";
+    let result =
+      "";
 
-    for (let i = 0; i < 32; i++) {
+    for (
+      let i = 0;
+      i < 32;
+      i++
+    ) {
+
       result +=
         chars.charAt(
           Math.floor(
@@ -888,10 +1715,15 @@ type WebviewResponse =
     };
 
 class AuthenticationError extends Error {
-  constructor(message: string) {
+
+  constructor(
+    message: string
+  ) {
+
     super(message);
 
     this.name =
       "AuthenticationError";
   }
 }
+
