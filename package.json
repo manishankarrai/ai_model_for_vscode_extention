@@ -38,6 +38,10 @@
     },
     "commands": [
       {
+        "command": "m3.openChat",
+        "title": "M3: Open Chat"
+      },
+      {
         "command": "m3.scanProject",
         "title": "M3: Scan Project"
       },
@@ -78,7 +82,7 @@
     "menus": {
       "editor/context": [
         {
-          "command": "m3.chat",
+          "command": "m3.openChat",
           "when": "editorTextFocus"
         }
       ]
