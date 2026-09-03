@@ -52,20 +52,51 @@ export interface ProjectIndex {
 }
 
 export interface SearchResult {
+
   path: string;
+
   score: number;
+
   matches: number;
+
   reason: string;
+
+  matchedSymbols?: string[];
+
+  matchedTerms?: string[];
+
 }
 
 export interface ContextFile {
   path: string;
   content: string;
 }
+export interface ContextEvidence {
+
+  path: string;
+
+  score: number;
+
+  reason: string;
+
+  matchedSymbols: string[];
+
+  matchedTerms: string[];
+
+}
 
 export interface AIContext {
   files: ContextFile[];
   indexSummary: string;
+}
+export interface AIContext {
+
+  files: ContextFile[];
+
+  indexSummary: string;
+
+  evidence: ContextEvidence[];
+
 }
 
 export interface ProjectContext {

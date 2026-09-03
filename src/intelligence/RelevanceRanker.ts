@@ -22,12 +22,22 @@ export class RelevanceRanker {
     const resultMap =
       new Map<string, SearchResult>();
 
+    // --------------------------------------------------------
+    // Initial search results
+    // --------------------------------------------------------
+
     for (const result of searchResults) {
 
       resultMap.set(
         result.path,
         {
-          ...result
+          ...result,
+          matchedTerms: [
+            ...(result.matchedTerms ?? [])
+          ],
+          matchedSymbols: [
+            ...(result.matchedSymbols ?? [])
+          ]
         }
       );
     }
@@ -69,6 +79,20 @@ export class RelevanceRanker {
         existing.reason +=
           "; relevant symbol";
 
+        existing.matchedSymbols = [
+          ...(existing.matchedSymbols ?? []),
+          symbol.name
+        ];
+
+        existing.matchedTerms = [
+          ...(existing.matchedTerms ?? []),
+          ...matchedTerms
+        ];
+
+        this.removeDuplicates(
+          existing
+        );
+
       } else {
 
         resultMap.set(
@@ -76,8 +100,16 @@ export class RelevanceRanker {
           {
             path: symbol.filePath,
             score,
-            matches: matchedTerms.length,
-            reason: "relevant symbol"
+            matches:
+              matchedTerms.length,
+            reason:
+              "relevant symbol",
+            matchedSymbols: [
+              symbol.name
+            ],
+            matchedTerms: [
+              ...matchedTerms
+            ]
           }
         );
       }
@@ -97,12 +129,16 @@ export class RelevanceRanker {
       let score = 0;
       let matches = 0;
 
+      const matchedTerms: string[] = [];
+
       for (const term of questionTerms) {
 
         if (lower.includes(term)) {
 
           score += 8;
           matches++;
+
+          matchedTerms.push(term);
         }
       }
 
@@ -118,10 +154,21 @@ export class RelevanceRanker {
       if (existing) {
 
         existing.score += score;
-        existing.matches += matches;
+
+        existing.matches +=
+          matches;
 
         existing.reason +=
           "; relevant filename";
+
+        existing.matchedTerms = [
+          ...(existing.matchedTerms ?? []),
+          ...matchedTerms
+        ];
+
+        this.removeDuplicates(
+          existing
+        );
 
       } else {
 
@@ -131,7 +178,12 @@ export class RelevanceRanker {
             path: file.file.path,
             score,
             matches,
-            reason: "relevant filename"
+            reason:
+              "relevant filename",
+            matchedSymbols: [],
+            matchedTerms: [
+              ...matchedTerms
+            ]
           }
         );
       }
@@ -145,6 +197,7 @@ export class RelevanceRanker {
 
       this.applyModuleRelevance(
         questionTerms,
+        index,
         projectModel,
         resultMap
       );
@@ -173,6 +226,10 @@ export class RelevanceRanker {
         resultMap
       );
     }
+
+    // --------------------------------------------------------
+    // Final ranking
+    // --------------------------------------------------------
 
     return Array.from(
       resultMap.values()
@@ -251,6 +308,7 @@ export class RelevanceRanker {
 
   private applyModuleRelevance(
     questionTerms: string[],
+    index: ProjectIndex,
     projectModel: ProjectModel,
     resultMap: Map<string, SearchResult>
   ): void {
@@ -280,14 +338,68 @@ export class RelevanceRanker {
         const filePath of module.files
       ) {
 
+        const normalizedPath =
+          this.normalizeProjectPath(
+            filePath,
+            index
+          );
+
+        if (!normalizedPath) {
+          continue;
+        }
+
         this.addScore(
           resultMap,
-          filePath,
+          normalizedPath,
           12,
           "relevant module"
         );
       }
     }
+  }
+
+  // ----------------------------------------------------------
+  // Normalize project paths
+  // ----------------------------------------------------------
+
+  private normalizeProjectPath(
+    filePath: string,
+    index: ProjectIndex
+  ): string | undefined {
+
+    const normalized =
+      filePath.replace(
+        /\\/g,
+        "/"
+      );
+
+    // Already an indexed relative path.
+    if (
+      index.files.has(normalized)
+    ) {
+      return normalized;
+    }
+
+    // Match against absolute indexed paths.
+    for (
+      const indexed of index.files.values()
+    ) {
+
+      const absolutePath =
+        indexed.file.absolutePath
+          .replace(
+            /\\/g,
+            "/"
+          );
+
+      if (
+        absolutePath === normalized
+      ) {
+        return indexed.file.path;
+      }
+    }
+
+    return undefined;
   }
 
   // ----------------------------------------------------------
@@ -400,18 +512,17 @@ export class RelevanceRanker {
     resultMap: Map<string, SearchResult>
   ): void {
 
-    const entryPointTerms =
-      [
-        "main",
-        "start",
-        "startup",
-        "server",
-        "entry",
-        "entrypoint",
-        "run",
-        "application",
-        "cli"
-      ];
+    const entryPointTerms = [
+      "main",
+      "start",
+      "startup",
+      "server",
+      "entry",
+      "entrypoint",
+      "run",
+      "application",
+      "cli"
+    ];
 
     const questionMatches =
       questionTerms.some(
@@ -447,22 +558,20 @@ export class RelevanceRanker {
     resultMap: Map<string, SearchResult>
   ): void {
 
-    const configTerms =
-      [
-        "config",
-        "configuration",
-        "environment",
-        "env",
-        "database",
-        "db"
-      ];
+    const configTerms = [
+      "config",
+      "configuration",
+      "environment",
+      "env",
+      "database",
+      "db"
+    ];
 
-    const testTerms =
-      [
-        "test",
-        "testing",
-        "tests"
-      ];
+    const testTerms = [
+      "test",
+      "testing",
+      "tests"
+    ];
 
     const wantsConfig =
       questionTerms.some(
@@ -680,8 +789,33 @@ export class RelevanceRanker {
         path: filePath,
         score,
         matches: 0,
-        reason
+        reason,
+        matchedSymbols: [],
+        matchedTerms: []
       }
     );
+  }
+
+  // ----------------------------------------------------------
+  // Evidence cleanup
+  // ----------------------------------------------------------
+
+  private removeDuplicates(
+    result: SearchResult
+  ): void {
+
+    result.matchedTerms =
+      [
+        ...new Set(
+          result.matchedTerms ?? []
+        )
+      ];
+
+    result.matchedSymbols =
+      [
+        ...new Set(
+          result.matchedSymbols ?? []
+        )
+      ];
   }
 }

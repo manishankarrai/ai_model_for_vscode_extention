@@ -49,9 +49,12 @@ export class SearchEngine {
 
         let matches = 0;
 
+        const matchedTerms: string[] = [];
+
         for (const term of terms) {
 
           let position = 0;
+          let termMatches = 0;
 
           while (
             (position =
@@ -62,14 +65,33 @@ export class SearchEngine {
           ) {
 
             matches++;
+            termMatches++;
 
             position += term.length;
+          }
+
+          if (termMatches > 0) {
+            matchedTerms.push(term);
           }
         }
 
         if (matches === 0) {
           continue;
         }
+
+        const matchedSymbols =
+          indexed.symbols
+            .filter(symbol =>
+              terms.some(term =>
+                symbol.name
+                  .toLowerCase()
+                  .includes(term)
+              )
+            )
+            .map(symbol => symbol.name);
+
+        const uniqueMatchedSymbols =
+          [...new Set(matchedSymbols)];
 
         const pathScore =
           indexed.file.path
@@ -91,7 +113,12 @@ export class SearchEngine {
           reason:
             pathScore > 0
               ? "query found in file path and content"
-              : "query found in content"
+              : "query found in content",
+
+          matchedTerms,
+
+          matchedSymbols:
+            uniqueMatchedSymbols
         });
 
       } catch {
