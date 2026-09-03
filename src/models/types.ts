@@ -113,9 +113,22 @@ export interface ConversationMessage {
 
 export interface InvestigationPlan {
   steps: string[];
-  tools: ToolName[];
-}
 
+  tools: ToolName[];
+
+  maxSteps: number;
+
+  maxFiles: number;
+
+  maxChars: number;
+
+  maxSearchResults: number;
+
+  depth:
+    | "shallow"
+    | "medium"
+    | "deep";
+}
 export interface TaskState {
   requestId: string;
   question: string;
@@ -163,4 +176,53 @@ export interface AIRequest {
   context: AIContext;
 
   plan?: string[];
+}
+export interface InvestigationStep {
+  step: number;
+
+  action:
+    | "search"
+    | "read_file"
+    | "follow_symbol"
+    | "follow_dependency";
+
+  target: string;
+
+  reason: string;
+
+  files: string[];
+
+  completed: boolean;
+}
+
+export interface InvestigationEvidence {
+  path: string;
+
+  score: number;
+
+  reason: string;
+
+  content: string;
+
+  symbols: string[];
+
+  dependencies: string[];
+}
+
+export interface InvestigationResult {
+  question: string;
+
+  steps: InvestigationStep[];
+
+  evidence: InvestigationEvidence[];
+
+  filesInvestigated: string[];
+
+  completed: boolean;
+
+  stoppedReason:
+    | "completed"
+    | "max_steps"
+    | "max_files"
+    | "max_chars";
 }

@@ -3,7 +3,9 @@ import {
   SearchResult
 } from "../models/types";
 
-import { SearchEngine } from "../intelligence/SearchEngine";
+import {
+  SearchEngine
+} from "../intelligence/SearchEngine";
 
 export class SearchTool {
 
@@ -12,12 +14,14 @@ export class SearchTool {
 
   async execute(
     query: string,
-    index: ProjectIndex
+    index: ProjectIndex,
+    maxResults = 30
   ): Promise<SearchResult[]> {
 
     return this.engine.search(
       query,
-      index
+      index,
+      maxResults
     );
   }
 }

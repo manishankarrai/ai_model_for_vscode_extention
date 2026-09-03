@@ -19,6 +19,16 @@ export interface ContextOptions {
   maxChars: number;
 }
 
+export interface InvestigationContextEvidence {
+  path: string;
+  score: number;
+  reason: string;
+  content?: string;
+  symbols?: string[];
+  dependencies?: string[];
+  relatedSymbols?: string[];
+}
+
 interface ContextRegion {
   startLine: number;
   endLine: number;
@@ -30,15 +40,32 @@ export class ContextBuilder {
     index: ProjectIndex,
     rankedFiles: SearchResult[],
     projectModel: ProjectModel | undefined,
-    options: ContextOptions
+    options: ContextOptions,
+    investigationEvidence:
+      InvestigationContextEvidence[] = []
   ): Promise<AIContext> {
 
     const files = [];
 
     let totalChars = 0;
 
+    /*
+     * --------------------------------------------------------
+     * Merge normal ranking with investigation evidence.
+     *
+     * Investigation-discovered files receive a strong
+     * relevance boost and are moved toward the front.
+     * --------------------------------------------------------
+     */
+
+    const finalRankedFiles =
+      this.mergeInvestigationEvidence(
+        rankedFiles,
+        investigationEvidence
+      );
+
     for (
-      const result of rankedFiles
+      const result of finalRankedFiles
     ) {
 
       if (
@@ -102,24 +129,163 @@ export class ContextBuilder {
     const indexSummary =
       this.createIndexSummary(
         index,
-        projectModel
+        projectModel,
+        investigationEvidence
       );
 
     return {
       files,
       indexSummary,
-      evidence: rankedFiles.map(
-        result => ({
-          path: result.path,
-          score: result.score,
-          reason: result.reason,
-          matchedSymbols:
-            result.matchedSymbols ?? [],
-          matchedTerms:
-            result.matchedTerms ?? []
-        })
-      )
+
+      evidence:
+        finalRankedFiles.map(
+          result => ({
+            path: result.path,
+            score: result.score,
+            reason: result.reason,
+            matchedSymbols:
+              result.matchedSymbols ?? [],
+            matchedTerms:
+              result.matchedTerms ?? []
+          })
+        )
     };
+  }
+
+  // ----------------------------------------------------------
+  // Merge investigation evidence
+  // ----------------------------------------------------------
+
+  private mergeInvestigationEvidence(
+    rankedFiles: SearchResult[],
+    investigationEvidence:
+      InvestigationContextEvidence[]
+  ): SearchResult[] {
+
+    const resultMap =
+      new Map<string, SearchResult>();
+
+    /*
+     * First keep the existing ranking.
+     */
+    for (
+      const result of rankedFiles
+    ) {
+
+      resultMap.set(
+        result.path,
+        {
+          ...result,
+          matchedSymbols: [
+            ...(result.matchedSymbols ?? [])
+          ],
+          matchedTerms: [
+            ...(result.matchedTerms ?? [])
+          ]
+        }
+      );
+    }
+
+    /*
+     * Investigation evidence gets a strong boost.
+     *
+     * This means:
+     *
+     * normal search
+     *       +
+     * project relevance
+     *       +
+     * investigation evidence
+     *
+     * produces the final ranking.
+     */
+    for (
+      const evidence
+        of investigationEvidence
+    ) {
+
+      const existing =
+        resultMap.get(
+          evidence.path
+        );
+
+      if (existing) {
+
+        existing.score += 25;
+
+        existing.reason +=
+          "; investigation evidence";
+
+        if (
+          evidence.symbols
+        ) {
+
+          existing.matchedSymbols = [
+            ...(existing.matchedSymbols ?? []),
+            ...evidence.symbols
+          ];
+        }
+
+        if (
+          evidence.relatedSymbols
+        ) {
+
+          existing.matchedSymbols = [
+            ...(existing.matchedSymbols ?? []),
+            ...evidence.relatedSymbols
+              .map(symbol =>
+                symbol.split(" ")[0]
+              )
+          ];
+        }
+
+        this.removeDuplicates(
+          existing
+        );
+
+      } else {
+
+        /*
+         * A file discovered by investigation may not
+         * have appeared in the original SearchEngine
+         * results.
+         *
+         * We still want it in the final context.
+         */
+        resultMap.set(
+          evidence.path,
+          {
+            path:
+              evidence.path,
+
+            score:
+              25 +
+              evidence.score,
+
+            matches:
+              0,
+
+            reason:
+              "investigation evidence",
+
+            matchedSymbols:
+              [
+                ...(evidence.symbols ?? [])
+              ],
+
+            matchedTerms:
+              []
+          }
+        );
+      }
+    }
+
+    return Array.from(
+      resultMap.values()
+    ).sort(
+      (a, b) =>
+        b.score - a.score
+    );
   }
 
   // ----------------------------------------------------------
@@ -176,8 +342,6 @@ export class ContextBuilder {
 
     // --------------------------------------------------------
     // Priority 2:
-    // No symbols found.
-    //
     // Focus around matched term occurrences.
     // --------------------------------------------------------
 
@@ -212,9 +376,7 @@ export class ContextBuilder {
 
     // --------------------------------------------------------
     // Priority 3:
-    // No symbol or term location found.
-    //
-    // Keep beginning-of-file fallback.
+    // Beginning-of-file fallback.
     // --------------------------------------------------------
 
     return content.slice(
@@ -244,7 +406,8 @@ export class ContextBuilder {
       return [];
     }
 
-    const regions: ContextRegion[] = [];
+    const regions:
+      ContextRegion[] = [];
 
     for (
       const symbol of index.symbols
@@ -321,7 +484,8 @@ export class ContextBuilder {
       return [];
     }
 
-    const regions: ContextRegion[] = [];
+    const regions:
+      ContextRegion[] = [];
 
     for (
       const term of matchedTerms
@@ -347,14 +511,9 @@ export class ContextBuilder {
           continue;
         }
 
-        // ----------------------------------------------------
-        // Keep the number of regions reasonable.
-        //
-        // We don't want a common word to cause the entire
-        // file to be selected.
-        // ----------------------------------------------------
-
-        if (occurrences >= 3) {
+        if (
+          occurrences >= 3
+        ) {
           break;
         }
 
@@ -403,7 +562,8 @@ export class ContextBuilder {
           b.startLine
       );
 
-    const merged: ContextRegion[] = [];
+    const merged:
+      ContextRegion[] = [];
 
     for (
       const region of sorted
@@ -486,7 +646,7 @@ export class ContextBuilder {
   }
 
   // ----------------------------------------------------------
-  // Enforce character limit while preserving focused regions
+  // Enforce character limit
   // ----------------------------------------------------------
 
   private limitFocusedContent(
@@ -588,7 +748,9 @@ export class ContextBuilder {
 
   private createIndexSummary(
     index: ProjectIndex,
-    projectModel?: ProjectModel
+    projectModel: ProjectModel | undefined,
+    investigationEvidence:
+      InvestigationContextEvidence[] = []
   ): string {
 
     const lines: string[] = [];
@@ -612,6 +774,31 @@ export class ContextBuilder {
     lines.push(
       `Index version: ${index.version}`
     );
+
+    if (
+      investigationEvidence.length > 0
+    ) {
+
+      lines.push("");
+
+      lines.push(
+        `Investigation evidence files: ${investigationEvidence.length}`
+      );
+
+      lines.push(
+        "Files discovered during investigation:"
+      );
+
+      for (
+        const evidence
+          of investigationEvidence.slice(0, 20)
+      ) {
+
+        lines.push(
+          `- ${evidence.path}`
+        );
+      }
+    }
 
     if (projectModel) {
 
@@ -723,5 +910,28 @@ export class ContextBuilder {
     }
 
     return lines.join("\n");
+  }
+
+  // ----------------------------------------------------------
+  // Remove duplicate metadata
+  // ----------------------------------------------------------
+
+  private removeDuplicates(
+    result: SearchResult
+  ): void {
+
+    result.matchedTerms =
+      [
+        ...new Set(
+          result.matchedTerms ?? []
+        )
+      ];
+
+    result.matchedSymbols =
+      [
+        ...new Set(
+          result.matchedSymbols ?? []
+        )
+      ];
   }
 }

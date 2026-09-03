@@ -3,17 +3,17 @@ import * as vscode from "vscode";
 import {
   AIRequest,
   AIResponse,
-  Intent
 } from "../models/types";
 
 import { IntentDetector } from "./IntentDetector";
 import { Planner } from "./Planner";
 import { ToolSelector } from "./ToolSelector";
+import { InvestigationEngine } from "./InvestigationEngine";
 
 import { ProjectIndexer } from "../intelligence/ProjectIndexer";
 import { SearchEngine } from "../intelligence/SearchEngine";
 import { RelevanceRanker } from "../intelligence/RelevanceRanker";
-import { ContextBuilder } from "../intelligence/ContextBuilder";
+import { ContextBuilder , InvestigationContextEvidence } from "../intelligence/ContextBuilder";
 
 import { BackendClient } from "../backend/BackendClient";
 
@@ -25,6 +25,7 @@ import { Logger } from "../utils/Logger";
 
 import { ReadOnlyGuard } from "../safety/ReadOnlyGuard";
 import { ProjectUnderstanding } from "../project/project-understanding";
+
 
 export class Agent {
 
@@ -52,11 +53,15 @@ export class Agent {
   private readonly tokenEstimator =
     new TokenEstimator();
 
+  // Stage 3.1
+  private readonly investigationEngine =
+    new InvestigationEngine();
+
   constructor(
     private readonly indexer: ProjectIndexer,
 
     private readonly projectUnderstanding:
-    ProjectUnderstanding,
+      ProjectUnderstanding,
 
     private readonly conversation:
       ConversationState,
@@ -143,6 +148,13 @@ export class Agent {
       }
 
       // ------------------------------------------------------
+      // Project Model
+      // ------------------------------------------------------
+
+      const projectModel =
+        this.projectUnderstanding.getModel();
+
+      // ------------------------------------------------------
       // Local plan
       // ------------------------------------------------------
 
@@ -179,12 +191,73 @@ export class Agent {
       );
 
       // ------------------------------------------------------
-      // Search
+      // Stage 3.1
+      // Deep Local Investigation
       // ------------------------------------------------------
 
       this.taskState.setStatus(
         "investigating"
       );
+
+     const investigation =
+  await this.investigationEngine.investigate(
+    question,
+    index,
+    {
+      maxSteps:
+        plan.maxSteps,
+
+      maxFiles:
+        plan.maxFiles,
+
+      maxChars:
+        plan.maxChars,
+
+      maxSearchResults:
+        plan.maxSearchResults
+    }
+  );
+     this.logger.info(
+  "Investigation completed",
+  {
+    question,
+    steps: investigation.steps.length,
+    files: investigation.filesInvestigated.length,
+    evidence: investigation.evidence.length,
+    stoppedReason:
+      investigation.stoppedReason
+  }
+);
+
+this.logger.info(
+  "Investigation files discovered",
+  {
+    files:
+      investigation.filesInvestigated
+  }
+);
+
+this.logger.info(
+  "Investigation evidence collected",
+  {
+    evidence:
+      investigation.evidence.map(
+        item => ({
+          path: item.path,
+          score: item.score,
+          symbols: item.symbols,
+          dependencies:
+            item.dependencies,
+          relatedSymbols:
+            item.relatedSymbols ?? []
+        })
+      )
+  }
+);
+
+      // ------------------------------------------------------
+      // Search
+      // ------------------------------------------------------
 
       const searchResults =
         await this.searchEngine.search(
@@ -196,7 +269,8 @@ export class Agent {
       this.logger.info(
         "Local search completed",
         {
-          results: searchResults.length
+          results:
+            searchResults.length
         }
       );
 
@@ -204,16 +278,13 @@ export class Agent {
       // Rank
       // ------------------------------------------------------
 
-     const projectModel =
-  this.projectUnderstanding.getModel();
-
-const ranked =
-  this.ranker.rank(
-    question,
-    index,
-    searchResults,
-    projectModel
-  );
+      const ranked =
+        this.ranker.rank(
+          question,
+          index,
+          searchResults,
+          projectModel
+        );
 
       // ------------------------------------------------------
       // Context
@@ -235,16 +306,72 @@ const ranked =
           300000
         );
 
-      const context =
-        await this.contextBuilder.build(
-          index,
-          ranked,
-          this.projectUnderstanding.getModel(),
-          {
-            maxFiles,
-            maxChars
-          }
-        );
+      const investigationEvidence:
+  InvestigationContextEvidence[] =
+    investigation.evidence.map(
+      evidence => ({
+        path:
+          evidence.path,
+
+        score:
+          evidence.score,
+
+        reason:
+          evidence.reason,
+
+        content:
+          evidence.content,
+
+        symbols:
+          evidence.symbols,
+
+        dependencies:
+          evidence.dependencies,
+
+        relatedSymbols:
+          evidence.relatedSymbols
+      })
+    );
+
+this.logger.info(
+  "Merging investigation evidence into context",
+  {
+    evidenceFiles:
+      investigationEvidence.length,
+
+    files:
+      investigationEvidence.map(
+        evidence =>
+          evidence.path
+      )
+  }
+);
+
+const context =
+  await this.contextBuilder.build(
+    index,
+    ranked,
+    projectModel,
+    {
+      maxFiles,
+      maxChars
+    },
+    investigationEvidence
+  );
+
+this.logger.info(
+  "Investigation evidence merged into context",
+  {
+    contextFiles:
+      context.files.length,
+
+    contextPaths:
+      context.files.map(
+        file =>
+          file.path
+      )
+  }
+);
 
       this.taskState.setFiles(
         context.files.map(
@@ -305,7 +432,8 @@ const ranked =
 
         context,
 
-        plan: plan.steps
+        plan:
+          plan.steps
       };
 
       const response =
@@ -313,7 +441,11 @@ const ranked =
           request,
           accessToken
         );
-      this.logger.info("answer of api call .........................." , response);
+
+      this.logger.info(
+        "Answer received from API",
+        response
+      );
 
       this.taskState.setAICalls(
         response.usage.ai_api_calls
@@ -322,7 +454,6 @@ const ranked =
       this.conversation.addAssistantMessage(
         response.answer
       );
-      //actions need here so we print all answers
 
       this.taskState.complete();
 

@@ -1,4 +1,6 @@
 import {
+  ProjectIndex,
+  SearchResult,
   ToolName
 } from "../models/types";
 
@@ -24,5 +26,71 @@ export class ReadOnlyToolRegistry {
       "search",
       "list_files"
     ];
+  }
+
+  async execute(
+    tool: ToolName,
+    args: {
+      filePath?: string;
+      query?: string;
+      index?: ProjectIndex;
+    }
+  ): Promise<
+    string[] |
+    string |
+    SearchResult[]
+  > {
+
+    switch (tool) {
+
+      case "read_file":
+
+        if (!args.filePath) {
+          throw new Error(
+            "read_file requires filePath"
+          );
+        }
+
+        return this.readFile.execute(
+          args.filePath
+        );
+
+      case "search":
+
+        if (!args.query) {
+          throw new Error(
+            "search requires query"
+          );
+        }
+
+        if (!args.index) {
+          throw new Error(
+            "search requires project index"
+          );
+        }
+
+        return this.search.execute(
+          args.query,
+          args.index
+        );
+
+      case "list_files":
+
+        if (!args.index) {
+          throw new Error(
+            "list_files requires project index"
+          );
+        }
+
+        return this.listFiles.execute(
+          args.index
+        );
+
+      default:
+
+        throw new Error(
+          `Tool "${tool}" is not allowed`
+        );
+    }
   }
 }
