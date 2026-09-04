@@ -4,7 +4,13 @@ import * as vscode from "vscode";
 import {
   AIRequest,
   AIResponse,
+  AgentProfile,
+  AgentEvent,
+  AgentTaskStatus,
+  AgentToolName,
   ContextPart,
+  InteractionMode,
+  InvestigationResult,
   ImplementationPlan,
 } from "../models/types";
 
@@ -165,6 +171,8 @@ export class Agent {
   private readonly backend =
     new BackendClient();
 
+  private lastRequest?: AdaptiveAIRequest;
+
 
   private readonly tokenEstimator =
     new TokenEstimator();
@@ -209,7 +217,12 @@ export class Agent {
   async process(
     question: string,
     accessToken: string,
-    selectedContext: ContextPart[] = []
+    selectedContext: ContextPart[] = [],
+    mode: InteractionMode = "agent",
+    agentProfile: AgentProfile = mode === "ask" ? "ask" : "coordinator",
+    agentCount = 1,
+    signal?: AbortSignal,
+    onEvent?: (event: AgentEvent) => void
   ): Promise<AIResponse> {
 
     // --------------------------------------------------------
@@ -248,6 +261,25 @@ export class Agent {
 
     const requestId =
       this.createRequestId();
+
+    if (onEvent && mode === "agent" && agentCount > 1) {
+      void this.backend.streamAgentEvents(
+        requestId,
+        accessToken,
+        onEvent,
+        signal
+      ).catch(async (error: unknown) => {
+        this.logger.warn("Agent event stream unavailable; loading task status", error);
+        try {
+          const task = await this.backend.getAgentTask(requestId, accessToken);
+          for (const event of (task as AgentTaskStatus).events ?? []) {
+            onEvent(event);
+          }
+        } catch (statusError) {
+          this.logger.warn("Unable to reload agent task status", statusError);
+        }
+      });
+    }
 
 
     this.taskState.start(
@@ -379,12 +411,13 @@ export class Agent {
       );
 
 
-      const searchResults =
-        await this.searchEngine.search(
-          question,
-          index,
-          50
-        );
+      const searchResults = mode === "ask"
+        ? []
+        : await this.searchEngine.search(
+            question,
+            index,
+            50
+          );
 
 
       this.logger.info(
@@ -458,22 +491,35 @@ export class Agent {
       );
 
 
-      const investigation =
-        await this.investigationEngine.investigate(
+      let investigation: InvestigationResult;
+
+      if (mode === "ask") {
+        investigation = {
           question,
-          index,
-          ranked,
-          {
-            maxSteps:
-              plan.maxSteps,
+          steps: [],
+          evidence: [],
+          filesInvestigated: [],
+          completed: true,
+          stoppedReason: "completed"
+        };
+      } else {
+        investigation =
+          await this.investigationEngine.investigate(
+            question,
+            index,
+            ranked,
+            {
+              maxSteps:
+                plan.maxSteps,
 
-            maxFiles:
-              plan.maxFiles,
+              maxFiles:
+                plan.maxFiles,
 
-            maxChars:
-              plan.maxChars
-          }
-        );
+              maxChars:
+                plan.maxChars
+            }
+          );
+      }
 
       this.projectMemory.addInvestigationArtifacts({
         findings:
@@ -735,6 +781,15 @@ export class Agent {
 
         question,
 
+        mode,
+
+        tool_policy: this.getToolPolicy(mode),
+
+        agent: {
+          profile: agentProfile,
+          count: Math.max(1, Math.min(agentCount, mode === "ask" ? 1 : 5))
+        },
+
         project: {
 
           id:
@@ -757,6 +812,8 @@ export class Agent {
         plan:
           plan.steps
       };
+
+      this.lastRequest = request;
 
 
       this.logger.info(
@@ -786,7 +843,8 @@ export class Agent {
           projectModel,
           ranked,
           plan,
-          context
+          context,
+          signal
         );
 
 
@@ -858,6 +916,71 @@ export class Agent {
     }
   }
 
+  async retrySpecialist(
+    profile: AgentProfile,
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<string> {
+    if (!this.lastRequest || this.lastRequest.mode !== "agent") {
+      throw new Error("No Agent request is available for specialist retry.");
+    }
+
+    const request = {
+      ...this.lastRequest,
+      agent: {
+        profile,
+        count: 1
+      }
+    };
+    const result = await this.backend.retryAgent(
+      request,
+      request.request_id,
+      profile,
+      accessToken,
+      signal
+    ) as { answer: string };
+    return result.answer;
+  }
+
+  private getToolPolicy(
+    mode: InteractionMode
+  ): {
+    allowed: AgentToolName[];
+    approval_required: AgentToolName[];
+  } {
+    if (mode === "ask") {
+      return {
+        allowed: [],
+        approval_required: []
+      };
+    }
+
+    return {
+      allowed: [
+        "read_file",
+        "search",
+        "list_files",
+        "get_diagnostics",
+        "git_diff",
+        "git_status",
+        "run_task",
+        "apply_change_set",
+        "create_file",
+        "delete_file",
+        "rename_file",
+        "move_file"
+      ],
+      approval_required: [
+        "run_task",
+        "apply_change_set",
+        "create_file",
+        "delete_file",
+        "rename_file",
+        "move_file"
+      ]
+    };
+  }
+
 
   // ==========================================================
   // STAGE 4
@@ -887,7 +1010,9 @@ export class Agent {
       any,
 
     initialContext:
-      any
+      any,
+
+    signal?: AbortSignal
   ): Promise<AIResponse> {
 
     // --------------------------------------------------------
@@ -1102,7 +1227,8 @@ export class Agent {
       const rawResponse =
         await this.backend.sendAIRequest(
           request,
-          accessToken
+          accessToken,
+          signal
         );
 
 

@@ -7,6 +7,10 @@ import {
   ContextPart,
   AIResponse,
   AIUsage,
+  AgentProfile,
+  AgentEvent,
+  AgentRun,
+  InteractionMode,
 } from "../models/types";
 
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
@@ -24,6 +28,15 @@ export class M3ViewProvider
 
   private readonly codeChangeApplier =
     new CodeChangeApplier();
+
+  private requestController?: AbortController;
+
+  private lastQuestion?: {
+    question: string;
+    mode: InteractionMode;
+    agentProfile: AgentProfile;
+    agentCount: number;
+  };
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -82,19 +95,68 @@ export class M3ViewProvider
   ): Promise<void> {
     switch (message.type) {
       case "send_message":
-        await this.handleQuestion(message.value);
+        await this.handleQuestion(
+          message.value,
+          message.mode,
+          message.agentProfile,
+          message.agentCount
+        );
+        break;
+
+      case "cancel_request":
+        this.requestController?.abort();
+        break;
+
+      case "retry_agent":
+        await this.retryAgent(message.profile);
+        break;
+
+      case "retry_last":
+        if (this.lastQuestion) {
+          await this.handleQuestion(
+            this.lastQuestion.question,
+            this.lastQuestion.mode,
+            this.lastQuestion.agentProfile,
+            this.lastQuestion.agentCount
+          );
+        }
         break;
 
       case "attach_files":
         await this.attachFiles();
         break;
 
+      case "remove_context":
+        this.selectedContext = this.selectedContext.filter(
+          (part) => part.path !== message.path
+        );
+        this.postContextParts();
+        break;
+
+      case "attach_text":
+        if (message.value.trim()) {
+          this.selectedContext = this.selectedContext.filter(
+            (part) => part.path !== "pasted-text"
+          );
+          this.selectedContext.push({
+            kind: "attachment",
+            path: "pasted-text",
+            content: message.value,
+            language: "text"
+          });
+          this.postContextParts();
+        }
+        break;
+
       case "clear":
         this.agent.clearConversation();
+        this.selectedContext = [];
 
         this.post({
           type: "cleared",
         });
+
+        this.postContextParts();
 
         break;
 
@@ -108,7 +170,10 @@ export class M3ViewProvider
   }
 
   private async handleQuestion(
-    question: string
+    question: string,
+    mode: InteractionMode,
+    agentProfile: AgentProfile,
+    agentCount: number
   ): Promise<void> {
     const trimmedQuestion =
       question.trim();
@@ -128,6 +193,13 @@ export class M3ViewProvider
     }
 
     this.isProcessing = true;
+    this.requestController = new AbortController();
+    this.lastQuestion = {
+      question: trimmedQuestion,
+      mode,
+      agentProfile,
+      agentCount
+    };
 
     this.post({
       type: "thinking",
@@ -147,7 +219,17 @@ export class M3ViewProvider
         await this.agent.process(
           trimmedQuestion,
           accessToken,
-          await this.getRequestContext()
+          await this.getRequestContext(),
+          mode,
+          agentProfile,
+          agentCount,
+          this.requestController.signal,
+          (event: AgentEvent) => {
+            this.post({
+              type: "agent_event",
+              event
+            });
+          }
         );
 
       this.post({
@@ -156,6 +238,7 @@ export class M3ViewProvider
         usage: response.usage,
         requestId: response.request_id,
         model: response.model,
+        agents: response.agents ?? [],
       });
 
       if (response.implementation_plan?.changes) {
@@ -165,6 +248,13 @@ export class M3ViewProvider
       }
 
     } catch (error) {
+
+      if (error instanceof DOMException && error.name === "AbortError") {
+        this.post({
+          type: "cancelled"
+        });
+        return;
+      }
 
       const message =
         this.getErrorMessage(error);
@@ -182,10 +272,50 @@ export class M3ViewProvider
     } finally {
 
       this.isProcessing = false;
+      this.requestController = undefined;
 
       this.post({
         type: "ready",
       });
+    }
+  }
+
+  private async retryAgent(
+    profile: AgentProfile
+  ): Promise<void> {
+    if (this.isProcessing) {
+      return;
+    }
+
+    const accessToken = await this.getAccessToken();
+    if (!accessToken) {
+      throw new AuthenticationError("M3 authentication required.");
+    }
+
+    this.isProcessing = true;
+    this.post({ type: "thinking" });
+    try {
+      const answer = await this.agent.retrySpecialist(
+        profile,
+        accessToken
+      );
+      this.post({
+        type: "answer",
+        answer: "[Retry: " + profile + "]\n\n" + answer,
+        usage: {
+          input_tokens: 0,
+          output_tokens: 0,
+          total_tokens: 0,
+          ai_api_calls: 1,
+          estimated_cost: 0
+        },
+        requestId: "retry",
+        model: "",
+        agents: []
+      });
+    } finally {
+      this.isProcessing = false;
+      this.post({ type: "ready" });
     }
   }
 
@@ -221,6 +351,8 @@ export class M3ViewProvider
         endLine: selection.end.line + 1
       });
     }
+
+    this.postContextParts(parts);
 
     return parts;
   }
@@ -260,11 +392,20 @@ export class M3ViewProvider
       });
     }
 
+    this.postContextParts();
+  }
+
+  private postContextParts(
+    parts: ContextPart[] = this.selectedContext
+  ): void {
     this.post({
       type: "context",
-      parts: this.selectedContext.map((part) => ({
+      parts: parts.map((part) => ({
         path: part.path,
-        kind: part.kind
+        kind: part.kind,
+        language: part.language,
+        size: part.content.length,
+        tokens: Math.ceil(part.content.length / 4)
       }))
     });
   }
@@ -304,10 +445,6 @@ export class M3ViewProvider
   ): string {
     const plan = response.implementation_plan;
 
-    if (!plan) {
-      return response.answer;
-    }
-
     const section = (
       title: string,
       items: string[]
@@ -321,12 +458,26 @@ export class M3ViewProvider
         .join("\n")}`;
     };
 
+    const agentSection = response.agents && response.agents.length > 0
+      ? "\n\n### Agent Runs\n" + response.agents
+        .map((agent) => "- " + agent.profile + ": " + agent.status)
+        .join("\n")
+      : "";
+
+    const eventSection = response.events && response.events.length > 0
+      ? "\n\n### Orchestration Trace\n" + response.events
+        .map((event) => "- " + event.profile + ": " + event.message)
+        .join("\n")
+      : "";
+
     return [
       response.answer,
-      section("Files", plan.files),
-      section("Implementation Steps", plan.steps),
-      section("Validation", plan.validation),
-      section("Risks and Assumptions", plan.risks)
+      plan ? section("Files", plan.files) : "",
+      plan ? section("Implementation Steps", plan.steps) : "",
+      plan ? section("Validation", plan.validation) : "",
+      plan ? section("Risks and Assumptions", plan.risks) : "",
+      agentSection,
+      eventSection
     ].join("");
   }
 
@@ -928,6 +1079,39 @@ button:disabled {
       aria-label="Ask M3"
     ></textarea>
 
+    <select
+      id="mode"
+      aria-label="M3 mode"
+    >
+      <option value="ask">Ask</option>
+      <option value="agent">Agent</option>
+    </select>
+
+    <select
+      id="agent-profile"
+      aria-label="Agent profile"
+    >
+      <option value="coordinator">Coordinator</option>
+      <option value="explorer">Explorer</option>
+      <option value="bug">Bug</option>
+      <option value="review">Review</option>
+      <option value="builder">Builder</option>
+      <option value="test">Test</option>
+      <option value="architect">Architect</option>
+      <option value="memory">Memory</option>
+    </select>
+
+    <select
+      id="agent-count"
+      aria-label="Agent count"
+    >
+      <option value="1">1 agent</option>
+      <option value="2">2 agents</option>
+      <option value="3">3 agents</option>
+      <option value="4">4 agents</option>
+      <option value="5">5 agents</option>
+    </select>
+
     <button
       id="send"
       type="button"
@@ -936,10 +1120,32 @@ button:disabled {
     </button>
 
     <button
+      id="cancel"
+      type="button"
+      disabled
+    >
+      Cancel
+    </button>
+
+    <button
+      id="retry"
+      type="button"
+    >
+      Retry
+    </button>
+
+    <button
       id="attach"
       type="button"
     >
       Attach Files
+    </button>
+
+    <button
+      id="attach-text"
+      type="button"
+    >
+      Attach Text
     </button>
 
   </div>
@@ -956,6 +1162,21 @@ const input =
 
 const send =
   document.getElementById("send");
+
+const cancel =
+  document.getElementById("cancel");
+
+const retry =
+  document.getElementById("retry");
+
+const mode =
+  document.getElementById("mode");
+
+const agentProfile =
+  document.getElementById("agent-profile");
+
+const agentCount =
+  document.getElementById("agent-count");
 
 const attach =
   document.getElementById("attach");
@@ -986,17 +1207,48 @@ function renderContextParts() {
     document.querySelector(".composer").before(container);
   }
 
-  container.textContent =
-    contextParts.length > 0
-      ? "Context: " +
-        contextParts
-          .map((part) => part.kind + " " + part.path)
-          .join(", ")
-      : "";
+  container.textContent = "";
+
+  if (contextParts.length === 0) {
+    return;
+  }
+
+  const label = document.createElement("span");
+  label.textContent = "Context";
+  container.appendChild(label);
+
+  contextParts.forEach((part) => {
+    const chip = document.createElement("span");
+    chip.className = "context-chip";
+    chip.textContent = part.kind + " " + part.path +
+      " (" + part.tokens + " tokens)";
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.textContent = "x";
+    remove.title = "Remove " + part.path;
+    remove.addEventListener("click", () => {
+      vscode.postMessage({
+        type: "remove_context",
+        path: part.path
+      });
+    });
+
+    chip.appendChild(remove);
+    container.appendChild(chip);
+  });
 }
 
 attach.addEventListener("click", () => {
   vscode.postMessage({ type: "attach_files" });
+});
+
+document.getElementById("attach-text").addEventListener("click", () => {
+  const value = window.prompt("Paste text to attach to the next question:");
+
+  if (value) {
+    vscode.postMessage({ type: "attach_text", value: value });
+  }
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1539,6 +1791,34 @@ function addMessage(
     messages.scrollHeight;
 }
 
+function addAgentRetryControls(agents) {
+  const failed = (agents || []).filter((agent) => agent.status === "failed");
+
+  if (failed.length === 0) {
+    return;
+  }
+
+  const element = document.createElement("div");
+  element.className = "agent-retries";
+  element.textContent = "Retry specialist:";
+
+  failed.forEach((agent) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = agent.profile;
+    button.addEventListener("click", () => {
+      vscode.postMessage({
+        type: "retry_agent",
+        profile: agent.profile
+      });
+    });
+    element.appendChild(button);
+  });
+
+  messages.appendChild(element);
+  messages.scrollTop = messages.scrollHeight;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Usage                                                                      */
 /* -------------------------------------------------------------------------- */
@@ -1617,6 +1897,9 @@ function setProcessing(
   send.disabled =
     value;
 
+  cancel.disabled =
+    !value;
+
   if (value) {
 
     send.textContent =
@@ -1664,7 +1947,14 @@ function sendMessage() {
 
   vscode.postMessage({
     type: "send_message",
-    value: value
+    value: value,
+    mode: mode.value,
+    agentProfile: mode.value === "ask"
+      ? "ask"
+      : agentProfile.value,
+    agentCount: mode.value === "ask"
+      ? 1
+      : Number(agentCount.value)
   });
 }
 
@@ -1676,6 +1966,14 @@ send.addEventListener(
   "click",
   sendMessage
 );
+
+cancel.addEventListener("click", () => {
+  vscode.postMessage({ type: "cancel_request" });
+});
+
+retry.addEventListener("click", () => {
+  vscode.postMessage({ type: "retry_last" });
+});
 
 input.addEventListener(
   "keydown",
@@ -1727,6 +2025,8 @@ window.addEventListener(
           "assistant"
         );
 
+        addAgentRetryControls(message.agents);
+
         addUsage(
           message.usage
         );
@@ -1749,6 +2049,13 @@ window.addEventListener(
         contextParts.length = 0;
         contextParts.push(...message.parts);
         renderContextParts();
+        break;
+
+      case "agent_event":
+        addMessage(
+          "[" + message.event.profile + "] " + message.event.message,
+          "assistant"
+        );
         break;
 
       case "error":
@@ -1870,9 +2177,30 @@ type WebviewMessage =
   | {
       type: "send_message";
       value: string;
+      mode: "ask" | "agent";
+      agentProfile: AgentProfile;
+      agentCount: number;
+    }
+  | {
+      type: "cancel_request";
+    }
+  | {
+      type: "retry_last";
+    }
+  | {
+      type: "retry_agent";
+      profile: AgentProfile;
     }
   | {
       type: "attach_files";
+    }
+  | {
+      type: "remove_context";
+      path: string;
+    }
+  | {
+      type: "attach_text";
+      value: string;
     }
   | {
       type: "clear";
@@ -1891,13 +2219,24 @@ type WebviewResponse =
       usage: AIUsage;
       requestId: string;
       model: string;
+      agents: AgentRun[];
     }
   | {
       type: "context";
       parts: Array<{
         path: string;
         kind: string;
+        language: string;
+        size: number;
+        tokens: number;
       }>;
+    }
+  | {
+      type: "cancelled";
+    }
+  | {
+      type: "agent_event";
+      event: AgentEvent;
     }
   | {
       type: "error";
@@ -1917,7 +2256,6 @@ class AuthenticationError extends Error {
   ) {
 
     super(message);
-
     this.name =
       "AuthenticationError";
   }

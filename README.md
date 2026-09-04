@@ -2,9 +2,9 @@
 
 ## Current Development Stage
 
-**Stage 7 — Safe Code Modification**
+**Stage 11 — Backend Agent Orchestration**
 
-Status: APPROVAL-GATED FOUNDATION IMPLEMENTED and verified in the current codebase.
+Status: FOUNDATION IMPLEMENTED and verified in the current codebase.
 
 The system now supports a local adaptive reasoning loop in which Gemini can request additional read-only evidence, M3 validates and executes the tool locally, and the loop continues until a final answer or a hard stop condition is reached.
 
@@ -282,7 +282,13 @@ Backend MongoDB/Redis answer history
 │                                                             │
 │  STAGE 7  APPROVAL-GATED FOUNDATION IMPLEMENTED            │
 │                                                             │
-│  STAGE 8  NEXT: CONTEXT SELECTION                           │
+│  STAGE 8  CONTEXT FOUNDATION IMPLEMENTED                    │
+│                                                             │
+│  STAGE 9  ASK AND AGENT MODES FOUNDATION IMPLEMENTED       │
+│                                                             │
+│  STAGE 10 SELECTABLE MULTI-AGENT FOUNDATION IMPLEMENTED    │
+│                                                             │
+│  STAGE 11 CURRENT: BACKEND ORCHESTRATION FOUNDATION        │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -397,7 +403,10 @@ Implemented foundation:
 - Active editor context is captured automatically for each request.
 - A non-empty editor selection is sent as exact selected text with line metadata.
 - Multiple files can be attached through the VS Code file picker.
+- Pasted text can be attached explicitly to the next question.
+- Context parts can be removed individually or cleared with the conversation.
 - Attached scope is shown in the chat view.
+- Context chips show source kind, path, and estimated tokens.
 - Context parts are typed and validated independently by the backend.
 
 Backend work:
@@ -409,9 +418,11 @@ Backend work:
 
 Acceptance criteria: users can ask about only highlighted code or selected files, and M3 never silently expands that context.
 
-Remaining Stage 8 work: removable attachment chips, drag-and-drop and pasted files, per-conversation context management, token estimates, and richer source citations.
+Remaining Stage 8 work: drag-and-drop files, durable per-conversation context history, and richer source citations.
 
 ## Stage 9 - Ask and Agent Modes
+
+**Status: FOUNDATION IMPLEMENTED**
 
 **Goal:** Make interaction behavior predictable.
 
@@ -427,7 +438,47 @@ Backend work:
 
 Acceptance criteria: Ask mode only answers; Agent mode is the only mode allowed to investigate or propose changes.
 
+Implemented foundation:
+
+- The composer provides explicit Ask and Agent modes.
+- Ask mode skips local search and investigation and sends only explicit context and memory.
+- The backend validates the mode and rejects invalid values.
+- The backend rejects adaptive tool requests made during Ask mode.
+
+## Permission-Controlled Tool Foundation
+
+Before multi-agent orchestration, M3 now has a typed local tool registry shared by the Agent contract and backend policy model.
+
+Implemented tools:
+
+```text
+read_file          Existing read-only file access
+search             Existing indexed search
+list_files         Existing project listing
+get_diagnostics    Workspace diagnostics inspection
+git_diff           Fixed-argument workspace Git diff
+git_status         Workspace Git status
+run_task           Allowlisted VS Code task execution
+apply_change_set   Reviewed old/new file changes
+create_file        Approval-gated file creation
+delete_file        Approval-gated file deletion
+rename_file        Approval-gated rename
+move_file          Approval-gated move
+```
+
+Permission rules:
+
+- Ask mode exposes no tools and the backend rejects enabled tools or tool requests.
+- Agent mode can inspect files, diagnostics, and Git state.
+- Tasks and all mutations require explicit approval.
+- Paths are workspace-bound and sensitive paths are rejected.
+- Git operations use fixed arguments, a timeout, and bounded output; commit and push are not available.
+
+The registry is the single local execution boundary. Gemini can request capabilities through typed contracts, but it never receives direct filesystem, terminal, or Git process access.
+
 ## Stage 10 - Selectable Multi-Agent Workspace
+
+**Status: FOUNDATION IMPLEMENTED**
 
 **Goal:** Let users choose how many specialist agents collaborate.
 
@@ -461,7 +512,25 @@ Backend work:
 
 Acceptance criteria: users can choose one or several agents, the Coordinator returns one grounded answer, and a failed specialist does not erase successful results.
 
+Implemented foundation:
+
+- The composer provides specialist profile selection and a bounded count from 1 to 5.
+- Ask mode is normalized to one Ask agent and cannot enable specialist tools.
+- Agent profile, count, and tool policy are sent through the typed client/backend contract.
+- The backend validates profile and count and adds role-aware instructions to Gemini prompts.
+
+Implemented orchestration foundation:
+
+- Coordinator requests with more than one Agent run bounded specialist calls in parallel.
+- Specialist reports are merged into one Coordinator answer.
+- Failed specialists are logged and excluded when other specialists succeed.
+- Usage totals and project memory are recorded for the complete multi-agent request.
+
+Remaining Stage 10 work: richer per-agent selection UX, evidence deduplication, and specialist-specific context budgets.
+
 ## Stage 11 - Backend Agent Orchestration
+
+**Status: FOUNDATION IMPLEMENTED**
 
 **Goal:** Make multi-agent behavior reliable across client and server.
 
@@ -472,6 +541,33 @@ Acceptance criteria: users can choose one or several agents, the Coordinator ret
 - Keep local filesystem access in the extension; the backend may request tools but never execute them.
 - Store resumable task state and compact traces without retaining raw sensitive context unnecessarily.
 - Make memory updates explicit and attributable to an agent and request.
+
+Implemented foundation:
+
+- Bounded specialist calls run concurrently for Coordinator requests.
+- Specialist failures are returned as structured run telemetry while successful results continue.
+- Failed specialists receive one bounded automatic retry unless the request is canceled.
+- Coordinator synthesis produces one final answer from available specialist reports.
+- Per-agent status and token usage are returned to and rendered by the extension.
+- Specialist lifecycle and Coordinator synthesis events are returned as a structured orchestration trace.
+- Authenticated SSE streams specialist lifecycle events to the extension while a request is running.
+- Request cancellation propagates through the backend context to Gemini calls.
+
+Implemented control foundation:
+
+- The chat UI can cancel an active request.
+- Abort signals propagate from the webview to extension fetch and backend Gemini calls.
+- The last question and agent configuration can be retried without losing selected context.
+- The webview receives live specialist and Coordinator events before the final answer.
+- Failed specialists expose direct Retry actions in the chat.
+- Retry reuses the retained typed request and selected context without rerunning healthy specialists.
+- Multi-agent task status is persisted without storing raw source context.
+- Authenticated clients can reload a task by request ID.
+- Authenticated clients can retry one failed specialist with the original typed context.
+- The Agent reloads persisted task events when the live SSE stream is unavailable.
+- Replayed events use the same webview trace as live events.
+
+Remaining Stage 11 work: richer retry history, event controls, and resumable answer state.
 
 ## Stage 12 - Streaming, Quality, and Evaluation
 
@@ -517,7 +613,7 @@ Verify safety and failure behavior
 Update this roadmap
 ```
 
-**Immediate next implementation:** Complete Stage 8 context UX with removable attachment chips, pasted and dropped files, token estimates, and source citations.
+**Immediate next implementation:** Stage 12 richer event history, citations, and quality instrumentation.
 
 ### Verification
 

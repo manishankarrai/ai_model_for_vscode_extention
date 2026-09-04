@@ -10,6 +10,57 @@ export type ToolName =
   | "search"
   | "list_files";
 
+export type InteractionMode = "ask" | "agent";
+
+export type AgentProfile =
+  | "ask"
+  | "explorer"
+  | "bug"
+  | "review"
+  | "builder"
+  | "test"
+  | "architect"
+  | "memory"
+  | "coordinator";
+
+export interface AgentSelection {
+  profile: AgentProfile;
+  count: number;
+}
+
+export type AgentToolName =
+  | "read_file"
+  | "search"
+  | "list_files"
+  | "apply_change_set"
+  | "create_file"
+  | "delete_file"
+  | "rename_file"
+  | "move_file"
+  | "get_diagnostics"
+  | "run_task"
+  | "git_diff"
+  | "git_status";
+
+export interface ToolRequest {
+  tool: AgentToolName;
+  path?: string;
+  targetPath?: string;
+  taskName?: string;
+  changes?: CodeChange[];
+}
+
+export interface ToolResult {
+  tool: AgentToolName;
+  success: boolean;
+  output: string;
+}
+
+export interface ToolPolicy {
+  allowed: AgentToolName[];
+  approval_required: AgentToolName[];
+}
+
 export interface ProjectFile {
   path: string;
   absolutePath: string;
@@ -174,6 +225,32 @@ export interface AIResponse {
   decision:
     AIReasoningDecision;
   implementation_plan?: ImplementationPlan;
+  agents?: AgentRun[];
+  events?: AgentEvent[];
+}
+
+export interface AgentEvent {
+  profile: AgentProfile;
+  type: "started" | "completed" | "failed" | "synthesizing";
+  message: string;
+  timestamp: number;
+}
+
+export interface AgentTaskStatus {
+  request_id: string;
+  status: "running" | "completed" | "failed";
+  agents: AgentRun[];
+  events: AgentEvent[];
+  answer?: string;
+}
+
+export interface AgentRun {
+  profile: AgentProfile;
+  status: "completed" | "failed";
+  attempts?: number;
+  input_tokens: number;
+  output_tokens: number;
+  error?: string;
 }
 
 export interface ImplementationPlan {
@@ -202,6 +279,9 @@ export interface AIRequest {
   action: Intent;
   request_id: string;
   question: string;
+  mode: InteractionMode;
+  tool_policy?: ToolPolicy;
+  agent?: AgentSelection;
 
   project: ProjectContext;
 
@@ -242,6 +322,8 @@ export interface InvestigationEvidence {
   symbols: string[];
 
   dependencies: string[];
+
+  relatedSymbols?: string[];
 }
 
 export interface InvestigationResult {

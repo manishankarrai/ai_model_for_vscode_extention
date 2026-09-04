@@ -2,7 +2,9 @@ import * as vscode from "vscode";
 
 import {
   AIRequest,
-  AIResponse
+  AIResponse,
+  AgentEvent,
+  AgentTaskStatus
 } from "../models/types";
 
 interface BackendErrorResponse {
@@ -75,13 +77,15 @@ export class BackendClient {
 
   async sendAIRequest(
     request: AIRequest,
-    accessToken: string
+    accessToken: string,
+    signal?: AbortSignal
   ): Promise<AIResponse> {
 
     return this.post<AIResponse>(
       "/api/v1/ai",
       request,
-      accessToken
+      accessToken,
+      signal
     );
   }
 
@@ -102,10 +106,81 @@ export class BackendClient {
     );
   }
 
+  async getAgentTask(
+    requestId: string,
+    accessToken: string
+  ): Promise<AgentTaskStatus> {
+    return this.get<AgentTaskStatus>(
+      `/api/v1/ai/tasks/${encodeURIComponent(requestId)}`,
+      accessToken
+    );
+  }
+
+  async retryAgent(
+    request: AIRequest,
+    requestId: string,
+    profile: string,
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<unknown> {
+    return this.post<unknown>(
+      `/api/v1/ai/tasks/${encodeURIComponent(requestId)}/retry?profile=${encodeURIComponent(profile)}`,
+      request,
+      accessToken,
+      signal
+    );
+  }
+
+  async streamAgentEvents(
+    requestId: string,
+    accessToken: string,
+    onEvent: (event: AgentEvent) => void,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const response = await fetch(
+      `${this.backendUrl}/api/v1/ai/events?request_id=${encodeURIComponent(requestId)}`,
+      {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal
+      }
+    );
+
+    if (!response.ok || !response.body) {
+      throw new Error(`Unable to open agent event stream: ${response.status}`);
+    }
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    try {
+      while (true) {
+        const chunk = await reader.read();
+        if (chunk.done) {
+          break;
+        }
+        buffer += decoder.decode(chunk.value, { stream: true });
+        const frames = buffer.split("\n\n");
+        buffer = frames.pop() ?? "";
+        for (const frame of frames) {
+          const data = frame
+            .split("\n")
+            .find((line) => line.startsWith("data: "));
+          if (data) {
+            onEvent(JSON.parse(data.slice(6)) as AgentEvent);
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
+  }
+
   private async post<T>(
     endpoint: string,
     body: unknown,
-    accessToken?: string
+    accessToken?: string,
+    signal?: AbortSignal
   ): Promise<T> {
 
     const headers: Record<string, string> = {
@@ -126,7 +201,8 @@ export class BackendClient {
         {
           method: "POST",
           headers,
-          body: JSON.stringify(body)
+          body: JSON.stringify(body),
+          signal
         }
       );
 
