@@ -9,23 +9,12 @@ import {
   ToolResult
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
-
-const MUTATING_TOOLS: AgentToolName[] = [
-  "apply_change_set",
-  "create_file",
-  "delete_file",
-  "rename_file",
-  "move_file"
-];
-
-const READ_TOOLS: AgentToolName[] = [
-  "read_file",
-  "search",
-  "list_files",
-  "get_diagnostics",
-  "git_diff",
-  "git_status"
-];
+import {
+  assertNotSensitivePath,
+  assertWorkspaceTrusted,
+  validateWorkspaceRelativePath
+} from "../safety/changeValidation";
+import { availableTools, isToolAllowed } from "./toolPolicy";
 
 const execFileAsync = promisify(execFile);
 
@@ -37,15 +26,7 @@ export class WorkspaceToolRegistry {
   getAvailableTools(
     mode: InteractionMode
   ): AgentToolName[] {
-    if (mode === "ask") {
-      return [];
-    }
-
-    return [
-      ...READ_TOOLS,
-      ...MUTATING_TOOLS,
-      "run_task"
-    ];
+    return availableTools(mode);
   }
 
   async execute(
@@ -56,7 +37,7 @@ export class WorkspaceToolRegistry {
       throw new Error("Ask mode does not permit tool execution.");
     }
 
-    if (!this.getAvailableTools(mode).includes(request.tool)) {
+    if (!isToolAllowed(mode, request.tool)) {
       throw new Error(`Tool '${request.tool}' is not available.`);
     }
 
@@ -88,6 +69,7 @@ export class WorkspaceToolRegistry {
     filePath: string | undefined,
     content: string
   ): Promise<ToolResult> {
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const uri = this.resolvePath(filePath);
     await this.confirm(`Create ${filePath}?`);
     const edit = new vscode.WorkspaceEdit();
@@ -102,6 +84,7 @@ export class WorkspaceToolRegistry {
   private async deleteFile(
     filePath: string | undefined
   ): Promise<ToolResult> {
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const uri = this.resolvePath(filePath);
     await vscode.workspace.openTextDocument(uri);
     await this.confirm(`Delete ${filePath}?`);
@@ -117,6 +100,7 @@ export class WorkspaceToolRegistry {
     filePath: string | undefined,
     targetPath: string | undefined
   ): Promise<ToolResult> {
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const source = this.resolvePath(filePath);
     const target = this.resolvePath(targetPath);
     await vscode.workspace.openTextDocument(source);
@@ -183,13 +167,11 @@ export class WorkspaceToolRegistry {
 
   private resolvePath(filePath: string | undefined): vscode.Uri {
     const workspace = vscode.workspace.workspaceFolders?.[0];
-    const normalized = (filePath ?? "").replace(/\\/g, "/");
-    if (!workspace || !normalized || normalized.startsWith("/") || normalized.split("/").includes("..")) {
+    if (!workspace) {
       throw new Error(`Unsafe workspace path: ${filePath ?? ""}`);
     }
-    if (normalized.toLowerCase().includes(".env") || /\.(pem|key|p12|pfx|keystore)$/i.test(normalized)) {
-      throw new Error(`Sensitive workspace path: ${normalized}`);
-    }
+    const normalized = validateWorkspaceRelativePath(filePath ?? "");
+    assertNotSensitivePath(normalized);
     return vscode.Uri.joinPath(workspace.uri, ...normalized.split("/"));
   }
 

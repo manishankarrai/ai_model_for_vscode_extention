@@ -12,16 +12,7 @@ export type ToolName =
 
 export type InteractionMode = "ask" | "agent";
 
-export type AgentProfile =
-  | "ask"
-  | "explorer"
-  | "bug"
-  | "review"
-  | "builder"
-  | "test"
-  | "architect"
-  | "memory"
-  | "coordinator";
+export type AgentProfile = string;
 
 export interface AgentSelection {
   profile: AgentProfile;
@@ -216,24 +207,58 @@ export interface TaskState {
 }
 
 
+export interface Citation {
+  path: string;
+  quote?: string;
+  reason?: string;
+  start_line?: number;
+  end_line?: number;
+}
+
+export interface QualityMetrics {
+  groundedness: number;
+  file_selection: number;
+  tool_efficiency: number;
+  answer_quality: number;
+  latency_ms: number;
+  fallback_used: boolean;
+  fallback_model?: string;
+  cited_files: number;
+  context_files: number;
+  recovery_score?: number;
+}
+
 export interface AIResponse {
   request_id: string;
   action: Intent;
   answer: string;
   model: string;
   usage: AIUsage;
-  decision:
-    AIReasoningDecision;
+  decision?: {
+    action: AIReasoningDecision;
+    answer?: string;
+    confidence: number;
+    reason?: string;
+    citations?: Citation[];
+  };
   implementation_plan?: ImplementationPlan;
   agents?: AgentRun[];
   events?: AgentEvent[];
+  citations?: Citation[];
+  quality?: QualityMetrics;
 }
 
 export interface AgentEvent {
   profile: AgentProfile;
-  type: "started" | "completed" | "failed" | "synthesizing";
+  type: "started" | "completed" | "failed" | "synthesizing" | "progress" | "token" | "citation" | "quality" | "done";
   message: string;
   timestamp: number;
+  delta?: string;
+  path?: string;
+  quote?: string;
+  start_line?: number;
+  end_line?: number;
+  confidence?: number;
 }
 
 export interface AgentTaskStatus {
@@ -273,6 +298,40 @@ export interface AIUsage {
   total_tokens: number;
   ai_api_calls: number;
   estimated_cost: number;
+  charged_credits?: number;
+  wallet_balance?: number;
+  agent_id?: string;
+}
+
+export interface BillingAgent {
+  id: string;
+  name: string;
+  description?: string;
+  category?: string;
+  model?: string;
+  active: boolean;
+  input_cost_per_1m: number;
+  output_cost_per_1m: number;
+}
+
+export interface CreditPlan {
+  id: string;
+  name: string;
+  credits: number;
+  price: number;
+  currency: string;
+  active: boolean;
+}
+
+export interface WalletSummary {
+  balance: number;
+  unit: string;
+  ledger?: Array<{
+    type: string;
+    amount: number;
+    balance_after: number;
+    note?: string;
+  }>;
 }
 
 export interface AIRequest {

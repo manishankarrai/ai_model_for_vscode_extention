@@ -2,9 +2,9 @@
 
 ## Current Development Stage
 
-**Stage 11 — Backend Agent Orchestration**
+**Stage 14 — Billing and Plans**
 
-Status: FOUNDATION IMPLEMENTED and verified in the current codebase.
+Status: WALLET CREDITS AND DYNAMIC AGENTS IMPLEMENTED in the extension and backend.
 
 The system now supports a local adaptive reasoning loop in which Gemini can request additional read-only evidence, M3 validates and executes the tool locally, and the loop continues until a final answer or a hard stop condition is reached.
 
@@ -288,7 +288,11 @@ Backend MongoDB/Redis answer history
 │                                                             │
 │  STAGE 10 SELECTABLE MULTI-AGENT FOUNDATION IMPLEMENTED    │
 │                                                             │
-│  STAGE 11 CURRENT: BACKEND ORCHESTRATION FOUNDATION        │
+│  STAGE 12 STREAMING, QUALITY, AND EVALUATION COMPLETE     │
+│                                                             │
+│  STAGE 13 PRODUCTION SAFETY AND RECOVERY COMPLETE          │
+│                                                             │
+│  STAGE 14 CURRENT: BILLING, WALLET, AND AGENT CATALOG      │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -571,29 +575,54 @@ Remaining Stage 11 work: richer retry history, event controls, and resumable ans
 
 ## Stage 12 - Streaming, Quality, and Evaluation
 
+**Status: QUALITY PRODUCTIZATION IMPLEMENTED**
+
 **Goal:** Make M3 feel fast and measurably intelligent.
 
-- Stream progress and final answer tokens to the webview.
-- Render citations, expandable evidence, diffs, confidence, and validation results.
-- Add regression tests for context selection, Ask restrictions, Agent permissions, multi-agent merging, and stale-file protection.
-- Build evaluation sets for bug analysis, implementation planning, architecture, and selected-code questions.
-- Measure groundedness, useful file selection, tool efficiency, answer quality, latency, and model-failure recovery.
-- Choose model fallback by capability and task type, not only a static model list.
+Implemented foundation:
+
+- Live agent events stream to the webview while a request is running.
+- Token and citation events are surfaced in the chat UI as streaming progress.
+- Final answer payloads include citations and quality metrics for groundedness and answer quality.
+- The UI renders a summary of citations and quality scores alongside the answer.
+- The backend already emits quality and citation events, with compact retention for task history.
+
+Implemented quality productization:
+
+- Exact quoted snippets with 1-based line ranges and citation fallback when a path is missing.
+- Expandable, clickable evidence blocks that open the cited file at the attributed range.
+- Validation checks, proposed diffs, and confidence shown separately from the final answer.
+- Regression coverage for context selection, Ask restrictions, Agent permissions, multi-agent merging, stale-file protection, and citation fallback.
+- Evaluation sets for architecture, bug analysis, implementation planning, and selected-code questions, with groundedness, file selection, tool efficiency, answer quality, latency, and model-failure recovery scores.
+- Model fallback ordered by task type and capability: fast Ask summaries, reasoning models for architecture/bugs/implementation.
 
 ## Stage 13 - Production Safety and Recovery
 
+**Status: PRODUCTION SAFETY FOUNDATION IMPLEMENTED**
+
 **Goal:** Make approved changes trustworthy.
 
-- Add complete diff review with per-file and per-hunk approval.
-- Add named change sets, audit records, and reliable rollback history.
-- Revalidate file hashes immediately before every write.
-- Add workspace trust checks, permission prompts, size limits, and sensitive-path policies.
-- Add retry isolation, idempotency keys, rate protection, and backend observability.
-- Make memory conflict resolution explicit when local and backend facts disagree.
+Implemented foundation:
+
+- Complete diff review with per-file approval and optional per-hunk approval for multi-hunk files.
+- Named change sets with audit records and rollback history (`ChangeSetStore` + applier).
+- File content hashes revalidated immediately before every write and rollback.
+- Workspace trust checks, permission prompts, size limits, and shared sensitive-path policies.
+- Backend retry isolation locks, request_id idempotency cache, rate protection, and observability counters.
+- Explicit local-vs-backend memory conflict resolution (`keep_both` / `keep_local` / `prefer_backend`).
 
 ## Stage 14 - Billing and Plans (Last)
 
-Billing begins only after the core product is reliable. It should cover plan limits, usage metering, subscriptions, invoices, entitlements, and upgrade flows without changing the safety or reasoning contracts established earlier.
+**Status: WALLET CREDITS AND DYNAMIC AGENTS IMPLEMENTED**
+
+**Goal:** Sell credits, deduct them from a user wallet on AI usage, and only call models for active catalog agents.
+
+Implemented:
+
+- User chat shows credit balance only. Add-credits / plan purchase stay on backend APIs for later CRM.
+- Dynamic agent catalog from `GET /api/v1/agents`. Hardcoded provider categories via `GET /api/v1/agent-categories`: openai, claude, grok, gemini.
+- Creating an agent requires a category and model. The backend routes that agent's requests through the matching provider API (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `GROK_API_KEY`/`XAI_API_KEY`, `GEMINI_API_KEY`).
+- Compact Copilot-style composer: attach, mode, agent picker, and one send/stop/retry control.
 
 ## Cross-Stage Implementation Rule
 
@@ -613,7 +642,7 @@ Verify safety and failure behavior
 Update this roadmap
 ```
 
-**Immediate next implementation:** Stage 12 richer event history, citations, and quality instrumentation.
+**Immediate next implementation:** Razorpay checkout and Copilot-grade polish (see remaining product gaps).
 
 ### Verification
 

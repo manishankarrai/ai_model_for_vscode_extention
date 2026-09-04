@@ -4,10 +4,10 @@ import * as vscode from "vscode";
 import {
   AIRequest,
   AIResponse,
+  AIContext,
   AgentProfile,
   AgentEvent,
   AgentTaskStatus,
-  AgentToolName,
   ContextPart,
   InteractionMode,
   InvestigationResult,
@@ -40,6 +40,8 @@ import { Logger } from "../utils/Logger";
 import { ReadOnlyGuard } from "../safety/ReadOnlyGuard";
 import { ProjectUnderstanding } from "../project/project-understanding";
 import { ProjectMemory } from "../state/ProjectMemory";
+import { resolveRequestContext } from "../intelligence/contextSelection";
+import { getToolPolicy } from "../tools/toolPolicy";
 
 
 // ============================================================
@@ -262,7 +264,7 @@ export class Agent {
     const requestId =
       this.createRequestId();
 
-    if (onEvent && mode === "agent" && agentCount > 1) {
+    if (onEvent && mode === "agent") {
       void this.backend.streamAgentEvents(
         requestId,
         accessToken,
@@ -683,27 +685,38 @@ export class Agent {
       // Build context
       // ------------------------------------------------------
 
-      let context =
-        await this.contextBuilder.build(
-          index,
-          ranked,
-          projectModel,
-          {
-            maxFiles,
-            maxChars
-          },
-          investigationEvidence
-        );
+      let context: AIContext;
 
-      if (selectedContext.length > 0) {
-        context = {
-          ...context,
-          files: selectedContext.map((part) => ({
-            path: part.path,
-            content: part.content
-          })),
-          parts: selectedContext
-        };
+      if (mode === "ask") {
+        context = resolveRequestContext({
+          mode,
+          selected: selectedContext,
+          investigated: [],
+          evidence: [],
+          indexSummary: "",
+          maxFiles
+        });
+      } else {
+        const investigated =
+          await this.contextBuilder.build(
+            index,
+            ranked,
+            projectModel,
+            {
+              maxFiles,
+              maxChars
+            },
+            investigationEvidence
+          );
+
+        context = resolveRequestContext({
+          mode,
+          selected: selectedContext,
+          investigated: investigated.files,
+          evidence: investigated.evidence,
+          indexSummary: investigated.indexSummary,
+          maxFiles
+        });
       }
 
 
@@ -783,7 +796,7 @@ export class Agent {
 
         mode,
 
-        tool_policy: this.getToolPolicy(mode),
+        tool_policy: getToolPolicy(mode),
 
         agent: {
           profile: agentProfile,
@@ -940,45 +953,6 @@ export class Agent {
       signal
     ) as { answer: string };
     return result.answer;
-  }
-
-  private getToolPolicy(
-    mode: InteractionMode
-  ): {
-    allowed: AgentToolName[];
-    approval_required: AgentToolName[];
-  } {
-    if (mode === "ask") {
-      return {
-        allowed: [],
-        approval_required: []
-      };
-    }
-
-    return {
-      allowed: [
-        "read_file",
-        "search",
-        "list_files",
-        "get_diagnostics",
-        "git_diff",
-        "git_status",
-        "run_task",
-        "apply_change_set",
-        "create_file",
-        "delete_file",
-        "rename_file",
-        "move_file"
-      ],
-      approval_required: [
-        "run_task",
-        "apply_change_set",
-        "create_file",
-        "delete_file",
-        "rename_file",
-        "move_file"
-      ]
-    };
   }
 
 

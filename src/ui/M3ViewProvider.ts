@@ -14,6 +14,9 @@ import {
 } from "../models/types";
 
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
+import { isSafeContextPath } from "../intelligence/contextSelection";
+import { BackendClient } from "../backend/BackendClient";
+import type { BillingAgent, CreditPlan, WalletSummary } from "../models/types";
 
 export class M3ViewProvider
   implements vscode.WebviewViewProvider
@@ -28,6 +31,9 @@ export class M3ViewProvider
 
   private readonly codeChangeApplier =
     new CodeChangeApplier();
+
+  private readonly billingClient =
+    new BackendClient();
 
   private requestController?: AbortController;
 
@@ -61,6 +67,8 @@ export class M3ViewProvider
     webviewView.webview.html =
       this.getHtml(webviewView.webview);
 
+    void this.refreshBilling();
+
     webviewView.webview.onDidReceiveMessage(
       async (message: WebviewMessage) => {
         try {
@@ -90,6 +98,29 @@ export class M3ViewProvider
     await this.codeChangeApplier.rollbackLast();
   }
 
+  private async refreshBilling(): Promise<void> {
+    try {
+      const accessToken = await this.getAccessToken();
+      if (!accessToken) {
+        return;
+      }
+      const [wallet, agents] = await Promise.all([
+        this.billingClient.getWallet(accessToken),
+        this.billingClient.getAgents(accessToken)
+      ]);
+      this.post({
+        type: "billing",
+        wallet,
+        agents: agents.agents ?? [],
+        plans: []
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Unable to load billing: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   private async handleMessage(
     message: WebviewMessage
   ): Promise<void> {
@@ -99,7 +130,7 @@ export class M3ViewProvider
           message.value,
           message.mode,
           message.agentProfile,
-          message.agentCount
+          1
         );
         break;
 
@@ -117,7 +148,7 @@ export class M3ViewProvider
             this.lastQuestion.question,
             this.lastQuestion.mode,
             this.lastQuestion.agentProfile,
-            this.lastQuestion.agentCount
+            1
           );
         }
         break;
@@ -131,21 +162,6 @@ export class M3ViewProvider
           (part) => part.path !== message.path
         );
         this.postContextParts();
-        break;
-
-      case "attach_text":
-        if (message.value.trim()) {
-          this.selectedContext = this.selectedContext.filter(
-            (part) => part.path !== "pasted-text"
-          );
-          this.selectedContext.push({
-            kind: "attachment",
-            path: "pasted-text",
-            content: message.value,
-            language: "text"
-          });
-          this.postContextParts();
-        }
         break;
 
       case "clear":
@@ -162,6 +178,18 @@ export class M3ViewProvider
 
       case "open_output":
         this.logger.show();
+        break;
+
+      case "open_citation":
+        await this.openCitation(
+          message.path,
+          message.startLine,
+          message.endLine
+        );
+        break;
+
+      case "load_billing":
+        await this.refreshBilling();
         break;
 
       default:
@@ -239,7 +267,15 @@ export class M3ViewProvider
         requestId: response.request_id,
         model: response.model,
         agents: response.agents ?? [],
+        citations: response.citations ?? [],
+        quality: response.quality,
+        confidence: typeof response.decision === "object"
+          ? response.decision?.confidence
+          : undefined,
+        implementationPlan: response.implementation_plan
       });
+
+      await this.refreshBilling();
 
       if (response.implementation_plan?.changes) {
         await this.codeChangeApplier.offer(
@@ -332,7 +368,7 @@ export class M3ViewProvider
       false
     );
 
-    if (!this.isSafeContextPath(relativePath)) {
+    if (!isSafeContextPath(relativePath)) {
       return parts;
     }
 
@@ -371,7 +407,7 @@ export class M3ViewProvider
     for (const uri of files) {
       const relativePath = vscode.workspace.asRelativePath(uri, false);
 
-      if (!this.isSafeContextPath(relativePath)) {
+      if (!isSafeContextPath(relativePath)) {
         continue;
       }
 
@@ -410,15 +446,31 @@ export class M3ViewProvider
     });
   }
 
-  private isSafeContextPath(filePath: string): boolean {
-    const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+  private async openCitation(
+    filePath: string,
+    startLine?: number,
+    endLine?: number
+  ): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace || !isSafeContextPath(filePath)) {
+      return;
+    }
 
-    return !normalized.startsWith("/") &&
-      !normalized.split("/").includes("..") &&
-      !normalized.endsWith(".pem") &&
-      !normalized.endsWith(".key") &&
-      !normalized.includes("/.env") &&
-      normalized !== ".env";
+    const uri = vscode.Uri.joinPath(
+      workspace.uri,
+      ...filePath.replace(/\\/g, "/").split("/")
+    );
+    const document = await vscode.workspace.openTextDocument(uri);
+    const start = Math.max(0, (startLine ?? 1) - 1);
+    const end = Math.max(start, (endLine ?? startLine ?? 1) - 1);
+    await vscode.window.showTextDocument(document, {
+      selection: new vscode.Range(
+        start,
+        0,
+        end,
+        document.lineAt(Math.min(end, document.lineCount - 1)).text.length
+      )
+    });
   }
 
   private getErrorMessage(
@@ -443,42 +495,7 @@ export class M3ViewProvider
   private formatAnswer(
     response: AIResponse
   ): string {
-    const plan = response.implementation_plan;
-
-    const section = (
-      title: string,
-      items: string[]
-    ): string => {
-      if (items.length === 0) {
-        return "";
-      }
-
-      return `\n\n### ${title}\n${items
-        .map((item, index) => `${index + 1}. ${item}`)
-        .join("\n")}`;
-    };
-
-    const agentSection = response.agents && response.agents.length > 0
-      ? "\n\n### Agent Runs\n" + response.agents
-        .map((agent) => "- " + agent.profile + ": " + agent.status)
-        .join("\n")
-      : "";
-
-    const eventSection = response.events && response.events.length > 0
-      ? "\n\n### Orchestration Trace\n" + response.events
-        .map((event) => "- " + event.profile + ": " + event.message)
-        .join("\n")
-      : "";
-
-    return [
-      response.answer,
-      plan ? section("Files", plan.files) : "",
-      plan ? section("Implementation Steps", plan.steps) : "",
-      plan ? section("Validation", plan.validation) : "",
-      plan ? section("Risks and Assumptions", plan.risks) : "",
-      agentSection,
-      eventSection
-    ].join("");
+    return response.answer;
   }
 
   private post(
@@ -574,38 +591,29 @@ body {
 
 .header {
   display: flex;
-
   align-items: center;
-
   justify-content: space-between;
-
-  padding: 10px 12px;
-
-  border-bottom:
-    1px solid
-    var(--vscode-panel-border);
-
+  padding: 8px 10px 6px;
   font-weight: 600;
-
   user-select: none;
 }
 
 .header-title {
   display: flex;
-
   align-items: center;
+  gap: 8px;
+  font-size: 13px;
+}
 
-  gap: 6px;
+.credits {
+  margin-left: auto;
+  font-size: 11px;
+  font-weight: 500;
+  opacity: 0.75;
 }
 
 .model {
-  margin-left: auto;
-
-  font-size: 10px;
-
-  opacity: 0.5;
-
-  font-weight: normal;
+  display: none;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -614,24 +622,18 @@ body {
 
 .messages {
   flex: 1;
-
   overflow-y: auto;
-
-  padding: 12px;
-
+  padding: 8px 10px 4px;
   scroll-behavior: smooth;
 }
 
 .message {
-  margin-bottom: 12px;
-
-  padding: 10px 12px;
-
-  border-radius: 8px;
-
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
   word-break: break-word;
-
-  line-height: 1.5;
+  line-height: 1.45;
+  font-size: 12.5px;
 }
 
 .user {
@@ -889,19 +891,172 @@ body {
   opacity: 0.6;
 }
 
+.billing-bar {
+  display: none;
+}
+
+.status {
+  display: none;
+}
+
+.quality-summary {
+  margin: 0 0 12px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.quality-summary strong {
+  font-weight: 600;
+}
+
+.citation-list {
+  margin: 0 0 12px;
+  padding: 0;
+  list-style: none;
+}
+
+.citation-item {
+  margin-bottom: 8px;
+  padding: 8px 10px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-textBlockQuote-background);
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.citation-path {
+  display: block;
+  font-weight: 600;
+  margin-bottom: 4px;
+  cursor: pointer;
+  color: var(--vscode-textLink-foreground);
+  text-decoration: underline;
+  background: none;
+  border: none;
+  padding: 0;
+  font: inherit;
+  text-align: left;
+}
+
+.citation-reason,
+.citation-lines {
+  display: block;
+  opacity: 0.8;
+}
+
+.citation-quote {
+  margin-top: 6px;
+  padding: 8px;
+  border-left: 2px solid var(--vscode-textLink-foreground);
+  font-family: var(--vscode-editor-font-family);
+  white-space: pre-wrap;
+}
+
+.review-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0 0 12px;
+}
+
+.confidence-meter {
+  margin: 0 0 12px;
+  font-size: 11px;
+}
+
+.confidence-bar {
+  height: 6px;
+  margin-top: 4px;
+  border-radius: 99px;
+  background: var(--vscode-editorWidget-border);
+  overflow: hidden;
+}
+
+.confidence-bar span {
+  display: block;
+  height: 100%;
+  background: var(--vscode-progressBar-background);
+}
+
+.validation-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.validation-check {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.validation-check::before {
+  content: "✓";
+  opacity: 0.8;
+}
+
+.diff-preview {
+  margin: 0 0 10px;
+  padding: 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  font-family: var(--vscode-editor-font-family);
+  font-size: 11px;
+  white-space: pre-wrap;
+  overflow: auto;
+}
+
+.diff-removed {
+  color: var(--vscode-errorForeground);
+}
+
+.diff-added {
+  color: var(--vscode-gitDecoration-addedResourceForeground);
+}
+
+.detail-panel {
+  margin: 0 0 12px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.detail-panel summary {
+  padding: 8px 10px;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 600;
+  list-style: none;
+}
+
+.detail-panel summary::-webkit-details-marker {
+  display: none;
+}
+
+.detail-body {
+  padding: 0 10px 10px;
+  font-size: 11px;
+  line-height: 1.6;
+}
+
+.detail-body ul,
+.detail-body ol {
+  margin: 0;
+  padding-left: 18px;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Status                                                                     */
 /* -------------------------------------------------------------------------- */
 
 .status {
-  padding:
-    5px 10px;
-
-  font-size: 11px;
-
-  opacity: 0.7;
-
-  min-height: 24px;
+  display: none;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -909,99 +1064,127 @@ body {
 /* -------------------------------------------------------------------------- */
 
 .composer {
+  padding: 8px 10px 10px;
+}
+
+.composer-box {
   display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px;
+  border: 1px solid var(--vscode-input-border);
+  border-radius: 12px;
+  background: var(--vscode-input-background);
+}
 
-  align-items: flex-end;
-
-  gap: 8px;
-
-  padding: 10px;
-
-  border-top:
-    1px solid
-    var(--vscode-panel-border);
+.composer-box:focus-within {
+  border-color: var(--vscode-focusBorder);
 }
 
 textarea {
   flex: 1;
-
   resize: none;
-
-  min-height: 42px;
-
-  max-height: 150px;
-
-  padding:
-    8px 10px;
-
-  color:
-    var(--vscode-input-foreground);
-
-  background:
-    var(--vscode-input-background);
-
-  border:
-    1px solid
-    var(--vscode-input-border);
-
-  border-radius: 5px;
-
+  min-height: 36px;
+  max-height: 120px;
+  padding: 4px 6px;
+  color: var(--vscode-input-foreground);
+  background: transparent;
+  border: none;
+  border-radius: 0;
   outline: none;
-
-  font-family:
-    var(--vscode-font-family);
-
-  font-size:
-    var(--vscode-font-size);
-
+  font-family: var(--vscode-font-family);
+  font-size: var(--vscode-font-size);
   line-height: 1.4;
 }
 
-textarea:focus {
-  border-color:
-    var(--vscode-focusBorder);
-}
-
 textarea:disabled {
-  opacity: 0.6;
-
+  opacity: 0.65;
   cursor: not-allowed;
 }
 
-button {
-  min-height: 42px;
+.composer-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
 
+.composer-toolbar select {
+  max-width: 110px;
+  height: 26px;
+  padding: 0 6px;
   border: none;
+  border-radius: 6px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  font-size: 11px;
+}
 
-  border-radius: 5px;
-
-  padding:
-    8px 14px;
-
-  color:
-    var(--vscode-button-foreground);
-
-  background:
-    var(--vscode-button-background);
-
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  min-height: 28px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--vscode-foreground);
+  background: transparent;
   cursor: pointer;
-
-  font-family:
-    var(--vscode-font-family);
-
-  font-size:
-    var(--vscode-font-size);
 }
 
-button:hover:not(:disabled) {
-  background:
-    var(--vscode-button-hoverBackground);
+.icon-btn.primary {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
 }
 
-button:disabled {
-  opacity: 0.5;
+.icon-btn:hover:not(:disabled) {
+  background: var(--vscode-toolbar-hoverBackground);
+}
 
+.icon-btn.primary:hover:not(:disabled) {
+  background: var(--vscode-button-hoverBackground);
+}
+
+.icon-btn:disabled {
+  opacity: 0.45;
   cursor: not-allowed;
+}
+
+.composer-toolbar .spacer {
+  flex: 1;
+}
+
+.context-parts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 0 12px 6px;
+  font-size: 11px;
+}
+
+.context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+
+.context-chip button {
+  width: 16px;
+  height: 16px;
+  min-height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1036,14 +1219,9 @@ button:disabled {
 
     <div class="header-title">
 
-      <span>
-        M3 AI Agent
-      </span>
-
-      <span
-        id="model"
-        class="model"
-      ></span>
+      <span>M3</span>
+      <span id="wallet-balance" class="credits">0 credits</span>
+      <span id="model" class="model"></span>
 
     </div>
 
@@ -1058,7 +1236,7 @@ button:disabled {
       id="empty"
       class="empty"
     >
-      Ask M3 about your project.
+      Ask about your project
     </div>
 
   </div>
@@ -1071,83 +1249,26 @@ button:disabled {
   </div>
 
   <div class="composer">
-
-    <textarea
-      id="input"
-      rows="1"
-      placeholder="Ask M3 about your project..."
-      aria-label="Ask M3"
-    ></textarea>
-
-    <select
-      id="mode"
-      aria-label="M3 mode"
-    >
-      <option value="ask">Ask</option>
-      <option value="agent">Agent</option>
-    </select>
-
-    <select
-      id="agent-profile"
-      aria-label="Agent profile"
-    >
-      <option value="coordinator">Coordinator</option>
-      <option value="explorer">Explorer</option>
-      <option value="bug">Bug</option>
-      <option value="review">Review</option>
-      <option value="builder">Builder</option>
-      <option value="test">Test</option>
-      <option value="architect">Architect</option>
-      <option value="memory">Memory</option>
-    </select>
-
-    <select
-      id="agent-count"
-      aria-label="Agent count"
-    >
-      <option value="1">1 agent</option>
-      <option value="2">2 agents</option>
-      <option value="3">3 agents</option>
-      <option value="4">4 agents</option>
-      <option value="5">5 agents</option>
-    </select>
-
-    <button
-      id="send"
-      type="button"
-    >
-      Send
-    </button>
-
-    <button
-      id="cancel"
-      type="button"
-      disabled
-    >
-      Cancel
-    </button>
-
-    <button
-      id="retry"
-      type="button"
-    >
-      Retry
-    </button>
-
-    <button
-      id="attach"
-      type="button"
-    >
-      Attach Files
-    </button>
-
-    <button
-      id="attach-text"
-      type="button"
-    >
-      Attach Text
-    </button>
-
+    <div class="composer-box">
+      <textarea
+        id="input"
+        rows="1"
+        placeholder="Ask M3"
+        aria-label="Ask M3"
+      ></textarea>
+      <div class="composer-toolbar">
+        <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
+        <select id="mode" aria-label="Mode">
+          <option value="ask">Ask</option>
+          <option value="agent">Agent</option>
+        </select>
+        <select id="agent-profile" aria-label="Agent">
+          <option value="">Agents</option>
+        </select>
+        <span class="spacer"></span>
+        <button id="action" class="icon-btn primary" type="button" title="Send">↑</button>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -1160,23 +1281,14 @@ const vscode =
 const input =
   document.getElementById("input");
 
-const send =
-  document.getElementById("send");
-
-const cancel =
-  document.getElementById("cancel");
-
-const retry =
-  document.getElementById("retry");
+const action =
+  document.getElementById("action");
 
 const mode =
   document.getElementById("mode");
 
 const agentProfile =
   document.getElementById("agent-profile");
-
-const agentCount =
-  document.getElementById("agent-count");
 
 const attach =
   document.getElementById("attach");
@@ -1193,7 +1305,11 @@ const model =
 const empty =
   document.getElementById("empty");
 
+const walletBalance =
+  document.getElementById("wallet-balance");
+
 let processing = false;
+let composerState = "idle";
 
 const contextParts = [];
 
@@ -1241,14 +1357,6 @@ function renderContextParts() {
 
 attach.addEventListener("click", () => {
   vscode.postMessage({ type: "attach_files" });
-});
-
-document.getElementById("attach-text").addEventListener("click", () => {
-  const value = window.prompt("Paste text to attach to the next question:");
-
-  if (value) {
-    vscode.postMessage({ type: "attach_text", value: value });
-  }
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1847,18 +1955,15 @@ function addUsage(
       usage.total_tokens ?? 0
     );
 
-  const estimatedCost =
-    Number(
-      usage.estimated_cost ?? 0
-    );
-
   element.textContent =
     "AI calls: " +
     aiApiCalls +
     " • Tokens: " +
     totalTokens +
-    " • Cost: $" +
-    estimatedCost.toFixed(6);
+    " • Credits: " +
+    Number(usage.charged_credits ?? 0).toFixed(4) +
+    " • Wallet: " +
+    Number(usage.wallet_balance ?? 0).toFixed(2);
 
   messages.appendChild(
     element
@@ -1866,6 +1971,223 @@ function addUsage(
 
   messages.scrollTop =
     messages.scrollHeight;
+}
+
+function addQualitySummary(quality) {
+  if (!quality) {
+    return;
+  }
+
+  const element = document.createElement("div");
+  element.className = "quality-summary";
+  element.innerHTML = [
+    "<strong>Quality</strong>",
+    " • groundedness=" + Number(quality.groundedness ?? 0).toFixed(3),
+    " • file_selection=" + Number(quality.file_selection ?? 0).toFixed(3),
+    " • tool_efficiency=" + Number(quality.tool_efficiency ?? 0).toFixed(3),
+    " • answer_quality=" + Number(quality.answer_quality ?? 0).toFixed(3),
+    " • recovery=" + Number(quality.recovery_score ?? 1).toFixed(3),
+    " • latency=" + Number(quality.latency_ms ?? 0) + "ms"
+  ].join("");
+
+  messages.appendChild(element);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addConfidence(confidence) {
+  if (confidence === undefined || confidence === null) {
+    return;
+  }
+
+  const value = Math.max(0, Math.min(1, Number(confidence)));
+  const element = document.createElement("div");
+  element.className = "confidence-meter";
+  element.innerHTML =
+    "<strong>Confidence</strong> " + value.toFixed(2) +
+    '<div class="confidence-bar"><span style="width:' + (value * 100) + '%"></span></div>';
+  messages.appendChild(element);
+}
+
+function addCitationList(citations) {
+  if (!citations || citations.length === 0) {
+    return;
+  }
+
+  const stack = document.createElement("div");
+  stack.className = "review-stack";
+  const heading = document.createElement("strong");
+  heading.textContent = "Evidence";
+  stack.appendChild(heading);
+
+  citations.forEach((citation) => {
+    const item = document.createElement("details");
+    item.className = "citation-item";
+    item.open = true;
+
+    const summary = document.createElement("summary");
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "citation-path";
+    openButton.textContent = citation.path || "unknown";
+    openButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      vscode.postMessage({
+        type: "open_citation",
+        path: citation.path,
+        startLine: citation.start_line,
+        endLine: citation.end_line
+      });
+    });
+    summary.appendChild(openButton);
+    item.appendChild(summary);
+
+    if (citation.start_line || citation.end_line) {
+      const lines = document.createElement("span");
+      lines.className = "citation-lines";
+      lines.textContent = "lines " + (citation.start_line || "?") + "-" + (citation.end_line || citation.start_line || "?");
+      item.appendChild(lines);
+    }
+
+    if (citation.reason) {
+      const reason = document.createElement("span");
+      reason.className = "citation-reason";
+      reason.textContent = citation.reason;
+      item.appendChild(reason);
+    }
+
+    if (citation.quote) {
+      const quote = document.createElement("pre");
+      quote.className = "citation-quote";
+      quote.textContent = citation.quote;
+      item.appendChild(quote);
+    }
+
+    stack.appendChild(item);
+  });
+
+  messages.appendChild(stack);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addValidationChecks(items) {
+  if (!items || items.length === 0) {
+    return;
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "detail-panel";
+  const details = document.createElement("details");
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = "Validation";
+  const body = document.createElement("div");
+  body.className = "detail-body";
+  const list = document.createElement("ul");
+  list.className = "validation-list";
+  items.forEach((item) => {
+    const entry = document.createElement("li");
+    entry.className = "validation-check";
+    entry.textContent = item;
+    list.appendChild(entry);
+  });
+  body.appendChild(list);
+  details.appendChild(summary);
+  details.appendChild(body);
+  panel.appendChild(details);
+  messages.appendChild(panel);
+}
+
+function previewDiff(original, updated) {
+  const left = String(original ?? "").split("\\n");
+  const right = String(updated ?? "").split("\\n");
+  const max = Math.max(left.length, right.length);
+  const lines = [];
+  for (let index = 0; index < max; index++) {
+    const a = left[index];
+    const b = right[index];
+    if (a === b) {
+      if (a !== undefined) {
+        lines.push({ type: "context", text: a });
+      }
+    } else {
+      if (a !== undefined) {
+        lines.push({ type: "removed", text: a });
+      }
+      if (b !== undefined) {
+        lines.push({ type: "added", text: b });
+      }
+    }
+  }
+  return lines;
+}
+
+function addDiffPreviews(changes) {
+  if (!changes || changes.length === 0) {
+    return;
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "detail-panel";
+  const details = document.createElement("details");
+  details.open = true;
+  const summary = document.createElement("summary");
+  summary.textContent = "Proposed diffs";
+  const body = document.createElement("div");
+  body.className = "detail-body";
+
+  changes.forEach((change) => {
+    const heading = document.createElement("div");
+    heading.textContent = change.path || "file";
+    body.appendChild(heading);
+    const preview = document.createElement("pre");
+    preview.className = "diff-preview";
+    previewDiff(change.original, change.updated).forEach((line) => {
+      const row = document.createElement("div");
+      row.className = line.type === "removed"
+        ? "diff-removed"
+        : line.type === "added"
+          ? "diff-added"
+          : "";
+      row.textContent = (line.type === "removed" ? "- " : line.type === "added" ? "+ " : "  ") + line.text;
+      preview.appendChild(row);
+    });
+    body.appendChild(preview);
+  });
+
+  details.appendChild(summary);
+  details.appendChild(body);
+  panel.appendChild(details);
+  messages.appendChild(panel);
+}
+
+function addExpandableList(title, items) {
+  if (!items || items.length === 0) {
+    return;
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "detail-panel";
+
+  const summary = document.createElement("details");
+  summary.open = true;
+  const summaryHeader = document.createElement("summary");
+  summaryHeader.textContent = title;
+
+  const body = document.createElement("div");
+  body.className = "detail-body";
+
+  const list = document.createElement("ul");
+  items.forEach((item) => {
+    const entry = document.createElement("li");
+    entry.textContent = item;
+    list.appendChild(entry);
+  });
+  body.appendChild(list);
+  summary.appendChild(summaryHeader);
+  summary.appendChild(body);
+  panel.appendChild(summary);
+  messages.appendChild(panel);
+  messages.scrollTop = messages.scrollHeight;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1884,32 +2206,26 @@ function setStatus(
 /* Processing                                                                 */
 /* -------------------------------------------------------------------------- */
 
-function setProcessing(
-  value
-) {
-
-  processing =
-    value;
-
-  input.disabled =
-    value;
-
-  send.disabled =
-    value;
-
-  cancel.disabled =
-    !value;
-
-  if (value) {
-
-    send.textContent =
-      "Working...";
-
-  } else {
-
-    send.textContent =
-      "Send";
+function setComposerState(next) {
+  composerState = next;
+  processing = next === "running";
+  input.disabled = next === "running";
+  if (next === "running") {
+    action.textContent = "■";
+    action.title = "Stop";
+    return;
   }
+  if (next === "failed") {
+    action.textContent = "↻";
+    action.title = "Retry";
+    return;
+  }
+  action.textContent = "↑";
+  action.title = "Send";
+}
+
+function setProcessing(value) {
+  setComposerState(value ? "running" : "idle");
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1917,44 +2233,26 @@ function setProcessing(
 /* -------------------------------------------------------------------------- */
 
 function sendMessage() {
-
   if (processing) {
     return;
   }
-
-  const value =
-    input.value.trim();
-
+  if (!agentProfile.value) {
+    addMessage("Choose an agent from the list.", "error");
+    return;
+  }
+  const value = input.value.trim();
   if (!value) {
     return;
   }
-
-  addMessage(
-    value,
-    "user"
-  );
-
-  input.value =
-    "";
-
-  setProcessing(
-    true
-  );
-
-  setStatus(
-    "M3 is investigating..."
-  );
-
+  addMessage(value, "user");
+  input.value = "";
+  setComposerState("running");
   vscode.postMessage({
     type: "send_message",
     value: value,
     mode: mode.value,
-    agentProfile: mode.value === "ask"
-      ? "ask"
-      : agentProfile.value,
-    agentCount: mode.value === "ask"
-      ? 1
-      : Number(agentCount.value)
+    agentProfile: agentProfile.value,
+    agentCount: 1
   });
 }
 
@@ -1962,18 +2260,19 @@ function sendMessage() {
 /* Events                                                                     */
 /* -------------------------------------------------------------------------- */
 
-send.addEventListener(
-  "click",
-  sendMessage
-);
-
-cancel.addEventListener("click", () => {
-  vscode.postMessage({ type: "cancel_request" });
+action.addEventListener("click", () => {
+  if (composerState === "running") {
+    vscode.postMessage({ type: "cancel_request" });
+    return;
+  }
+  if (composerState === "failed") {
+    vscode.postMessage({ type: "retry_last" });
+    return;
+  }
+  sendMessage();
 });
 
-retry.addEventListener("click", () => {
-  vscode.postMessage({ type: "retry_last" });
-});
+vscode.postMessage({ type: "load_billing" });
 
 input.addEventListener(
   "keydown",
@@ -2025,6 +2324,43 @@ window.addEventListener(
           "assistant"
         );
 
+        addConfidence(
+          message.confidence
+        );
+
+        addQualitySummary(
+          message.quality
+        );
+
+        addCitationList(
+          message.citations
+        );
+
+        if (message.implementationPlan) {
+          addExpandableList(
+            "Files",
+            message.implementationPlan.files || []
+          );
+
+          addExpandableList(
+            "Implementation Steps",
+            message.implementationPlan.steps || []
+          );
+
+          addValidationChecks(
+            message.implementationPlan.validation || []
+          );
+
+          addExpandableList(
+            "Risks and Assumptions",
+            message.implementationPlan.risks || []
+          );
+
+          addDiffPreviews(
+            message.implementationPlan.changes || []
+          );
+        }
+
         addAgentRetryControls(message.agents);
 
         addUsage(
@@ -2052,6 +2388,45 @@ window.addEventListener(
         break;
 
       case "agent_event":
+        if (message.event.type === "token" && message.event.delta) {
+          let assistantMessage = messages.querySelector(".message.assistant:last-child");
+          if (!assistantMessage || assistantMessage.dataset.stream !== "true") {
+            assistantMessage = document.createElement("div");
+            assistantMessage.className = "message assistant";
+            assistantMessage.dataset.stream = "true";
+            const markdown = document.createElement("div");
+            markdown.className = "markdown";
+            assistantMessage.appendChild(markdown);
+            messages.appendChild(assistantMessage);
+          }
+
+          const markdown = assistantMessage.querySelector(".markdown");
+          if (markdown) {
+            markdown.innerHTML = renderMarkdown((markdown.textContent || "") + message.event.delta);
+          }
+          messages.scrollTop = messages.scrollHeight;
+          break;
+        }
+
+        if (message.event.type === "citation" && message.event.path) {
+          addCitationList([{
+            path: message.event.path,
+            quote: message.event.quote,
+            reason: message.event.message,
+            start_line: message.event.start_line,
+            end_line: message.event.end_line
+          }]);
+          break;
+        }
+
+        if (message.event.type === "quality") {
+          addMessage(
+            "[quality] groundedness=" + Number(message.event.confidence ?? 0).toFixed(3),
+            "assistant"
+          );
+          break;
+        }
+
         addMessage(
           "[" + message.event.profile + "] " + message.event.message,
           "assistant"
@@ -2059,40 +2434,46 @@ window.addEventListener(
         break;
 
       case "error":
-
-        setProcessing(
-          false
-        );
-
-        addMessage(
-          message.error,
-          "error"
-        );
-
-        setStatus(
-          "Error"
-        );
-
+        setComposerState("failed");
+        addMessage(message.error, "error");
         input.focus();
+        break;
 
+      case "billing":
+        if (walletBalance) {
+          walletBalance.textContent =
+            Number(message.wallet?.balance ?? 0).toFixed(2) + " credits";
+        }
+        if (agentProfile && Array.isArray(message.agents)) {
+          const selected = agentProfile.value;
+          agentProfile.innerHTML = "";
+          if (message.agents.length === 0) {
+            const option = document.createElement("option");
+            option.value = "";
+            option.textContent = "No agents";
+            agentProfile.appendChild(option);
+          } else {
+            message.agents.forEach((agent) => {
+              const option = document.createElement("option");
+              option.value = agent.id;
+              option.textContent = agent.name;
+              agentProfile.appendChild(option);
+            });
+            if ([...agentProfile.options].some((item) => item.value === selected)) {
+              agentProfile.value = selected;
+            }
+          }
+        }
+        break;
+
+      case "cancelled":
+        setComposerState("idle");
         break;
 
       case "ready":
-
-        setProcessing(
-          false
-        );
-
-        if (
-          status.textContent !==
-          "Error"
-        ) {
-
-          setStatus(
-            "Ready"
-          );
+        if (composerState === "running") {
+          setComposerState("idle");
         }
-
         break;
 
       case "cleared":
@@ -2199,14 +2580,19 @@ type WebviewMessage =
       path: string;
     }
   | {
-      type: "attach_text";
-      value: string;
-    }
-  | {
       type: "clear";
     }
   | {
       type: "open_output";
+    }
+  | {
+      type: "open_citation";
+      path: string;
+      startLine?: number;
+      endLine?: number;
+    }
+  | {
+      type: "load_billing";
     };
 
 type WebviewResponse =
@@ -2220,6 +2606,37 @@ type WebviewResponse =
       requestId: string;
       model: string;
       agents: AgentRun[];
+      citations?: Array<{
+        path: string;
+        quote?: string;
+        reason?: string;
+        start_line?: number;
+        end_line?: number;
+      }>;
+      quality?: {
+        groundedness: number;
+        file_selection: number;
+        tool_efficiency: number;
+        answer_quality: number;
+        latency_ms: number;
+        fallback_used: boolean;
+        fallback_model?: string;
+        cited_files: number;
+        context_files: number;
+        recovery_score?: number;
+      };
+      confidence?: number;
+      implementationPlan?: {
+        files?: string[];
+        steps?: string[];
+        validation?: string[];
+        risks?: string[];
+        changes?: Array<{
+          path: string;
+          original: string;
+          updated: string;
+        }>;
+      };
     }
   | {
       type: "context";
@@ -2244,6 +2661,12 @@ type WebviewResponse =
     }
   | {
       type: "ready";
+    }
+  | {
+      type: "billing";
+      wallet: WalletSummary;
+      agents: BillingAgent[];
+      plans: CreditPlan[];
     }
   | {
       type: "cleared";

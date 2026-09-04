@@ -4,7 +4,10 @@ import {
   AIRequest,
   AIResponse,
   AgentEvent,
-  AgentTaskStatus
+  AgentTaskStatus,
+  BillingAgent,
+  CreditPlan,
+  WalletSummary
 } from "../models/types";
 
 interface BackendErrorResponse {
@@ -95,6 +98,35 @@ export class BackendClient {
 
     return this.get<UsageResponse>(
       "/api/v1/usage",
+      accessToken
+    );
+  }
+
+  async getWallet(
+    accessToken: string
+  ): Promise<WalletSummary> {
+    return this.get<WalletSummary>("/api/v1/wallet", accessToken);
+  }
+
+  async getAgents(
+    accessToken: string
+  ): Promise<{ agents: BillingAgent[] }> {
+    return this.get<{ agents: BillingAgent[] }>("/api/v1/agents", accessToken);
+  }
+
+  async getPlans(
+    accessToken: string
+  ): Promise<{ plans: CreditPlan[] }> {
+    return this.get<{ plans: CreditPlan[] }>("/api/v1/plans", accessToken);
+  }
+
+  async createOrder(
+    planId: string,
+    accessToken: string
+  ): Promise<{ wallet_balance?: number; credits?: number; id?: string }> {
+    return this.post(
+      "/api/v1/orders",
+      { plan_id: planId },
       accessToken
     );
   }

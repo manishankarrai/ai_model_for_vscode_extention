@@ -1,6 +1,13 @@
 import * as vscode from "vscode";
 
 import { ProjectModel } from "../project/project-model";
+import {
+  formatConflictSummary,
+  MemoryConflict,
+  MemoryFact,
+  MemoryConflictResolution,
+  resolveMemoryConflicts
+} from "../safety/memoryConflict";
 
 export type ProjectMemoryEntryType =
   | "architecture"
@@ -222,6 +229,114 @@ export class ProjectMemory {
     for (const decision of artifacts.decisions ?? []) {
       this.recordDecision(decision);
     }
+  }
+
+  /**
+   * Merge backend memory facts with local memory.
+   * Conflicts are resolved explicitly (default: keep both).
+   */
+  mergeBackendFacts(
+    backend: {
+      findings?: string[];
+      dependencies?: string[];
+      conventions?: string[];
+      architectureNotes?: string[];
+      decisions?: string[];
+    },
+    preference: MemoryConflictResolution = "keep_both"
+  ): MemoryConflict[] {
+    const localFacts: MemoryFact[] = [
+      ...this.memory.findings.map((content) => ({
+        kind: "finding" as const,
+        content,
+        source: "local" as const
+      })),
+      ...this.memory.dependencies.map((content) => ({
+        kind: "dependency" as const,
+        content,
+        source: "local" as const
+      })),
+      ...this.memory.conventions.map((content) => ({
+        kind: "convention" as const,
+        content,
+        source: "local" as const
+      })),
+      ...this.memory.architectureNotes.map((content) => ({
+        kind: "architecture" as const,
+        content,
+        source: "local" as const
+      })),
+      ...this.memory.decisions.map((content) => ({
+        kind: "decision" as const,
+        content,
+        source: "local" as const
+      }))
+    ];
+
+    const backendFacts: MemoryFact[] = [
+      ...(backend.findings ?? []).map((content) => ({
+        kind: "finding" as const,
+        content,
+        source: "backend" as const
+      })),
+      ...(backend.dependencies ?? []).map((content) => ({
+        kind: "dependency" as const,
+        content,
+        source: "backend" as const
+      })),
+      ...(backend.conventions ?? []).map((content) => ({
+        kind: "convention" as const,
+        content,
+        source: "backend" as const
+      })),
+      ...(backend.architectureNotes ?? []).map((content) => ({
+        kind: "architecture" as const,
+        content,
+        source: "backend" as const
+      })),
+      ...(backend.decisions ?? []).map((content) => ({
+        kind: "decision" as const,
+        content,
+        source: "backend" as const
+      }))
+    ];
+
+    const { merged, conflicts } = resolveMemoryConflicts(
+      localFacts,
+      backendFacts,
+      preference
+    );
+
+    this.memory.findings = merged
+      .filter((fact) => fact.kind === "finding")
+      .map((fact) => fact.content)
+      .slice(-50);
+    this.memory.dependencies = merged
+      .filter((fact) => fact.kind === "dependency")
+      .map((fact) => fact.content)
+      .slice(-50);
+    this.memory.conventions = merged
+      .filter((fact) => fact.kind === "convention")
+      .map((fact) => fact.content)
+      .slice(-50);
+    this.memory.architectureNotes = merged
+      .filter((fact) => fact.kind === "architecture")
+      .map((fact) => fact.content)
+      .slice(-50);
+    this.memory.decisions = merged
+      .filter((fact) => fact.kind === "decision")
+      .map((fact) => fact.content)
+      .slice(-50);
+
+    if (conflicts.length > 0) {
+      this.memory.decisions = this.addUniqueValue(
+        this.memory.decisions,
+        `Memory conflict resolution (${preference}): ${formatConflictSummary(conflicts)}`
+      );
+    }
+
+    this.touch();
+    return conflicts;
   }
 
   getSnapshot(): ProjectMemorySnapshot {
