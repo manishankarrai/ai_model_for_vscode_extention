@@ -4,6 +4,8 @@ import * as vscode from "vscode";
 import {
   AIRequest,
   AIResponse,
+  ContextPart,
+  ImplementationPlan,
 } from "../models/types";
 
 import { IntentDetector } from "./IntentDetector";
@@ -31,6 +33,7 @@ import { Logger } from "../utils/Logger";
 
 import { ReadOnlyGuard } from "../safety/ReadOnlyGuard";
 import { ProjectUnderstanding } from "../project/project-understanding";
+import { ProjectMemory } from "../state/ProjectMemory";
 
 
 // ============================================================
@@ -91,6 +94,7 @@ interface AdaptiveDecision {
 type AdaptiveAIResponse =
   AIResponse & {
     decision?: AdaptiveDecision;
+    implementation_plan?: ImplementationPlan;
   };
 
 
@@ -184,6 +188,9 @@ export class Agent {
     private readonly taskState:
       TaskState,
 
+    private readonly projectMemory:
+      ProjectMemory,
+
     private readonly logger:
       Logger
   ) {
@@ -201,7 +208,8 @@ export class Agent {
 
   async process(
     question: string,
-    accessToken: string
+    accessToken: string,
+    selectedContext: ContextPart[] = []
   ): Promise<AIResponse> {
 
     // --------------------------------------------------------
@@ -467,6 +475,34 @@ export class Agent {
           }
         );
 
+      this.projectMemory.addInvestigationArtifacts({
+        findings:
+          investigation.evidence
+            .slice(0, 8)
+            .map(
+              evidence =>
+                `${evidence.path}: ${evidence.reason}`
+            ),
+        dependencies:
+          investigation.evidence
+            .flatMap(
+              evidence =>
+                evidence.dependencies
+            )
+            .slice(0, 25),
+        conventions:
+          projectModel?.frameworks.map(
+            framework =>
+              `Framework: ${framework}`
+          ) ?? [],
+        architectureNotes:
+          projectModel?.entryPoints.map(
+            entry =>
+              `Entry point: ${entry.filePath}`
+          ) ?? []
+      });
+
+      void this.projectMemory.save();
 
       // ------------------------------------------------------
       // Investigation logging
@@ -613,6 +649,17 @@ export class Agent {
           investigationEvidence
         );
 
+      if (selectedContext.length > 0) {
+        context = {
+          ...context,
+          files: selectedContext.map((part) => ({
+            path: part.path,
+            content: part.content
+          })),
+          parts: selectedContext
+        };
+      }
+
 
       this.logger.info(
         "Investigation evidence merged into context",
@@ -703,6 +750,9 @@ export class Agent {
         },
 
         context,
+
+        memory:
+          this.projectMemory.getContextForAI(),
 
         plan:
           plan.steps

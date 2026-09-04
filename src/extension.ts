@@ -11,6 +11,7 @@ import { ConversationState } from "./state/ConversationState";
 import { IndexState } from "./state/IndexState";
 
 import { TaskState } from "./state/TaskState";
+import { ProjectMemory } from "./state/ProjectMemory";
 
 import { Agent } from "./agent/Agent";
 
@@ -42,6 +43,11 @@ export function activate(
   const taskState =
     new TaskState();
 
+  const projectMemory =
+    new ProjectMemory(
+      context.workspaceState
+    );
+
   const indexer =
     new ProjectIndexer();
 
@@ -49,7 +55,8 @@ export function activate(
     new IndexState(
       context.workspaceState
     );
-    const projectUnderstanding =
+
+  const projectUnderstanding =
     new ProjectUnderstanding();
   // ----------------------------------------------------------
   // Change detection
@@ -75,6 +82,7 @@ export function activate(
       projectUnderstanding,
       conversation,
       taskState,
+      projectMemory,
       logger
     );
 
@@ -121,7 +129,8 @@ export function activate(
         await scanProject(
           indexer,
           indexState,
-           projectUnderstanding,
+          projectUnderstanding,
+          projectMemory,
           logger
         );
       }
@@ -140,7 +149,8 @@ export function activate(
         await scanProject(
           indexer,
           indexState,
-           projectUnderstanding,
+          projectUnderstanding,
+          projectMemory,
           logger,
           true
         );
@@ -162,6 +172,15 @@ export function activate(
         vscode.window.showInformationMessage(
           "M3 conversation cleared."
         );
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "m3.rollbackLastChanges",
+      async () => {
+        await provider.rollbackLastChanges();
       }
     )
   );
@@ -255,7 +274,8 @@ context.subscriptions.push(
     void scanProject(
       indexer,
       indexState,
-       projectUnderstanding,
+      projectUnderstanding,
+      projectMemory,
       logger
     );
   }
@@ -269,6 +289,7 @@ async function scanProject(
   indexer: ProjectIndexer,
   indexState: IndexState,
   projectUnderstanding: ProjectUnderstanding,
+  projectMemory: ProjectMemory,
   logger: Logger,
   force = false
 ): Promise<void> {
@@ -353,6 +374,12 @@ async function scanProject(
           projectUnderstanding.initialize(
             index
           );
+
+        projectMemory.initializeFromProjectModel(
+          projectModel
+        );
+
+        await projectMemory.save();
 
         logger.info(
           "Project understanding ready",

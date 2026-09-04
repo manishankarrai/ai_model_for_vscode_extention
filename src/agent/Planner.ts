@@ -35,6 +35,36 @@ export class Planner {
 
     switch (intent) {
 
+      case "implementation":
+
+        return {
+          steps: [
+            "Understand the requested behavior and acceptance criteria",
+            "Locate the owning modules and entry points",
+            "Inspect related symbols, dependencies, and existing patterns",
+            "Trace the current execution flow",
+            "Design the smallest compatible implementation",
+            "Identify tests and validation commands",
+            "Prepare an ordered implementation plan with risks"
+          ],
+
+          tools: [
+            "search",
+            "read_file",
+            "list_files"
+          ],
+
+          maxSteps: 15,
+
+          maxFiles: 18,
+
+          maxChars: 60_000,
+
+          maxSearchResults: 15,
+
+          depth: "deep"
+        };
+
       case "bug_analysis":
 
         return {

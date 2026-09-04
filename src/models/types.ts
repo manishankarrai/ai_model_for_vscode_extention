@@ -2,7 +2,8 @@ export type Intent =
   | "chat"
   | "analyze"
   | "bug_analysis"
-  | "architecture";
+  | "architecture"
+  | "implementation";
 
 export type ToolName =
   | "read_file"
@@ -95,6 +96,22 @@ export interface AIContext {
 
   evidence: ContextEvidence[];
 
+  parts?: ContextPart[];
+
+}
+
+export type ContextPartKind =
+  | "file"
+  | "selection"
+  | "attachment";
+
+export interface ContextPart {
+  kind: ContextPartKind;
+  path: string;
+  content: string;
+  language: string;
+  startLine?: number;
+  endLine?: number;
 }
 
 export interface ProjectContext {
@@ -156,6 +173,21 @@ export interface AIResponse {
   usage: AIUsage;
   decision:
     AIReasoningDecision;
+  implementation_plan?: ImplementationPlan;
+}
+
+export interface ImplementationPlan {
+  files: string[];
+  steps: string[];
+  validation: string[];
+  risks: string[];
+  changes?: CodeChange[];
+}
+
+export interface CodeChange {
+  path: string;
+  original: string;
+  updated: string;
 }
 
 export interface AIUsage {
@@ -174,6 +206,8 @@ export interface AIRequest {
   project: ProjectContext;
 
   context: AIContext;
+
+  memory?: string;
 
   plan?: string[];
   step?: number;

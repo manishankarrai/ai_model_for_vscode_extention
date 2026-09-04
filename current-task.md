@@ -45,9 +45,9 @@ Stage 1  ████████████████████  COMPLETE
 Stage 2  ████████████████████  COMPLETE
 Stage 3  ████████████████████  COMPLETE
 Stage 4  ████████████████████  COMPLETE
-Stage 5  ░░░░░░░░░░░░░░░░░░░░  NEXT
-Stage 6  ░░░░░░░░░░░░░░░░░░░░  PLANNED
-Stage 7  ░░░░░░░░░░░░░░░░░░░░  PLANNED
+Stage 5  FOUNDATION IMPLEMENTED
+Stage 6  IMPLEMENTATION PLANNING FOUNDATION
+Stage 7  APPROVAL-GATED FOUNDATION IMPLEMENTED
 Stage 8  ░░░░░░░░░░░░░░░░░░░░  GOAL
 ```
 
@@ -68,10 +68,49 @@ exit code 0
 M3 build complete
 ```
 
+The backend has also been verified with:
+
+```text
+cd /home/rai/Documents/vscode/m3/m3backend && go test ./...
+```
+
+The Stage 5 foundation now works across both sides:
+
+- The extension persists project facts locally and sends a memory snapshot with each AI request.
+- The backend accepts the memory snapshot and uses it during planning and adaptive reasoning.
+- The backend persists completed-answer history in MongoDB and caches project memory in Redis.
+
 ---
 
 ## Working conclusion
 
-The codebase is now aligned with Stage 4 completion and remains safe, local-first, and read-only.
+The codebase is aligned with Stage 4 completion and Stage 5 foundation implementation. It remains safe, local-first, and read-only.
 
-The next logical step is Stage 5, which is persistent project memory.
+The next Stage 5 enhancement is richer semantic extraction and synchronization between local and backend memory.
+
+---
+
+## Stage 6 progress
+
+The implementation-planning foundation is complete on both sides:
+
+- The extension detects implementation requests and investigates owning modules, symbols, dependencies, tests, and validation.
+- The backend uses implementation-aware planning and adaptive reasoning prompts.
+- The assistant remains read-only and cannot write files or execute commands.
+
+The next Stage 6 enhancement is richer code review and patch quality analysis.
+
+---
+
+## Stage 7 progress
+
+The approval-gated modification foundation is complete on both sides:
+
+- The backend can return complete original and updated file contents as structured changes.
+- The extension validates workspace-relative paths and rejects oversized or stale changes.
+- M3 asks for explicit modal approval before applying an atomic `WorkspaceEdit` and saving files.
+- M3 opens a VS Code diff preview before asking for approval.
+- M3 can roll back the last approved change set with stale-file protection.
+- No automatic file modification or command execution is allowed.
+
+Future Stage 7 work includes richer review tooling and broader modification policies.

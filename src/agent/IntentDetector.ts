@@ -15,6 +15,23 @@ export class IntentDetector {
       this.containsAny(
         q,
         [
+          "implement",
+          "add feature",
+          "build",
+          "create",
+          "refactor",
+          "change the code",
+          "write code"
+        ]
+      )
+    ) {
+      return "implementation";
+    }
+
+    if (
+      this.containsAny(
+        q,
+        [
           "bug",
           "error",
           "broken",

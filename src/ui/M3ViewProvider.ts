@@ -4,9 +4,12 @@ import * as vscode from "vscode";
 import { Agent } from "../agent/Agent";
 import { Logger } from "../utils/Logger";
 import {
+  ContextPart,
   AIResponse,
   AIUsage,
 } from "../models/types";
+
+import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 
 export class M3ViewProvider
   implements vscode.WebviewViewProvider
@@ -16,6 +19,11 @@ export class M3ViewProvider
   private view?: vscode.WebviewView;
 
   private isProcessing = false;
+
+  private selectedContext: ContextPart[] = [];
+
+  private readonly codeChangeApplier =
+    new CodeChangeApplier();
 
   constructor(
     private readonly extensionUri: vscode.Uri,
@@ -65,12 +73,20 @@ export class M3ViewProvider
     this.view?.show?.(true);
   }
 
+  async rollbackLastChanges(): Promise<void> {
+    await this.codeChangeApplier.rollbackLast();
+  }
+
   private async handleMessage(
     message: WebviewMessage
   ): Promise<void> {
     switch (message.type) {
       case "send_message":
         await this.handleQuestion(message.value);
+        break;
+
+      case "attach_files":
+        await this.attachFiles();
         break;
 
       case "clear":
@@ -130,16 +146,23 @@ export class M3ViewProvider
       const response: AIResponse =
         await this.agent.process(
           trimmedQuestion,
-          accessToken
+          accessToken,
+          await this.getRequestContext()
         );
 
       this.post({
         type: "answer",
-        answer: response.answer,
+        answer: this.formatAnswer(response),
         usage: response.usage,
         requestId: response.request_id,
         model: response.model,
       });
+
+      if (response.implementation_plan?.changes) {
+        await this.codeChangeApplier.offer(
+          response.implementation_plan.changes
+        );
+      }
 
     } catch (error) {
 
@@ -166,6 +189,97 @@ export class M3ViewProvider
     }
   }
 
+  private async getRequestContext(): Promise<ContextPart[]> {
+    const parts = [...this.selectedContext];
+    const editor = vscode.window.activeTextEditor;
+
+    if (!editor) {
+      return parts;
+    }
+
+    const relativePath = vscode.workspace.asRelativePath(
+      editor.document.uri,
+      false
+    );
+
+    if (!this.isSafeContextPath(relativePath)) {
+      return parts;
+    }
+
+    const selection = editor.selection;
+    const selectedText = editor.document.getText(selection);
+    const content = selectedText || editor.document.getText();
+    const duplicate = parts.some((part) => part.path === relativePath);
+
+    if (!duplicate) {
+      parts.unshift({
+        kind: selectedText ? "selection" : "file",
+        path: relativePath,
+        content,
+        language: editor.document.languageId,
+        startLine: selection.start.line + 1,
+        endLine: selection.end.line + 1
+      });
+    }
+
+    return parts;
+  }
+
+  private async attachFiles(): Promise<void> {
+    const files = await vscode.window.showOpenDialog({
+      canSelectMany: true,
+      canSelectFolders: false,
+      openLabel: "Attach Files"
+    });
+
+    if (!files) {
+      return;
+    }
+
+    for (const uri of files) {
+      const relativePath = vscode.workspace.asRelativePath(uri, false);
+
+      if (!this.isSafeContextPath(relativePath)) {
+        continue;
+      }
+
+      const document = await vscode.workspace.openTextDocument(uri);
+
+      if (document.getText().length > 200_000) {
+        continue;
+      }
+
+      this.selectedContext = this.selectedContext.filter(
+        (part) => part.path !== relativePath
+      );
+      this.selectedContext.push({
+        kind: "attachment",
+        path: relativePath,
+        content: document.getText(),
+        language: document.languageId
+      });
+    }
+
+    this.post({
+      type: "context",
+      parts: this.selectedContext.map((part) => ({
+        path: part.path,
+        kind: part.kind
+      }))
+    });
+  }
+
+  private isSafeContextPath(filePath: string): boolean {
+    const normalized = filePath.replace(/\\/g, "/").toLowerCase();
+
+    return !normalized.startsWith("/") &&
+      !normalized.split("/").includes("..") &&
+      !normalized.endsWith(".pem") &&
+      !normalized.endsWith(".key") &&
+      !normalized.includes("/.env") &&
+      normalized !== ".env";
+  }
+
   private getErrorMessage(
     error: unknown
   ): string {
@@ -183,6 +297,37 @@ export class M3ViewProvider
     }
 
     return "An unexpected error occurred.";
+  }
+
+  private formatAnswer(
+    response: AIResponse
+  ): string {
+    const plan = response.implementation_plan;
+
+    if (!plan) {
+      return response.answer;
+    }
+
+    const section = (
+      title: string,
+      items: string[]
+    ): string => {
+      if (items.length === 0) {
+        return "";
+      }
+
+      return `\n\n### ${title}\n${items
+        .map((item, index) => `${index + 1}. ${item}`)
+        .join("\n")}`;
+    };
+
+    return [
+      response.answer,
+      section("Files", plan.files),
+      section("Implementation Steps", plan.steps),
+      section("Validation", plan.validation),
+      section("Risks and Assumptions", plan.risks)
+    ].join("");
   }
 
   private post(
@@ -790,6 +935,13 @@ button:disabled {
       Send
     </button>
 
+    <button
+      id="attach"
+      type="button"
+    >
+      Attach Files
+    </button>
+
   </div>
 
 </div>
@@ -805,6 +957,9 @@ const input =
 const send =
   document.getElementById("send");
 
+const attach =
+  document.getElementById("attach");
+
 const messages =
   document.getElementById("messages");
 
@@ -818,6 +973,31 @@ const empty =
   document.getElementById("empty");
 
 let processing = false;
+
+const contextParts = [];
+
+function renderContextParts() {
+  let container = document.getElementById("context-parts");
+
+  if (!container) {
+    container = document.createElement("div");
+    container.id = "context-parts";
+    container.className = "context-parts";
+    document.querySelector(".composer").before(container);
+  }
+
+  container.textContent =
+    contextParts.length > 0
+      ? "Context: " +
+        contextParts
+          .map((part) => part.kind + " " + part.path)
+          .join(", ")
+      : "";
+}
+
+attach.addEventListener("click", () => {
+  vscode.postMessage({ type: "attach_files" });
+});
 
 /* -------------------------------------------------------------------------- */
 /* HTML escaping                                                              */
@@ -1565,6 +1745,12 @@ window.addEventListener(
 
         break;
 
+      case "context":
+        contextParts.length = 0;
+        contextParts.push(...message.parts);
+        renderContextParts();
+        break;
+
       case "error":
 
         setProcessing(
@@ -1686,6 +1872,9 @@ type WebviewMessage =
       value: string;
     }
   | {
+      type: "attach_files";
+    }
+  | {
       type: "clear";
     }
   | {
@@ -1702,6 +1891,13 @@ type WebviewResponse =
       usage: AIUsage;
       requestId: string;
       model: string;
+    }
+  | {
+      type: "context";
+      parts: Array<{
+        path: string;
+        kind: string;
+      }>;
     }
   | {
       type: "error";
