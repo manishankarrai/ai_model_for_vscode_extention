@@ -1,6 +1,8 @@
 
 import * as vscode from "vscode";
 
+import { flow } from "../utils/flowLog";
+
 import { Agent } from "../agent/Agent";
 import { Logger } from "../utils/Logger";
 import {
@@ -49,11 +51,14 @@ export class M3ViewProvider
     private readonly agent: Agent,
     private readonly logger: Logger,
     private readonly getAccessToken: () => Promise<string>
-  ) {}
+  ) {
+    flow("M3ViewProvider.constructor", 1, "enter");
+  }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView
   ): void {
+    flow("M3ViewProvider.resolveWebviewView", 1, "enter");
     this.view = webviewView;
 
     webviewView.webview.options = {
@@ -91,14 +96,17 @@ export class M3ViewProvider
   }
 
   show(): void {
+    flow("M3ViewProvider.show", 1, "enter");
     this.view?.show?.(true);
   }
 
   async rollbackLastChanges(): Promise<void> {
+    flow("M3ViewProvider.rollbackLastChanges", 1, "enter");
     await this.codeChangeApplier.rollbackLast();
   }
 
   private async refreshBilling(): Promise<void> {
+    flow("M3ViewProvider.refreshBilling", 1, "enter");
     try {
       const accessToken = await this.getAccessToken();
       if (!accessToken) {
@@ -124,6 +132,7 @@ export class M3ViewProvider
   private async handleMessage(
     message: WebviewMessage
   ): Promise<void> {
+    flow("M3ViewProvider.handleMessage", 1, "enter", { type: message.type });
     switch (message.type) {
       case "send_message":
         await this.handleQuestion(
@@ -203,6 +212,7 @@ export class M3ViewProvider
     agentProfile: AgentProfile,
     agentCount: number
   ): Promise<void> {
+    flow("M3ViewProvider.handleQuestion", 1, "enter", { mode, agentProfile, agentCount });
     const trimmedQuestion =
       question.trim();
 
@@ -319,6 +329,7 @@ export class M3ViewProvider
   private async retryAgent(
     profile: AgentProfile
   ): Promise<void> {
+    flow("M3ViewProvider.retryAgent", 1, "enter", { profile });
     if (this.isProcessing) {
       return;
     }
@@ -356,6 +367,7 @@ export class M3ViewProvider
   }
 
   private async getRequestContext(): Promise<ContextPart[]> {
+    flow("M3ViewProvider.getRequestContext", 1, "enter");
     const parts = [...this.selectedContext];
     const editor = vscode.window.activeTextEditor;
 
@@ -394,6 +406,7 @@ export class M3ViewProvider
   }
 
   private async attachFiles(): Promise<void> {
+    flow("M3ViewProvider.attachFiles", 1, "enter");
     const files = await vscode.window.showOpenDialog({
       canSelectMany: true,
       canSelectFolders: false,
@@ -434,6 +447,7 @@ export class M3ViewProvider
   private postContextParts(
     parts: ContextPart[] = this.selectedContext
   ): void {
+    flow("M3ViewProvider.postContextParts", 1, "enter", { count: parts.length });
     this.post({
       type: "context",
       parts: parts.map((part) => ({
@@ -451,6 +465,7 @@ export class M3ViewProvider
     startLine?: number,
     endLine?: number
   ): Promise<void> {
+    flow("M3ViewProvider.openCitation", 1, "enter", { filePath, startLine, endLine });
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace || !isSafeContextPath(filePath)) {
       return;
@@ -476,6 +491,7 @@ export class M3ViewProvider
   private getErrorMessage(
     error: unknown
   ): string {
+    flow("M3ViewProvider.getErrorMessage", 1, "enter");
 
     if (
       error instanceof AuthenticationError
@@ -495,12 +511,14 @@ export class M3ViewProvider
   private formatAnswer(
     response: AIResponse
   ): string {
+    flow("M3ViewProvider.formatAnswer", 1, "enter");
     return response.answer;
   }
 
   private post(
     message: WebviewResponse
   ): void {
+    flow("M3ViewProvider.post", 1, "enter", { type: message.type });
 
     if (!this.view) {
       return;
@@ -514,6 +532,7 @@ export class M3ViewProvider
   private getHtml(
     webview: vscode.Webview
   ): string {
+    flow("M3ViewProvider.getHtml", 1, "enter");
 
     const nonce =
       this.getNonce();
@@ -2525,6 +2544,7 @@ input.focus();
   }
 
   private getNonce(): string {
+    flow("M3ViewProvider.getNonce", 1, "enter");
 
     const chars =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

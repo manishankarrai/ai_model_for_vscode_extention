@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   ProjectIndex,
   SearchResult
@@ -17,6 +19,7 @@ export class SearchTool {
     index: ProjectIndex,
     maxResults = 30
   ): Promise<SearchResult[]> {
+    flow("SearchTool.execute", 1, "enter", { query, maxResults });
 
     return this.engine.search(
       query,

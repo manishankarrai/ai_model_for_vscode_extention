@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import * as vscode from "vscode";
 
 import {
@@ -20,6 +22,7 @@ export class DependencyResolver {
     dependency: DependencyInfo,
     index: ProjectIndex
   ): Promise<string[]> {
+    flow("DependencyResolver.resolve", 1, "enter", { target: dependency.target });
 
     /*
      * ---------------------------------------------------------
@@ -75,6 +78,7 @@ export class DependencyResolver {
     dependency: string,
     index: ProjectIndex
   ): string | undefined {
+    flow("DependencyResolver.resolveRelativeDependency", 1, "enter");
 
     const sourceDirectory =
       this.getDirectory(
@@ -284,6 +288,7 @@ export class DependencyResolver {
   private getDirectory(
     filePath: string
   ): string {
+    flow("DependencyResolver.getDirectory", 1, "enter");
 
     const index =
       filePath.lastIndexOf("/");
@@ -303,6 +308,7 @@ export class DependencyResolver {
   private normalizePath(
     filePath: string
   ): string {
+    flow("DependencyResolver.normalizePath", 1, "enter");
 
     const parts =
       filePath.split("/");

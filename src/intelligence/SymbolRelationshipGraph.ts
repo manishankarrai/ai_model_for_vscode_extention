@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 
+import { flow } from "../utils/flowLog";
+
 import {
   ProjectIndex,
   SymbolInfo
@@ -682,6 +684,7 @@ export class SymbolRelationshipGraph {
   }
 
   private getRelationshipCount(): number {
+    flow("SymbolRelationshipGraph.getRelationshipCount", 1, "enter");
 
     let count = 0;
 

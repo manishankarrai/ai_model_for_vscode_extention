@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 export type InvestigationStopReason =
   | "completed"
   | "max_steps"
@@ -145,6 +147,7 @@ export class InvestigationState {
    * Returns false when the investigation cannot continue.
    */
   startStep(): boolean {
+    flow("InvestigationState.startStep", 1, "enter");
 
     if (!this.canContinue()) {
       return false;
@@ -164,6 +167,7 @@ export class InvestigationState {
    * New Stage 4 code should prefer startStep().
    */
   incrementSteps(): void {
+    flow("InvestigationState.incrementSteps", 1, "enter");
 
     if (this.isStopped) {
       return;
@@ -202,6 +206,7 @@ export class InvestigationState {
    * Returns false if the AI call limit has been reached.
    */
   incrementAICalls(): boolean {
+    flow("InvestigationState.incrementAICalls", 1, "enter");
 
     if (this.isStopped) {
       return false;
@@ -243,6 +248,7 @@ export class InvestigationState {
    * Returns false if the tool-call limit has been reached.
    */
   incrementToolCalls(): boolean {
+    flow("InvestigationState.incrementToolCalls", 1, "enter");
 
     if (this.isStopped) {
       return false;
@@ -358,6 +364,7 @@ export class InvestigationState {
 
 
   getInvestigatedFiles(): string[] {
+    flow("InvestigationState.getInvestigatedFiles", 1, "enter");
 
     return [
       ...this.investigatedFiles
@@ -609,6 +616,7 @@ export class InvestigationState {
   // ==========================================================
 
   canContinue(): boolean {
+    flow("InvestigationState.canContinue", 1, "enter");
 
     // --------------------------------------------------------
     // Already stopped
@@ -779,6 +787,7 @@ export class InvestigationState {
    * Useful for Agent logging and debugging.
    */
   getSnapshot() {
+    flow("InvestigationState.getSnapshot", 1, "enter");
 
     return {
 

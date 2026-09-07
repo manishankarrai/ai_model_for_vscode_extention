@@ -18,9 +18,12 @@ import { Agent } from "./agent/Agent";
 import { M3ViewProvider } from "./ui/M3ViewProvider";
 import { ProjectUnderstanding } from "./project/project-understanding";
 
+import { flow } from "./utils/flowLog";
+
 export function activate(
   context: vscode.ExtensionContext
 ): void {
+  flow("activate", 1, "enter");
 
   const logger =
     new Logger();
@@ -99,6 +102,7 @@ export function activate(
       logger,
 
       async () => {
+        flow("activate.getAccessTokenCallback", 1, "enter");
         return getAccessToken(
           context
         );
@@ -125,6 +129,7 @@ export function activate(
     vscode.commands.registerCommand(
       "m3.scanProject",
       async () => {
+        flow("command.scanProject", 1, "enter");
 
         await scanProject(
           indexer,
@@ -145,6 +150,7 @@ export function activate(
     vscode.commands.registerCommand(
       "m3.rebuildIndex",
       async () => {
+        flow("command.rebuildIndex", 1, "enter");
 
         await scanProject(
           indexer,
@@ -166,6 +172,7 @@ export function activate(
     vscode.commands.registerCommand(
       "m3.clearConversation",
       () => {
+        flow("command.clearConversation", 1, "enter");
 
         agent.clearConversation();
 
@@ -180,6 +187,7 @@ export function activate(
     vscode.commands.registerCommand(
       "m3.rollbackLastChanges",
       async () => {
+        flow("command.rollbackLastChanges", 1, "enter");
         await provider.rollbackLastChanges();
       }
     )
@@ -192,6 +200,7 @@ context.subscriptions.push(
   vscode.commands.registerCommand(
     "m3.inspectProject",
     () => {
+      flow("command.inspectProject", 1, "enter");
 
       const model =
         projectUnderstanding.getModel();
@@ -293,6 +302,7 @@ async function scanProject(
   logger: Logger,
   force = false
 ): Promise<void> {
+  flow("scanProject", 1, "enter", { force });
 
   const workspace =
     vscode.workspace.workspaceFolders?.[0];
@@ -438,6 +448,7 @@ async function scanProject(
 async function getAccessToken(
   context: vscode.ExtensionContext
 ): Promise<string> {
+  flow("getAccessToken", 1, "enter");
 
   const token =
     await context.secrets.get(
@@ -476,4 +487,5 @@ async function getAccessToken(
 }
 
 export function deactivate(): void {
+  flow("deactivate", 1, "enter");
 }

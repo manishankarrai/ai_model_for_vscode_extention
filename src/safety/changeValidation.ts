@@ -1,5 +1,7 @@
 import { createHash } from "node:crypto";
 
+import { flow } from "../utils/flowLog";
+
 const MAX_CHANGE_CHARS = 200_000;
 
 const SENSITIVE_EXTENSIONS = [
@@ -22,6 +24,7 @@ const SENSITIVE_BASENAMES = new Set([
 ]);
 
 export function validateWorkspaceRelativePath(filePath: string): string {
+  flow("validateWorkspaceRelativePath", 1, "enter");
   const relativePath = filePath.replace(/\\/g, "/");
 
   if (
@@ -36,6 +39,7 @@ export function validateWorkspaceRelativePath(filePath: string): string {
 }
 
 export function isSensitivePath(filePath: string): boolean {
+  flow("isSensitivePath", 1, "enter");
   const clean = filePath.replace(/\\/g, "/").toLowerCase().trim();
   const base = clean.split("/").pop() ?? "";
 
@@ -55,6 +59,7 @@ export function isSensitivePath(filePath: string): boolean {
 }
 
 export function assertNotSensitivePath(filePath: string): void {
+  flow("assertNotSensitivePath", 1, "enter");
   if (isSensitivePath(filePath)) {
     throw new Error(`M3 rejected sensitive path: ${filePath}`);
   }
@@ -71,6 +76,7 @@ export function validateChangeSize(
 }
 
 export function hashContent(text: string): string {
+  flow("hashContent", 1, "enter");
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
@@ -118,6 +124,7 @@ export function assertFileNotStale(
 }
 
 export function assertWorkspaceTrusted(isTrusted: boolean): void {
+  flow("assertWorkspaceTrusted", 1, "enter");
   if (!isTrusted) {
     throw new Error(
       "M3 refused to write: workspace is not trusted. Enable workspace trust first."

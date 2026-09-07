@@ -1,3 +1,4 @@
+import { flow } from "../utils/flowLog";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -22,6 +23,7 @@ import {
 
 describe("stale-file protection", () => {
   it("rejects parent-path writes", () => {
+    flow("changeValidation.test.parentPath", 1, "enter");
     assert.throws(
       () => validateWorkspaceRelativePath("../secret.ts"),
       /unsafe change path/i

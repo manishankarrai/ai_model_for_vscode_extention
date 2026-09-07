@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 export type MemoryFactKind =
   | "finding"
   | "dependency"
@@ -25,10 +27,12 @@ export interface MemoryConflict {
 }
 
 function normalize(value: string): string {
+  flow("normalize", 1, "enter");
   return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
 function sameFact(left: string, right: string): boolean {
+  flow("sameFact", 1, "enter");
   return normalize(left) === normalize(right);
 }
 
@@ -108,6 +112,7 @@ export function resolveMemoryConflicts(
 }
 
 function overlappingTokens(left: string, right: string): boolean {
+  flow("overlappingTokens", 1, "enter");
   const leftTokens = new Set(normalize(left).split(" ").filter((token) => token.length > 3));
   const rightTokens = normalize(right).split(" ").filter((token) => token.length > 3);
   if (leftTokens.size === 0 || rightTokens.length === 0) {
@@ -132,6 +137,7 @@ function resolvePair(
 }
 
 export function formatConflictSummary(conflicts: MemoryConflict[]): string {
+  flow("formatConflictSummary", 1, "enter");
   if (conflicts.length === 0) {
     return "No memory conflicts.";
   }

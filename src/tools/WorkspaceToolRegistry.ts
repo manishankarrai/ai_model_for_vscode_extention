@@ -16,6 +16,8 @@ import {
 } from "../safety/changeValidation";
 import { availableTools, isToolAllowed } from "./toolPolicy";
 
+import { flow } from "../utils/flowLog";
+
 const execFileAsync = promisify(execFile);
 
 export class WorkspaceToolRegistry {
@@ -166,6 +168,7 @@ export class WorkspaceToolRegistry {
   }
 
   private resolvePath(filePath: string | undefined): vscode.Uri {
+    flow("WorkspaceToolRegistry.resolvePath", 1, "enter");
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
       throw new Error(`Unsafe workspace path: ${filePath ?? ""}`);
@@ -176,6 +179,7 @@ export class WorkspaceToolRegistry {
   }
 
   private async confirm(message: string): Promise<void> {
+    flow("WorkspaceToolRegistry.confirm", 1, "enter");
     const choice = await vscode.window.showWarningMessage(
       message,
       { modal: true },

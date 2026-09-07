@@ -1,5 +1,7 @@
 import * as path from "path";
 
+import { flow } from "../utils/flowLog";
+
 export interface FileClassification {
   language?: string;
 
@@ -9,6 +11,7 @@ export interface FileClassification {
 
 export class FileClassifier {
   classify(filePath: string): FileClassification {
+    flow("FileClassifier.classify", 1, "enter");
     const fileName = path.basename(filePath);
     const extension = path.extname(filePath).toLowerCase();
 
@@ -20,6 +23,7 @@ export class FileClassifier {
   }
 
   private detectLanguage(extension: string): string | undefined {
+    flow("FileClassifier.detectLanguage", 1, "enter");
     const languages: Record<string, string> = {
       ".go": "go",
 
@@ -70,6 +74,7 @@ export class FileClassifier {
   }
 
   private isTestFile(fileName: string): boolean {
+    flow("FileClassifier.isTestFile", 1, "enter");
     const lower = fileName.toLowerCase();
 
     return (
@@ -81,6 +86,7 @@ export class FileClassifier {
   }
 
   private isConfigFile(fileName: string): boolean {
+    flow("FileClassifier.isConfigFile", 1, "enter");
     const configFiles = new Set([
       "package.json",
       "package-lock.json",

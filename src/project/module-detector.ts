@@ -1,8 +1,11 @@
 import * as path from "path";
 import { ProjectModule } from "./project-model";
 
+import { flow } from "../utils/flowLog";
+
 export class ModuleDetector {
   detect(rootPath: string, files: string[]): ProjectModule[] {
+    flow("ModuleDetector.detect", 1, "enter");
     const modules = new Map<string, string[]>();
 
     for (const file of files) {

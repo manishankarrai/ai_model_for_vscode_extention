@@ -1,3 +1,4 @@
+import { flow } from "../utils/flowLog";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -5,6 +6,7 @@ import { resolveRequestContext, selectRankedFiles } from "./contextSelection.ts"
 
 describe("context selection", () => {
   it("keeps Ask mode limited to explicit parts", () => {
+    flow("contextSelection.test.askMode", 1, "enter");
     const context = resolveRequestContext({
       mode: "ask",
       selected: [{

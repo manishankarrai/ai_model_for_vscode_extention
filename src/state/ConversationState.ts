@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   ConversationMessage
 } from "../models/types";
@@ -34,10 +36,12 @@ export class ConversationState {
   }
 
   getMessages(): ConversationMessage[] {
+    flow("ConversationState.getMessages", 1, "enter");
     return [...this.messages];
   }
 
   clear(): void {
+    flow("ConversationState.clear", 1, "enter");
     this.messages.length = 0;
   }
 

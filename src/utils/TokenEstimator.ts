@@ -1,8 +1,11 @@
+import { flow } from "./flowLog";
+
 export class TokenEstimator {
 
   estimateText(
     text: string
   ): number {
+    flow("TokenEstimator.estimateText", 1, "enter");
 
     if (!text) {
       return 0;
@@ -20,6 +23,7 @@ export class TokenEstimator {
       content: string;
     }>
   ): number {
+    flow("TokenEstimator.estimateFiles", 1, "enter", { count: files.length });
 
     return files.reduce(
       (total, file) =>

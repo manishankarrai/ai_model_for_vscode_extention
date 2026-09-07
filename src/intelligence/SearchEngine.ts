@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import * as vscode from "vscode";
 
 import {
@@ -16,6 +18,7 @@ export class SearchEngine {
     index: ProjectIndex,
     maxResults = 30
   ): Promise<SearchResult[]> {
+    flow("SearchEngine.search", 1, "enter", { query, maxResults });
 
     const normalizedQuery =
       query.toLowerCase().trim();

@@ -8,6 +8,8 @@ import { ReadFileTool } from "./ReadFileTool";
 import { SearchTool } from "./SearchTool";
 import { ListFilesTool } from "./ListFilesTool";
 
+import { flow } from "../utils/flowLog";
+
 export class ReadOnlyToolRegistry {
 
   readonly readFile =
@@ -20,6 +22,7 @@ export class ReadOnlyToolRegistry {
     new ListFilesTool();
 
   getAvailableTools(): ToolName[] {
+    flow("ReadOnlyToolRegistry.getAvailableTools", 1, "enter");
 
     return [
       "read_file",

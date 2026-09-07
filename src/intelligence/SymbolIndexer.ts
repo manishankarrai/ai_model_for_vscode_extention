@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import * as vscode from "vscode";
 
 import {
@@ -10,6 +12,7 @@ export class SymbolIndexer {
   async indexFile(
     file: ProjectFile
   ): Promise<SymbolInfo[]> {
+    flow("SymbolIndexer.indexFile", 1, "enter", { path: file.path });
 
     try {
 
@@ -53,6 +56,7 @@ export class SymbolIndexer {
     filePath: string,
     result: SymbolInfo[]
   ): void {
+    flow("SymbolIndexer.flatten", 1, "enter");
 
     for (const symbol of symbols) {
 

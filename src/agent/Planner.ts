@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   Intent,
   InvestigationPlan,
@@ -10,6 +12,7 @@ export class Planner {
     intent: Intent,
     question: string
   ): InvestigationPlan {
+    flow("Planner.createPlan", 1, "enter", { intent });
 
     const normalizedQuestion =
       question.toLowerCase();
@@ -243,6 +246,7 @@ export class Planner {
   private isSimpleQuestion(
     question: string
   ): boolean {
+    flow("Planner.isSimpleQuestion", 1, "enter");
 
     const simplePatterns = [
       "where is",

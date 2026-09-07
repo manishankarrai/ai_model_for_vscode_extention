@@ -1,9 +1,12 @@
+import { flow } from "../utils/flowLog";
+
 export interface DiffLine {
   type: "context" | "removed" | "added";
   text: string;
 }
 
 export function previewDiff(original: string, updated: string): DiffLine[] {
+  flow("previewDiff", 1, "enter");
   if (original === updated) {
     return [];
   }
@@ -17,6 +20,7 @@ export function previewDiff(original: string, updated: string): DiffLine[] {
 }
 
 function lcsTable(left: string[], right: string[]): number[][] {
+  flow("lcsTable", 1, "enter");
   const table: number[][] = Array.from(
     { length: left.length + 1 },
     () => Array(right.length + 1).fill(0)

@@ -1,30 +1,42 @@
 import * as vscode from "vscode";
 
+import { flow } from "./flowLog";
+
 export class Logger {
   private readonly output: vscode.OutputChannel;
 
   constructor() {
+    flow("Logger.constructor", 1, "create output channel");
     this.output = vscode.window.createOutputChannel("M3 AI Agent");
   }
 
   info(message: string, data?: unknown): void {
-    
+    flow("Logger.info", 1, message, data);
     this.write("INFO", message, data);
   }
 
   warn(message: string, data?: unknown): void {
+    flow("Logger.warn", 1, message, data);
     this.write("WARN", message, data);
-  } //
+  }
 
   error(message: string, error?: unknown): void {
+    flow("Logger.error", 1, message, error);
     this.write("ERROR", message, error);
   }
 
+  flow(fn: string, step: number, message: string, data?: unknown): void {
+    flow(fn, step, message, data);
+    this.write("FLOW", `[${fn} #${String(step).padStart(2, "0")}] ${message}`, data);
+  }
+
   show(): void {
+    flow("Logger.show", 1, "show output channel");
     this.output.show(true);
   }
 
   dispose(): void {
+    flow("Logger.dispose", 1, "dispose output channel");
     this.output.dispose();
   }
 
@@ -34,9 +46,7 @@ export class Logger {
     data?: unknown
   ): void {
     const timestamp = new Date().toISOString();
-
     let line = `[${timestamp}] [${level}] ${message}`;
-
     if (data !== undefined) {
       try {
         line += ` ${JSON.stringify(data)}`;
@@ -44,7 +54,6 @@ export class Logger {
         line += " [unserializable]";
       }
     }
-
     this.output.appendLine(line);
   }
 }

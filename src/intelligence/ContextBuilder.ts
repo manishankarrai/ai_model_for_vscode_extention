@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import * as vscode from "vscode";
 
 import {
@@ -58,6 +60,7 @@ export class ContextBuilder {
     investigationEvidence:
       InvestigationContextEvidence[] = []
   ): Promise<AIContext> {
+    flow("ContextBuilder.build", 1, "enter", { maxFiles: options.maxFiles, maxChars: options.maxChars });
 
     const files: {
       path: string;
@@ -281,6 +284,7 @@ export class ContextBuilder {
     investigationEvidence:
       InvestigationContextEvidence[]
   ): SearchResult[] {
+    flow("ContextBuilder.mergeInvestigationEvidence", 1, "enter");
 
     const resultMap =
       new Map<string, SearchResult>();
@@ -797,6 +801,7 @@ export class ContextBuilder {
     index: ProjectIndex,
     maxChars: number
   ): string {
+    flow("ContextBuilder.buildFocusedContent", 1, "enter", { path: result.path, maxChars });
 
     const lines =
       content.split(/\r?\n/);
@@ -1348,6 +1353,7 @@ export class ContextBuilder {
     investigationEvidence:
       InvestigationContextEvidence[] = []
   ): string {
+    flow("ContextBuilder.createIndexSummary", 1, "enter");
 
     const lines: string[] = [];
 
@@ -1739,8 +1745,9 @@ export class ContextBuilder {
     message: string,
     data?: unknown
   ): void {
+    flow("ContextBuilder.loggerInfo", 1, message, data);
 
-    // Intentionally empty.
+    // Intentionally empty besides flow.
     //
     // Agent already logs the major ContextBuilder stages.
     //

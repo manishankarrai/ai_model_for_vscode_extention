@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import * as vscode from "vscode";
 
 import {
@@ -9,6 +11,7 @@ export class ReadFileTool {
   async execute(
     filePath: string
   ): Promise<string> {
+    flow("ReadFileTool.execute", 1, "enter", { filePath });
 
     const workspace =
       vscode.workspace.workspaceFolders?.[0];

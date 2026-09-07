@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import type {
   AIContext,
   ContextEvidence,
@@ -8,6 +10,7 @@ import type {
 } from "../models/types.ts";
 
 export function isSafeContextPath(filePath: string): boolean {
+  flow("isSafeContextPath", 1, "enter");
   const normalized = filePath.replace(/\\/g, "/").toLowerCase();
 
   return !normalized.startsWith("/") &&
@@ -36,6 +39,7 @@ export function resolveRequestContext(options: {
   indexSummary: string;
   maxFiles: number;
 }): AIContext {
+  flow("resolveRequestContext", 1, "enter", { mode: options.mode, maxFiles: options.maxFiles });
   const selected = options.selected
     .filter((part) => isSafeContextPath(part.path))
     .slice(0, options.maxFiles);

@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 export class ReadOnlyGuard {
 
   private static readonly BLOCKED_OPERATIONS = [
@@ -16,6 +18,7 @@ export class ReadOnlyGuard {
   static isAllowed(
     operation: string
   ): boolean {
+    flow("ReadOnlyGuard.isAllowed", 1, "enter", { operation });
 
     return !this.BLOCKED_OPERATIONS.includes(
       operation
@@ -25,6 +28,7 @@ export class ReadOnlyGuard {
   static assertAllowed(
     operation: string
   ): void {
+    flow("ReadOnlyGuard.assertAllowed", 1, "enter", { operation });
 
     if (
       !this.isAllowed(operation)

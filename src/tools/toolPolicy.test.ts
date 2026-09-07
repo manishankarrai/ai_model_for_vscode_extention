@@ -1,3 +1,4 @@
+import { flow } from "../utils/flowLog";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -5,6 +6,7 @@ import { availableTools, getToolPolicy, isToolAllowed, requiresApproval } from "
 
 describe("agent tool policy", () => {
   it("exposes no tools in Ask mode", () => {
+    flow("toolPolicy.test.askMode", 1, "enter");
     assert.deepEqual(availableTools("ask"), []);
     assert.equal(isToolAllowed("ask", "read_file"), false);
     assert.deepEqual(getToolPolicy("ask").allowed, []);

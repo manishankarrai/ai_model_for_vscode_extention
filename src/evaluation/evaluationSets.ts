@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 export type EvaluationCategory =
   | "architecture"
   | "bug_analysis"
@@ -12,6 +14,7 @@ export interface EvaluationCase {
 }
 
 export function stage12EvaluationSet(): EvaluationCase[] {
+  flow("stage12EvaluationSet", 1, "enter");
   return [
     {
       id: "arch-boundaries",

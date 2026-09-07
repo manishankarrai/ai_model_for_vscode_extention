@@ -2,8 +2,11 @@ import * as fs from "fs";
 import * as path from "path";
 import { ProjectIndex } from "../models/types";
 
+import { flow } from "../utils/flowLog";
+
 export class FrameworkDetector {
   detect(index: ProjectIndex): string[] {
+    flow("FrameworkDetector.detect", 1, "enter");
     const frameworks = new Set<string>();
     const rootPath = index.rootPath;
     const files = [...index.files.values()].map(({ file }) => file);

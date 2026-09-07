@@ -8,6 +8,8 @@ import {
 
 import { Logger } from "../utils/Logger";
 
+import { flow } from "../utils/flowLog";
+
 export class ChangeDetector
   implements vscode.Disposable {
 
@@ -98,6 +100,7 @@ export class ChangeDetector
   }
 
   dispose(): void {
+    flow("ChangeDetector.dispose", 1, "enter");
     this.watcher.dispose();
   }
 }

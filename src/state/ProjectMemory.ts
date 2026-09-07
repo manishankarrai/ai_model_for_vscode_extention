@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 
 import { ProjectModel } from "../project/project-model";
+import { flow } from "../utils/flowLog";
+
 import {
   formatConflictSummary,
   MemoryConflict,
@@ -102,6 +104,7 @@ export class ProjectMemory {
   }
 
   async save(): Promise<void> {
+    flow("ProjectMemory.save", 1, "enter");
     await this.storage.update(this.key, this.memory);
   }
 
@@ -340,6 +343,7 @@ export class ProjectMemory {
   }
 
   getSnapshot(): ProjectMemorySnapshot {
+    flow("ProjectMemory.getSnapshot", 1, "enter");
     return {
       rootPath: this.memory.rootPath,
       projectSummary: this.memory.projectSummary,
@@ -356,6 +360,7 @@ export class ProjectMemory {
   }
 
   getContextForAI(): string {
+    flow("ProjectMemory.getContextForAI", 1, "enter");
     const snapshot = this.getSnapshot();
 
     return [
@@ -376,6 +381,7 @@ export class ProjectMemory {
   }
 
   async clear(): Promise<void> {
+    flow("ProjectMemory.clear", 1, "enter");
     this.memory = {
       rootPath: "",
       projectSummary: "",
@@ -475,6 +481,7 @@ export class ProjectMemory {
   }
 
   private touch(): void {
+    flow("ProjectMemory.touch", 1, "enter");
     this.memory.updatedAt = Date.now();
   }
 }

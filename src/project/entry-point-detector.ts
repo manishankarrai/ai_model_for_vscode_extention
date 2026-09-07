@@ -1,8 +1,11 @@
 import * as path from "path";
 import { ProjectEntryPoint } from "./project-model";
 
+import { flow } from "../utils/flowLog";
+
 export class EntryPointDetector {
   detect(files: string[]): ProjectEntryPoint[] {
+    flow("EntryPointDetector.detect", 1, "enter");
     const results: ProjectEntryPoint[] = [];
 
     for (const file of files) {

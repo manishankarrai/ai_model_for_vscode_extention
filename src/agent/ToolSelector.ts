@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   Intent,
   ToolName
@@ -8,6 +10,7 @@ export class ToolSelector {
   select(
     intent: Intent
   ): ToolName[] {
+    flow("ToolSelector.select", 1, "enter", { intent });
 
     switch (intent) {
 

@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import * as path from "path";
 import * as vscode from "vscode";
 
@@ -17,6 +19,7 @@ export class ProjectScanner {
   async scan(
     rootUri: vscode.Uri
   ): Promise<ProjectFile[]> {
+    flow("ProjectScanner.scan", 1, "enter", { root: rootUri.fsPath });
 
     const files = await vscode.workspace.findFiles(
       new vscode.RelativePattern(
@@ -93,6 +96,7 @@ export class ProjectScanner {
   private isProbablyBinary(
     content: string
   ): boolean {
+    flow("ProjectScanner.isProbablyBinary", 1, "enter");
 
     const sample =
       content.slice(0, 1000);

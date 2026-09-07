@@ -1,6 +1,8 @@
 import * as vscode from "vscode";
 
 import { CodeChange } from "../models/types";
+import { flow } from "../utils/flowLog";
+
 import {
   applyHunkApprovals,
   ChangeSetStore,
@@ -32,6 +34,7 @@ export class CodeChangeApplier {
   }> = [];
 
   getChangeSets(): NamedChangeSet[] {
+    flow("CodeChangeApplier.getChangeSets", 1, "enter");
     return this.store.list();
   }
 
@@ -271,6 +274,7 @@ export class CodeChangeApplier {
   }
 
   async rollbackLast(): Promise<void> {
+    flow("CodeChangeApplier.rollbackLast", 1, "enter");
     const changeSet = this.store.latestApplied();
     const targets = this.lastAppliedChanges.length > 0
       ? this.lastAppliedChanges

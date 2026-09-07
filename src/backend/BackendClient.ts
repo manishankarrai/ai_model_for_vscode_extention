@@ -1,5 +1,7 @@
 import * as vscode from "vscode";
 
+import { flow } from "../utils/flowLog";
+
 import {
   AIRequest,
   AIResponse,
@@ -40,6 +42,7 @@ export class BackendClient {
   private readonly backendUrl: string;
 
   constructor() {
+    flow("BackendClient.constructor", 1, "enter");
     this.backendUrl =
       vscode.workspace
         .getConfiguration("m3")
@@ -54,6 +57,7 @@ export class BackendClient {
     email: string,
     password: string
   ): Promise<AuthResponse> {
+    flow("BackendClient.login", 1, "enter");
 
     return this.post<AuthResponse>(
       "/api/v1/auth/login",
@@ -68,6 +72,7 @@ export class BackendClient {
     email: string,
     password: string
   ): Promise<AuthResponse> {
+    flow("BackendClient.register", 1, "enter");
 
     return this.post<AuthResponse>(
       "/api/v1/auth/register",
@@ -83,6 +88,7 @@ export class BackendClient {
     accessToken: string,
     signal?: AbortSignal
   ): Promise<AIResponse> {
+    flow("BackendClient.sendAIRequest", 1, "enter", { requestId: request.request_id, action: request.action });
 
     return this.post<AIResponse>(
       "/api/v1/ai",
@@ -95,6 +101,7 @@ export class BackendClient {
   async getUsage(
     accessToken: string
   ): Promise<UsageResponse> {
+    flow("BackendClient.getUsage", 1, "enter");
 
     return this.get<UsageResponse>(
       "/api/v1/usage",
@@ -105,18 +112,21 @@ export class BackendClient {
   async getWallet(
     accessToken: string
   ): Promise<WalletSummary> {
+    flow("BackendClient.getWallet", 1, "enter");
     return this.get<WalletSummary>("/api/v1/wallet", accessToken);
   }
 
   async getAgents(
     accessToken: string
   ): Promise<{ agents: BillingAgent[] }> {
+    flow("BackendClient.getAgents", 1, "enter");
     return this.get<{ agents: BillingAgent[] }>("/api/v1/agents", accessToken);
   }
 
   async getPlans(
     accessToken: string
   ): Promise<{ plans: CreditPlan[] }> {
+    flow("BackendClient.getPlans", 1, "enter");
     return this.get<{ plans: CreditPlan[] }>("/api/v1/plans", accessToken);
   }
 
@@ -124,6 +134,7 @@ export class BackendClient {
     planId: string,
     accessToken: string
   ): Promise<{ wallet_balance?: number; credits?: number; id?: string }> {
+    flow("BackendClient.createOrder", 1, "enter", { planId });
     return this.post(
       "/api/v1/orders",
       { plan_id: planId },
@@ -132,6 +143,7 @@ export class BackendClient {
   }
 
   async health(): Promise<unknown> {
+    flow("BackendClient.health", 1, "enter");
 
     return this.get<unknown>(
       "/api/v1/health"
@@ -142,6 +154,7 @@ export class BackendClient {
     requestId: string,
     accessToken: string
   ): Promise<AgentTaskStatus> {
+    flow("BackendClient.getAgentTask", 1, "enter", { requestId });
     return this.get<AgentTaskStatus>(
       `/api/v1/ai/tasks/${encodeURIComponent(requestId)}`,
       accessToken
@@ -155,6 +168,7 @@ export class BackendClient {
     accessToken: string,
     signal?: AbortSignal
   ): Promise<unknown> {
+    flow("BackendClient.retryAgent", 1, "enter", { requestId, profile });
     return this.post<unknown>(
       `/api/v1/ai/tasks/${encodeURIComponent(requestId)}/retry?profile=${encodeURIComponent(profile)}`,
       request,
@@ -169,6 +183,7 @@ export class BackendClient {
     onEvent: (event: AgentEvent) => void,
     signal?: AbortSignal
   ): Promise<void> {
+    flow("BackendClient.streamAgentEvents", 1, "enter", { requestId });
     const response = await fetch(
       `${this.backendUrl}/api/v1/ai/events?request_id=${encodeURIComponent(requestId)}`,
       {
@@ -214,6 +229,7 @@ export class BackendClient {
     accessToken?: string,
     signal?: AbortSignal
   ): Promise<T> {
+    flow("BackendClient.post", 2, "http post", { endpoint });
 
     const headers: Record<string, string> = {
       "Content-Type": "application/json"
@@ -271,6 +287,7 @@ export class BackendClient {
     endpoint: string,
     accessToken?: string
   ): Promise<T> {
+    flow("BackendClient.get", 1, "http get", { endpoint });
 
     const headers: Record<string, string> = {};
 
@@ -323,6 +340,7 @@ export class BackendClient {
   private async parseResponse<T>(
     response: Response
   ): Promise<T> {
+    flow("BackendClient.parseResponse", 1, "enter", { status: response.status });
 
     const contentType =
       response.headers.get("content-type") ?? "";

@@ -1,5 +1,7 @@
 import type { AgentToolName, InteractionMode, ToolPolicy } from "../models/types.ts";
 
+import { flow } from "../utils/flowLog";
+
 const READ_TOOLS: AgentToolName[] = [
   "read_file",
   "search",
@@ -19,6 +21,7 @@ const APPROVAL_TOOLS: AgentToolName[] = [
 ];
 
 export function availableTools(mode: InteractionMode): AgentToolName[] {
+  flow("availableTools", 1, "enter");
   if (mode === "ask") {
     return [];
   }
@@ -27,6 +30,7 @@ export function availableTools(mode: InteractionMode): AgentToolName[] {
 }
 
 export function getToolPolicy(mode: InteractionMode): ToolPolicy {
+  flow("getToolPolicy", 1, "enter");
   if (mode === "ask") {
     return {
       allowed: [],
@@ -48,5 +52,6 @@ export function isToolAllowed(
 }
 
 export function requiresApproval(tool: AgentToolName): boolean {
+  flow("requiresApproval", 1, "enter");
   return APPROVAL_TOOLS.includes(tool);
 }

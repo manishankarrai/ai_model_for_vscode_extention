@@ -1,3 +1,4 @@
+import { flow } from "../utils/flowLog";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -5,6 +6,7 @@ import { ProjectMemory } from "./ProjectMemory";
 
 describe("ProjectMemory", () => {
   it("stores project facts and returns a summary", () => {
+    flow("ProjectMemory.test.storesFacts", 1, "enter");
     const memory = new ProjectMemory({
       get: () => undefined,
       update: async () => undefined,

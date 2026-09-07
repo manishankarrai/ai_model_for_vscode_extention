@@ -18,6 +18,8 @@ import { EntryPointDetector } from "./entry-point-detector";
 import { FrameworkDetector } from "./framework-detector";
 import { ModuleDetector } from "./module-detector";
 
+import { flow } from "../utils/flowLog";
+
 export class ProjectModelBuilder {
   private readonly classifier = new FileClassifier();
   private readonly entryPointDetector = new EntryPointDetector();
@@ -25,6 +27,7 @@ export class ProjectModelBuilder {
   private readonly moduleDetector = new ModuleDetector();
 
   build(index: ProjectIndex): ProjectModel {
+    flow("ProjectModelBuilder.build", 1, "enter");
     const indexedFiles = [...index.files.values()];
     const projectFiles: ProjectFile[] = indexedFiles.map(({ file }) => {
       const classification = this.classifier.classify(file.path);

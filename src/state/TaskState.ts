@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   TaskState as M3TaskState
 } from "../models/types";
@@ -69,6 +71,7 @@ export class TaskState {
   }
 
   complete(): void {
+    flow("TaskState.complete", 1, "enter");
 
     this.state.status =
       "completed";
@@ -78,6 +81,7 @@ export class TaskState {
   }
 
   fail(): void {
+    flow("TaskState.fail", 1, "enter");
 
     this.state.status =
       "failed";
@@ -87,6 +91,7 @@ export class TaskState {
   }
 
   get(): M3TaskState {
+    flow("TaskState.get", 1, "enter");
     return {
       ...this.state,
 

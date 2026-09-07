@@ -9,6 +9,8 @@ import { ProjectScanner } from "./ProjectScanner";
 import { SymbolIndexer } from "./SymbolIndexer";
 import { DependencyDetector } from "./DependencyDetector";
 
+import { flow } from "../utils/flowLog";
+
 import {
   readTextFile
 } from "../utils/FileUtils";
@@ -27,6 +29,7 @@ export class ProjectIndexer {
     new DependencyDetector();
 
   getIndex(): ProjectIndex | undefined {
+    flow("ProjectIndexer.getIndex", 1, "enter");
     return this.index;
   }
 
@@ -192,6 +195,7 @@ export class ProjectIndexer {
   }
 
   private rebuildAggregates(): void {
+    flow("ProjectIndexer.rebuildAggregates", 1, "enter");
 
     if (!this.index) {
       return;

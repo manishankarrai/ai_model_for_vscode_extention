@@ -44,6 +44,8 @@ import { resolveRequestContext } from "../intelligence/contextSelection";
 import { getToolPolicy } from "../tools/toolPolicy";
 
 
+import { flow } from "../utils/flowLog";
+
 // ============================================================
 // Stage 4
 // Adaptive reasoning types
@@ -204,6 +206,7 @@ export class Agent {
     private readonly logger:
       Logger
   ) {
+    flow("Agent.constructor", 1, "enter");
 
     this.investigationEngine =
       new InvestigationEngine(
@@ -226,6 +229,7 @@ export class Agent {
     signal?: AbortSignal,
     onEvent?: (event: AgentEvent) => void
   ): Promise<AIResponse> {
+    flow("Agent.process", 1, "enter", { mode, agentProfile, agentCount });
 
     // --------------------------------------------------------
     // Workspace validation
@@ -263,6 +267,7 @@ export class Agent {
 
     const requestId =
       this.createRequestId();
+    flow("Agent.process", 2, "intent and request", { requestId, intent });
 
     if (onEvent && mode === "agent") {
       void this.backend.streamAgentEvents(
@@ -332,6 +337,7 @@ export class Agent {
             workspace.uri
           );
       }
+      flow("Agent.process", 3, "index ready", { files: index.files.size });
 
 
       // ======================================================
@@ -373,6 +379,8 @@ export class Agent {
         );
       }
 
+
+      flow("Agent.process", 4, "plan created", { intent, tools: selectedTools });
 
       this.logger.info(
         "Local plan created",
@@ -494,6 +502,7 @@ export class Agent {
 
 
       let investigation: InvestigationResult;
+      flow("Agent.process", 5, "investigation start", { mode });
 
       if (mode === "ask") {
         investigation = {
@@ -911,10 +920,12 @@ export class Agent {
       );
 
 
+      flow("Agent.process", 6, "complete", { requestId: response.request_id });
       return response;
 
 
     } catch (error) {
+      flow("Agent.process", 7, "failed");
 
       this.taskState.fail();
 
@@ -934,6 +945,7 @@ export class Agent {
     accessToken: string,
     signal?: AbortSignal
   ): Promise<string> {
+    flow("Agent.retrySpecialist", 1, "enter", { profile });
     if (!this.lastRequest || this.lastRequest.mode !== "agent") {
       throw new Error("No Agent request is available for specialist retry.");
     }
@@ -988,6 +1000,7 @@ export class Agent {
 
     signal?: AbortSignal
   ): Promise<AIResponse> {
+    flow("Agent.runAdaptiveInvestigation", 1, "enter");
 
     // --------------------------------------------------------
     // Central investigation state.
@@ -1073,6 +1086,7 @@ export class Agent {
     // --------------------------------------------------------
 
     for (;;) {
+      flow("Agent.runAdaptiveInvestigation", 2, "loop tick");
 
       // ======================================================
       // START NEW ADAPTIVE STEP
@@ -1945,6 +1959,7 @@ export class Agent {
     chars:
       number
   ): number {
+    flow("Agent.addEvidenceChars", 1, "enter", { chars });
 
     if (
       chars <= 0
@@ -1994,6 +2009,7 @@ export class Agent {
     tool:
       AdaptiveToolRequest
   ): void {
+    flow("Agent.validateAdaptiveTool", 1, "enter", { tool: tool.tool });
 
     // --------------------------------------------------------
     // Only read-only tools are permitted.
@@ -2119,6 +2135,7 @@ export class Agent {
     path: string;
     content: string;
   }>> {
+    flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
     // ========================================================
     // READ FILE
@@ -2188,6 +2205,7 @@ export class Agent {
     path: string;
     content: string;
   }>> {
+    flow("Agent.executeAdaptiveReadFile", 1, "enter", { relativePath });
 
     const normalizedPath =
       this.normalizeRelativePath(
@@ -2312,6 +2330,7 @@ export class Agent {
     path: string;
     content: string;
   }>> {
+    flow("Agent.executeAdaptiveSearch", 1, "enter", { query });
 
     const searchResults =
       await this.searchEngine.search(
@@ -2432,6 +2451,7 @@ export class Agent {
     path: string;
     content: string;
   }>> {
+    flow("Agent.executeAdaptiveListFiles", 1, "enter");
 
     const uris =
       await vscode.workspace.findFiles(
@@ -2529,6 +2549,7 @@ export class Agent {
     filePath:
       string
   ): string {
+    flow("Agent.normalizeRelativePath", 1, "enter");
 
     let normalized =
       filePath
@@ -2626,6 +2647,7 @@ export class Agent {
     filePath:
       string
   ): boolean {
+    flow("Agent.isSensitivePath", 1, "enter");
 
     const normalized =
       filePath
@@ -2751,6 +2773,7 @@ export class Agent {
     tool:
       AdaptiveToolRequest
   ): string {
+    flow("Agent.createToolRequestKey", 1, "enter", { tool: tool.tool });
 
     return [
       tool.tool,
@@ -2767,6 +2790,7 @@ export class Agent {
   // ==========================================================
 
   getConversation() {
+    flow("Agent.getConversation", 1, "enter");
     return this.conversation.getMessages();
   }
 
@@ -2776,6 +2800,7 @@ export class Agent {
   // ==========================================================
 
   getTaskState() {
+    flow("Agent.getTaskState", 1, "enter");
     return this.taskState.get();
   }
 
@@ -2785,6 +2810,7 @@ export class Agent {
   // ==========================================================
 
   clearConversation(): void {
+    flow("Agent.clearConversation", 1, "enter");
 
     this.conversation.clear();
   }
@@ -2795,6 +2821,7 @@ export class Agent {
   // ==========================================================
 
   private createRequestId(): string {
+    flow("Agent.createRequestId", 1, "enter");
 
     return [
       Date.now().toString(36),
@@ -2816,6 +2843,7 @@ export class Agent {
     uri:
       vscode.Uri
   ): string {
+    flow("Agent.createProjectId", 1, "enter");
 
     // --------------------------------------------------------
     // Never send the absolute workspace path as project

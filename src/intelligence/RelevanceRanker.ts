@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   ProjectIndex,
   SearchResult
@@ -15,6 +17,7 @@ export class RelevanceRanker {
     searchResults: SearchResult[],
     projectModel?: ProjectModel
   ): SearchResult[] {
+    flow("RelevanceRanker.rank", 1, "enter");
 
     const questionTerms =
       this.extractTerms(question);
@@ -246,6 +249,7 @@ export class RelevanceRanker {
   private extractTerms(
     question: string
   ): string[] {
+    flow("RelevanceRanker.extractTerms", 1, "enter");
 
     const stopWords =
       new Set([
@@ -769,6 +773,7 @@ export class RelevanceRanker {
     score: number,
     reason: string
   ): void {
+    flow("RelevanceRanker.addScore", 1, "enter", { filePath, score });
 
     const existing =
       resultMap.get(filePath);

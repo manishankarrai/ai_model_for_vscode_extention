@@ -3,6 +3,8 @@ import { createHash } from "node:crypto";
 import { previewDiff } from "../quality/diffPreview.ts";
 import type { CodeChange } from "../models/types.ts";
 
+import { flow } from "../utils/flowLog";
+
 export interface DiffHunk {
   id: string;
   startLine: number;
@@ -42,10 +44,12 @@ export interface NamedChangeSet {
 }
 
 export function contentHash(text: string): string {
+  flow("contentHash", 1, "enter");
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
 export function splitHunks(path: string, original: string, updated: string): DiffHunk[] {
+  flow("splitHunks", 1, "enter");
   const lines = previewDiff(original, updated);
   if (lines.length === 0) {
     return [];
@@ -96,6 +100,7 @@ export function splitHunks(path: string, original: string, updated: string): Dif
 }
 
 export function buildFileReview(change: CodeChange): FileChangeReview {
+  flow("buildFileReview", 1, "enter");
   return {
     path: change.path,
     originalHash: contentHash(change.original),
@@ -157,6 +162,7 @@ export class ChangeSetStore {
   private readonly maxHistory = 20;
 
   record(changeSet: NamedChangeSet): void {
+    flow("ChangeSetStore.record", 1, "enter");
     this.history.unshift(changeSet);
     if (this.history.length > this.maxHistory) {
       this.history.length = this.maxHistory;
@@ -164,6 +170,7 @@ export class ChangeSetStore {
   }
 
   update(changeSet: NamedChangeSet): void {
+    flow("ChangeSetStore.update", 1, "enter");
     const index = this.history.findIndex((item) => item.id === changeSet.id);
     if (index >= 0) {
       this.history[index] = changeSet;
@@ -173,14 +180,17 @@ export class ChangeSetStore {
   }
 
   list(): NamedChangeSet[] {
+    flow("ChangeSetStore.list", 1, "enter");
     return [...this.history];
   }
 
   get(id: string): NamedChangeSet | undefined {
+    flow("ChangeSetStore.get", 1, "enter");
     return this.history.find((item) => item.id === id);
   }
 
   latestApplied(): NamedChangeSet | undefined {
+    flow("ChangeSetStore.latestApplied", 1, "enter");
     return this.history.find((item) => item.status === "applied");
   }
 }

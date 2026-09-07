@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   DependencyInfo
 } from "../models/types";
@@ -8,6 +10,7 @@ export class DependencyDetector {
     filePath: string,
     content: string
   ): DependencyInfo[] {
+    flow("DependencyDetector.detect", 1, "enter", { filePath });
 
     const dependencies: DependencyInfo[] = [];
 

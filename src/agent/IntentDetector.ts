@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   Intent
 } from "../models/types";
@@ -5,6 +7,7 @@ import {
 export class IntentDetector {
 
   detect(question: string): Intent {
+    flow("IntentDetector.detect", 1, "enter");
 
     const q =
       question

@@ -1,3 +1,5 @@
+import { flow } from "../utils/flowLog";
+
 import {
   ProjectIndex,
   SearchResult
@@ -107,6 +109,7 @@ export class InvestigationEngine {
   constructor(
     private readonly logger: Logger
   ) {
+    flow("InvestigationEngine.constructor", 1, "enter");
 
     this.symbolGraph =
       new SymbolRelationshipGraph(
@@ -121,6 +124,7 @@ export class InvestigationEngine {
     rankedResults: SearchResult[],
     options: InvestigationOptions = {}
   ): Promise<InvestigationResult> {
+    flow("InvestigationEngine.investigate", 1, "enter", { maxFiles: options.maxFiles });
 
     // --------------------------------------------------------
     // Investigation limits
@@ -1011,6 +1015,7 @@ export class InvestigationEngine {
     filePath: string,
     rankedResults: SearchResult[]
   ): number {
+    flow("InvestigationEngine.getEvidenceScore", 1, "enter", { filePath });
 
     const result =
       rankedResults.find(
@@ -1031,6 +1036,7 @@ export class InvestigationEngine {
     filePath: string,
     rankedResults: SearchResult[]
   ): string {
+    flow("InvestigationEngine.getEvidenceReason", 1, "enter", { filePath });
 
     const result =
       rankedResults.find(
@@ -1059,6 +1065,7 @@ export class InvestigationEngine {
     content: string,
     remainingChars: number
   ): string {
+    flow("InvestigationEngine.limitContent", 1, "enter");
 
     if (
       remainingChars <= 0
@@ -1097,6 +1104,7 @@ export class InvestigationEngine {
       | "max_files"
       | "max_chars"
   ): InvestigationResult {
+    flow("InvestigationEngine.createResult", 1, "enter", { stoppedReason, steps: steps.length });
 
     return {
 
