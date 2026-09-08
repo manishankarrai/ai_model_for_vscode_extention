@@ -1,5 +1,6 @@
 import * as vscode from "vscode";
 import { execFile } from "node:child_process";
+import { promises as fs } from "node:fs";
 import { promisify } from "node:util";
 
 import {
@@ -14,7 +15,8 @@ import {
   assertWorkspaceTrusted,
   validateWorkspaceRelativePath
 } from "../safety/changeValidation";
-import { availableTools, isToolAllowed } from "./toolPolicy";
+import { availableTools, isToolAllowed, isReadOnlyTool } from "./toolPolicy";
+import { parseSafeCommand } from "./commandPolicy";
 
 import { flow } from "../utils/flowLog";
 
@@ -31,10 +33,18 @@ export class WorkspaceToolRegistry {
     return availableTools(mode);
   }
 
+  isWorkspaceTool(tool: AgentToolName): boolean {
+    return !isReadOnlyTool(tool) ||
+      tool === "get_diagnostics" ||
+      tool === "git_diff" ||
+      tool === "git_status";
+  }
+
   async execute(
     request: ToolRequest,
     mode: InteractionMode
   ): Promise<ToolResult> {
+    flow("WorkspaceToolRegistry.execute", 1, "enter", { tool: request.tool });
     if (mode !== "agent") {
       throw new Error("Ask mode does not permit tool execution.");
     }
@@ -45,10 +55,16 @@ export class WorkspaceToolRegistry {
 
     switch (request.tool) {
       case "apply_change_set":
-        await this.changeApplier.offer(request.changes ?? []);
-        return this.result(request.tool, true, "Change set reviewed.");
+      case "apply_patch":
+        return this.applyChanges(request);
       case "create_file":
-        return this.createFile(request.path, request.changes?.[0]?.updated ?? "");
+      case "write_file":
+        return this.createFile(
+          request.path,
+          request.content ?? request.updated ?? request.changes?.[0]?.updated ?? ""
+        );
+      case "edit_file":
+        return this.editFile(request);
       case "delete_file":
         return this.deleteFile(request.path);
       case "rename_file":
@@ -58,6 +74,10 @@ export class WorkspaceToolRegistry {
         return this.getDiagnostics(request.path);
       case "run_task":
         return this.runTask(request.taskName);
+      case "run_command":
+        return this.runCommand(request.command);
+      case "run_tests":
+        return this.runTests();
       case "git_diff":
         return this.runGit("git_diff", ["diff", "--", "."]);
       case "git_status":
@@ -65,6 +85,44 @@ export class WorkspaceToolRegistry {
       default:
         throw new Error(`Tool '${request.tool}' must use the existing read-only registry.`);
     }
+  }
+
+  private async applyChanges(request: ToolRequest): Promise<ToolResult> {
+    const changes = request.changes ?? [];
+    if (changes.length === 0 && request.path && request.updated) {
+      return this.editFile(request);
+    }
+    if (changes.length === 0) {
+      throw new Error("apply_change_set requires changes.");
+    }
+    await this.changeApplier.offer(changes);
+    return this.result(request.tool, true, `Reviewed ${changes.length} file change(s).`);
+  }
+
+  private async editFile(request: ToolRequest): Promise<ToolResult> {
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
+    const filePath = request.path;
+    const uri = this.resolvePath(filePath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    const original = request.original ?? document.getText();
+    const updated = request.updated ?? request.content;
+    if (updated === undefined) {
+      throw new Error("edit_file requires updated content.");
+    }
+    await this.changeApplier.offer([{
+      path: validateWorkspaceRelativePath(filePath ?? ""),
+      original,
+      updated
+    }]);
+    const after = (await vscode.workspace.openTextDocument(uri)).getText();
+    const applied = after === updated;
+    return this.result(
+      "edit_file",
+      applied,
+      applied
+        ? `Updated ${filePath}.`
+        : `Edit for ${filePath} was not applied.`
+    );
   }
 
   private async createFile(
@@ -123,7 +181,10 @@ export class WorkspaceToolRegistry {
       : vscode.languages.getDiagnostics().flatMap((entry) => entry[1]);
     const output = diagnostics.length === 0
       ? "No diagnostics."
-      : diagnostics.map((item) => item.message).join("\n");
+      : diagnostics.map((item) => {
+        const range = `${item.range.start.line + 1}:${item.range.start.character + 1}`;
+        return `${item.severity} ${range} ${item.message}`;
+      }).join("\n");
     return this.result("get_diagnostics", true, output);
   }
 
@@ -143,15 +204,88 @@ export class WorkspaceToolRegistry {
     return this.result("run_task", true, `Started task ${taskName}.`);
   }
 
+  private async runTests(): Promise<ToolResult> {
+    const command = await this.detectTestCommand();
+    return this.runCommand(command, "run_tests");
+  }
+
+  private async detectTestCommand(): Promise<string> {
+    const workspace = this.requireWorkspace();
+    const root = workspace.uri.fsPath;
+
+    try {
+      const packageJson = JSON.parse(
+        await fs.readFile(`${root}/package.json`, "utf8")
+      ) as { scripts?: Record<string, string> };
+      if (packageJson.scripts?.test) {
+        return "npm test";
+      }
+    } catch {
+      // no package.json
+    }
+
+    try {
+      await fs.access(`${root}/go.mod`);
+      return "go test ./...";
+    } catch {
+      // not a Go module
+    }
+
+    try {
+      await fs.access(`${root}/pytest.ini`);
+      return "python -m pytest";
+    } catch {
+      // no pytest.ini
+    }
+
+    throw new Error("M3 could not detect a test command for this workspace.");
+  }
+
+  private async runCommand(
+    command?: string,
+    tool: AgentToolName = "run_command"
+  ): Promise<ToolResult> {
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
+    const parsed = parseSafeCommand(command ?? "");
+    const workspace = this.requireWorkspace();
+    await this.confirm(`Run \`${parsed.binary} ${parsed.args.join(" ")}\` in the workspace?`);
+
+    try {
+      const result = await execFileAsync(parsed.binary, parsed.args, {
+        cwd: workspace.uri.fsPath,
+        timeout: tool === "run_tests" ? 180_000 : 60_000,
+        maxBuffer: 2_000_000,
+        env: process.env
+      });
+      const output = [
+        `exit_code=0`,
+        `command=${parsed.binary} ${parsed.args.join(" ")}`,
+        result.stdout || "",
+        result.stderr || ""
+      ].join("\n").trim();
+      return this.result(tool, true, output || "Command succeeded with no output.");
+    } catch (error) {
+      const execError = error as {
+        code?: number;
+        stdout?: string;
+        stderr?: string;
+        message?: string;
+      };
+      const output = [
+        `exit_code=${execError.code ?? 1}`,
+        `command=${parsed.binary} ${parsed.args.join(" ")}`,
+        execError.stdout ?? "",
+        execError.stderr ?? execError.message ?? String(error)
+      ].join("\n").trim();
+      return this.result(tool, false, output);
+    }
+  }
+
   private async runGit(
     tool: "git_diff" | "git_status",
     args: string[]
   ): Promise<ToolResult> {
-    const workspace = vscode.workspace.workspaceFolders?.[0];
-
-    if (!workspace) {
-      throw new Error("Git inspection requires an open workspace.");
-    }
+    const workspace = this.requireWorkspace();
 
     try {
       const result = await execFileAsync("git", args, {
@@ -167,12 +301,17 @@ export class WorkspaceToolRegistry {
     }
   }
 
-  private resolvePath(filePath: string | undefined): vscode.Uri {
-    flow("WorkspaceToolRegistry.resolvePath", 1, "enter");
+  private requireWorkspace(): vscode.WorkspaceFolder {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
-      throw new Error(`Unsafe workspace path: ${filePath ?? ""}`);
+      throw new Error("An open workspace is required.");
     }
+    return workspace;
+  }
+
+  private resolvePath(filePath: string | undefined): vscode.Uri {
+    flow("WorkspaceToolRegistry.resolvePath", 1, "enter");
+    const workspace = this.requireWorkspace();
     const normalized = validateWorkspaceRelativePath(filePath ?? "");
     assertNotSensitivePath(normalized);
     return vscode.Uri.joinPath(workspace.uri, ...normalized.split("/"));

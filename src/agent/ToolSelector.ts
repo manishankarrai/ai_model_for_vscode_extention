@@ -2,22 +2,36 @@ import { flow } from "../utils/flowLog";
 
 import {
   Intent,
-  ToolName
+  AgentToolName
 } from "../models/types";
 
 export class ToolSelector {
 
   select(
     intent: Intent
-  ): ToolName[] {
+  ): AgentToolName[] {
     flow("ToolSelector.select", 1, "enter", { intent });
 
     switch (intent) {
 
+      case "implementation":
+        return [
+          "search",
+          "read_file",
+          "list_files",
+          "edit_file",
+          "create_file",
+          "run_tests",
+          "get_diagnostics"
+        ];
+
       case "bug_analysis":
         return [
           "search",
-          "read_file"
+          "read_file",
+          "get_diagnostics",
+          "edit_file",
+          "run_tests"
         ];
 
       case "architecture":

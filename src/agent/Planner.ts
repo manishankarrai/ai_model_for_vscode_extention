@@ -3,7 +3,7 @@ import { flow } from "../utils/flowLog";
 import {
   Intent,
   InvestigationPlan,
-  ToolName
+  AgentToolName
 } from "../models/types";
 
 export class Planner {
@@ -54,7 +54,11 @@ export class Planner {
           tools: [
             "search",
             "read_file",
-            "list_files"
+            "list_files",
+            "edit_file",
+            "create_file",
+            "run_command",
+            "run_tests"
           ],
 
           maxSteps: 15,
@@ -84,7 +88,10 @@ export class Planner {
           tools: [
             "search",
             "read_file",
-            "list_files"
+            "list_files",
+            "get_diagnostics",
+            "edit_file",
+            "run_tests"
           ],
 
           maxSteps: 15,

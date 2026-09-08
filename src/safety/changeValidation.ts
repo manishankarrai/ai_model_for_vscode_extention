@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
 const MAX_CHANGE_CHARS = 200_000;
 

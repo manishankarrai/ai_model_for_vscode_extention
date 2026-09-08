@@ -1,6 +1,6 @@
 import type { AgentToolName, InteractionMode, ToolPolicy } from "../models/types.ts";
 
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
 const READ_TOOLS: AgentToolName[] = [
   "read_file",
@@ -13,8 +13,13 @@ const READ_TOOLS: AgentToolName[] = [
 
 const APPROVAL_TOOLS: AgentToolName[] = [
   "run_task",
+  "run_command",
+  "run_tests",
   "apply_change_set",
+  "apply_patch",
   "create_file",
+  "write_file",
+  "edit_file",
   "delete_file",
   "rename_file",
   "move_file"
@@ -54,4 +59,8 @@ export function isToolAllowed(
 export function requiresApproval(tool: AgentToolName): boolean {
   flow("requiresApproval", 1, "enter");
   return APPROVAL_TOOLS.includes(tool);
+}
+
+export function isReadOnlyTool(tool: AgentToolName): boolean {
+  return READ_TOOLS.includes(tool);
 }

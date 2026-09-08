@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { previewDiff } from "../quality/diffPreview.ts";
 import type { CodeChange } from "../models/types.ts";
 
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
 export interface DiffHunk {
   id: string;

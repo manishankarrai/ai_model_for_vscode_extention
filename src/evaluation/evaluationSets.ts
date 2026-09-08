@@ -1,4 +1,4 @@
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
 export type EvaluationCategory =
   | "architecture"

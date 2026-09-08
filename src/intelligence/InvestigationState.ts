@@ -105,7 +105,7 @@ export class InvestigationState {
   /**
    * Maximum adaptive reasoning cycles.
    */
-  readonly maxSteps = 10;
+  readonly maxSteps = 16;
 
 
   /**
@@ -129,7 +129,7 @@ export class InvestigationState {
   /**
    * Maximum local read-only tool calls.
    */
-  readonly maxToolCalls = 12;
+  readonly maxToolCalls = 20;
 
 
   // ==========================================================

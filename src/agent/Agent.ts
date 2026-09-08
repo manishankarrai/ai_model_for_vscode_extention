@@ -41,7 +41,9 @@ import { ReadOnlyGuard } from "../safety/ReadOnlyGuard";
 import { ProjectUnderstanding } from "../project/project-understanding";
 import { ProjectMemory } from "../state/ProjectMemory";
 import { resolveRequestContext } from "../intelligence/contextSelection";
-import { getToolPolicy } from "../tools/toolPolicy";
+import { getToolPolicy, isToolAllowed } from "../tools/toolPolicy";
+import { WorkspaceToolRegistry } from "../tools/WorkspaceToolRegistry";
+import type { AgentToolName, CodeChange } from "../models/types";
 
 
 import { flow } from "../utils/flowLog";
@@ -51,25 +53,22 @@ import { flow } from "../utils/flowLog";
 // Adaptive reasoning types
 // ============================================================
 
-type AdaptiveToolName =
-  | "read_file"
-  | "search"
-  | "list_files";
-
+type AdaptiveToolName = AgentToolName;
 
 interface AdaptiveToolRequest {
-
-  tool:
-    AdaptiveToolName;
-
-  path?:
-    string;
-
-  query?:
-    string;
-
-  reason?:
-    string;
+  tool: AdaptiveToolName;
+  path?: string;
+  targetPath?: string;
+  target_path?: string;
+  query?: string;
+  command?: string;
+  content?: string;
+  original?: string;
+  updated?: string;
+  taskName?: string;
+  task_name?: string;
+  changes?: CodeChange[];
+  reason?: string;
 }
 
 
@@ -185,6 +184,9 @@ export class Agent {
   // Stage 3
   private readonly investigationEngine:
     InvestigationEngine;
+
+  private readonly workspaceTools =
+    new WorkspaceToolRegistry();
 
 
   constructor(
@@ -375,7 +377,8 @@ export class Agent {
       ) {
 
         ReadOnlyGuard.assertAllowed(
-          tool
+          tool,
+          mode
         );
       }
 
@@ -1559,12 +1562,27 @@ export class Agent {
       // EXECUTE TOOL LOCALLY
       // ======================================================
 
-      const evidence =
-        await this.executeAdaptiveTool(
-          tool,
-          workspaceUri,
-          index
-        );
+      let evidence: Array<{ path: string; content: string }>;
+
+      try {
+        evidence =
+          await this.executeAdaptiveTool(
+            tool,
+            workspaceUri,
+            index
+          );
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        if (message.includes("not approved")) {
+          throw error;
+        }
+        this.logger.warn("Adaptive tool failed", error);
+        evidence = [{
+          path: `m3-tools/${tool.tool}.txt`,
+          content: `tool=${tool.tool}\nsuccess=false\n${message}`
+        }];
+      }
 
 
       // ======================================================
@@ -2011,86 +2029,64 @@ export class Agent {
   ): void {
     flow("Agent.validateAdaptiveTool", 1, "enter", { tool: tool.tool });
 
-    // --------------------------------------------------------
-    // Only read-only tools are permitted.
-    // --------------------------------------------------------
-
-    const allowedTools:
-      AdaptiveToolName[] = [
-        "read_file",
-        "search",
-        "list_files"
-      ];
-
-
-    if (
-      !allowedTools.includes(
-        tool.tool
-      )
-    ) {
-
+    if (!isToolAllowed("agent", tool.tool)) {
       throw new Error(
         `Unsupported adaptive tool: ${tool.tool}`
       );
     }
 
-
-    // --------------------------------------------------------
-    // read_file
-    // --------------------------------------------------------
-
-    if (
-      tool.tool ===
-      "read_file"
-    ) {
-
-      if (
-        !tool.path?.trim()
-      ) {
-
-        throw new Error(
-          "read_file requires a path."
-        );
-      }
+    if (tool.tool === "read_file" && !tool.path?.trim()) {
+      throw new Error("read_file requires a path.");
     }
 
-
-    // --------------------------------------------------------
-    // search
-    // --------------------------------------------------------
-
-    if (
-      tool.tool ===
-      "search"
-    ) {
-
-      if (
-        !tool.query?.trim()
-      ) {
-
-        throw new Error(
-          "search requires a query."
-        );
-      }
+    if (tool.tool === "search" && !tool.query?.trim()) {
+      throw new Error("search requires a query.");
     }
 
-
-    // --------------------------------------------------------
-    // list_files
-    // --------------------------------------------------------
-
     if (
-      tool.tool ===
-      "list_files"
+      (tool.tool === "edit_file" || tool.tool === "write_file" || tool.tool === "create_file") &&
+      !tool.path?.trim()
     ) {
-
-      // No arguments required.
+      throw new Error(`${tool.tool} requires a path.`);
     }
 
+    if (
+      (tool.tool === "edit_file" || tool.tool === "write_file" || tool.tool === "create_file") &&
+      !(tool.updated ?? tool.content)?.length &&
+      !tool.changes?.length
+    ) {
+      throw new Error(`${tool.tool} requires file content.`);
+    }
 
-    // --------------------------------------------------------
-    // Reason is useful for observability.
-    // --------------------------------------------------------
+    if (
+      (tool.tool === "delete_file") &&
+      !tool.path?.trim()
+    ) {
+      throw new Error("delete_file requires a path.");
+    }
+
+    if (
+      (tool.tool === "move_file" || tool.tool === "rename_file") &&
+      (!tool.path?.trim() || !(tool.targetPath ?? tool.target_path)?.trim())
+    ) {
+      throw new Error(`${tool.tool} requires path and target_path.`);
+    }
+
+    if (tool.tool === "run_command" && !tool.command?.trim()) {
+      throw new Error("run_command requires a command.");
+    }
+
+    if (tool.tool === "run_task" && !(tool.taskName ?? tool.task_name)?.trim()) {
+      throw new Error("run_task requires a task_name.");
+    }
+
+    if (
+      (tool.tool === "apply_change_set" || tool.tool === "apply_patch") &&
+      !tool.changes?.length &&
+      !(tool.path && (tool.updated ?? tool.content))
+    ) {
+      throw new Error(`${tool.tool} requires changes.`);
+    }
 
     if (
       !tool.reason?.trim()
@@ -2137,10 +2133,6 @@ export class Agent {
   }>> {
     flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
-    // ========================================================
-    // READ FILE
-    // ========================================================
-
     if (
       tool.tool ===
       "read_file"
@@ -2151,11 +2143,6 @@ export class Agent {
         workspaceUri
       );
     }
-
-
-    // ========================================================
-    // SEARCH
-    // ========================================================
 
     if (
       tool.tool ===
@@ -2169,11 +2156,6 @@ export class Agent {
       );
     }
 
-
-    // ========================================================
-    // LIST FILES
-    // ========================================================
-
     if (
       tool.tool ===
       "list_files"
@@ -2184,10 +2166,31 @@ export class Agent {
       );
     }
 
-
-    throw new Error(
-      `Unsupported adaptive tool: ${tool.tool}`
+    const result = await this.workspaceTools.execute(
+      {
+        tool: tool.tool,
+        path: tool.path,
+        targetPath: tool.targetPath ?? tool.target_path,
+        query: tool.query,
+        command: tool.command,
+        content: tool.content,
+        original: tool.original,
+        updated: tool.updated,
+        taskName: tool.taskName ?? tool.task_name,
+        reason: tool.reason,
+        changes: tool.changes
+      },
+      "agent"
     );
+
+    return [{
+      path: `m3-tools/${tool.tool}.txt`,
+      content: [
+        `tool=${result.tool}`,
+        `success=${result.success}`,
+        result.output
+      ].join("\n")
+    }];
   }
 
 
@@ -2778,7 +2781,10 @@ export class Agent {
     return [
       tool.tool,
       tool.path ?? "",
-      tool.query ?? ""
+      tool.targetPath ?? tool.target_path ?? "",
+      tool.query ?? "",
+      tool.command ?? "",
+      tool.taskName ?? tool.task_name ?? ""
     ].join(
       "|"
     );

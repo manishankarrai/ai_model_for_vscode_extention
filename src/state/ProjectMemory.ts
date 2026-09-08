@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 
 import { ProjectModel } from "../project/project-model";
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
 import {
   formatConflictSummary,

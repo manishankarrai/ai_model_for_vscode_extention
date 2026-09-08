@@ -102,7 +102,7 @@
     "lint": "eslint src --ext ts",
     "watch": "npm run check-types && node esbuild.js --watch",
     "package": "npm run compile",
-    "test": "node --experimental-strip-types --test src/intelligence/contextSelection.test.ts src/tools/toolPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
+    "test": "node --experimental-strip-types --test src/intelligence/contextSelection.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

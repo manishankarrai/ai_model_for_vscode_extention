@@ -1,4 +1,4 @@
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -13,7 +13,9 @@ describe("agent tool policy", () => {
   });
 
   it("requires approval for mutating Agent tools", () => {
-    assert.equal(isToolAllowed("agent", "read_file"), true);
+    assert.equal(isToolAllowed("agent", "edit_file"), true);
+    assert.equal(isToolAllowed("agent", "run_command"), true);
+    assert.equal(requiresApproval("run_command"), true);
     assert.equal(requiresApproval("apply_change_set"), true);
     assert.equal(getToolPolicy("agent").approval_required.includes("delete_file"), true);
   });
