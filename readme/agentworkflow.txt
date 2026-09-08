@@ -1,0 +1,97 @@
+                         ┌──────────────────────┐
+                         │     User Question    │
+                         │ "Fix auth issue..."  │
+                         └──────────┬───────────┘
+                                    │
+                                    ▼
+                         ┌──────────────────────┐
+                         │    Agent.process()   │
+                         └──────────┬───────────┘
+                                    │
+                    ┌───────────────┴────────────────┐
+                    │                                │
+                    ▼                                ▼
+          IntentDetector                    Create requestId
+                    │                                │
+                    ▼                                ▼
+             Detect intent                    TaskState.start
+                    │
+                    ▼
+             ProjectIndexer
+                    │
+                    ▼
+              Project Model
+                    │
+                    ▼
+                 Planner
+                    │
+                    ▼
+              ToolSelector
+                    │
+                    ▼
+             ReadOnlyGuard
+                    │
+                    ▼
+             Local Search
+                    │
+                    ▼
+            RelevanceRanker
+                    │
+                    ▼
+       Deep InvestigationEngine
+                    │
+                    ▼
+             ContextBuilder
+                    │
+                    ▼
+             AIContext
+                    │
+                    ▼
+          ┌─────────────────────┐
+          │ Initial AI Request  │
+          └──────────┬──────────┘
+                     │
+                     ▼
+          runAdaptiveInvestigation()
+                     │
+                     ▼
+              ┌──────────────┐
+              │ M3 Backend   │
+              │ /api/v1/ai   │
+              └──────┬───────┘
+                     │
+                     ▼
+                  Gemini
+                     │
+             ┌───────┴────────┐
+             │                │
+             ▼                ▼
+       FINAL_ANSWER    CONTINUE_INVESTIGATION
+             │                │
+             │                ▼
+             │          Tool Request
+             │                │
+             │                ▼
+             │        Execute locally
+             │                │
+             │                ▼
+             │             Evidence
+             │                │
+             │                ▼
+             │         Add to Context
+             │                │
+             │                └──────────┐
+             │                           │
+             │                           ▼
+             │                     Gemini again
+             │                           │
+             │                    ┌──────┴──────┐
+             │                    │             │
+             │                    ▼             ▼
+             │                FINAL         CONTINUE
+             │
+             ▼
+       AIResponse
+             │
+             ▼
+        Task Complete

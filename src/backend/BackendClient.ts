@@ -176,7 +176,7 @@ export class BackendClient {
       signal
     );
   }
-
+  // responsible for calling api in agent mode
   async streamAgentEvents(
     requestId: string,
     accessToken: string,
@@ -214,6 +214,7 @@ export class BackendClient {
             .split("\n")
             .find((line) => line.startsWith("data: "));
           if (data) {
+            // data is send furthur 
             onEvent(JSON.parse(data.slice(6)) as AgentEvent);
           }
         }

@@ -128,7 +128,7 @@ export class M3ViewProvider
       );
     }
   }
-
+ // handle message
   private async handleMessage(
     message: WebviewMessage
   ): Promise<void> {
@@ -205,7 +205,7 @@ export class M3ViewProvider
         break;
     }
   }
-
+  // handle questions
   private async handleQuestion(
     question: string,
     mode: InteractionMode,

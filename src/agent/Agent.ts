@@ -218,7 +218,7 @@ export class Agent {
   // ==========================================================
   // MAIN PROCESS
   // ==========================================================
-
+  // responsible for handing message request and deliver to ai 
   async process(
     question: string,
     accessToken: string,
@@ -276,7 +276,7 @@ export class Agent {
         onEvent,
         signal
       ).catch(async (error: unknown) => {
-        this.logger.warn("Agent event stream unavailable; loading task status", error);
+        this.logger.warn(".............Agent event stream unavailable; loading task status", error);
         try {
           const task = await this.backend.getAgentTask(requestId, accessToken);
           for (const event of (task as AgentTaskStatus).events ?? []) {

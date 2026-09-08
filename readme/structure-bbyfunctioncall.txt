@@ -1,0 +1,133 @@
+┌──────────────────────────────────────────────────────────────┐
+│                         VS CODE UI                           │
+│                                                              │
+│ User: "Where is authentication handled?"                    │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+                               │ calls
+                               ▼
+┌──────────────────────────────────────────────────────────────┐
+│                         agent.ts                             │
+│                                                              │
+│ Agent.process()                                               │
+└──────────────────────────────┬───────────────────────────────┘
+                               │
+                               ▼
+                    IntentDetector.detect()
+                               │
+                               ▼
+                       createRequestId()
+                               │
+                               ▼
+                    ProjectIndexer.getIndex()
+                               │
+                         ┌─────┴─────┐
+                         │ no index? │
+                         └─────┬─────┘
+                               │
+                               ▼
+                    ProjectIndexer.build()
+                               │
+                               ▼
+                 ProjectUnderstanding.getModel()
+                               │
+                               ▼
+                      Planner.createPlan()
+                               │
+                               ▼
+                     ToolSelector.select()
+                               │
+                               ▼
+                  ReadOnlyGuard.assertAllowed()
+                               │
+                               ▼
+                     SearchEngine.search()
+                               │
+                               ▼
+                       RelevanceRanker.rank()
+                               │
+                               ▼
+                 InvestigationEngine.investigate()
+                               │
+                               ▼
+                  ProjectMemory.add/save()
+                               │
+                               ▼
+                    ContextBuilder.build()
+                               │
+                               ▼
+                    resolveRequestContext()
+                               │
+                               ▼
+                       TokenEstimator
+                               │
+                               ▼
+                ┌──────────────────────────┐
+                │ Build AdaptiveAIRequest  │
+                └────────────┬─────────────┘
+                             │
+                             ▼
+              runAdaptiveInvestigation()
+                             │
+                             ▼
+              BackendClient.sendAIRequest()
+                             │
+                             ▼
+                  POST /api/v1/ai
+                             │
+                             ▼
+                    ┌─────────────────┐
+                    │ Go/Gin Backend  │
+                    └────────┬────────┘
+                             │
+                             ▼
+                       AI Service
+                             │
+                             ▼
+                         Gemini API
+                             │
+                             ▼
+                    AIResponse + decision
+                             │
+                 ┌───────────┴────────────┐
+                 │                        │
+                 ▼                        ▼
+          FINAL_ANSWER          CONTINUE_INVESTIGATION
+                 │                        │
+                 │                        ▼
+                 │               validateAdaptiveTool()
+                 │                        │
+                 │                        ▼
+                 │                executeAdaptiveTool()
+                 │                        │
+                 │              ┌─────────┼─────────┐
+                 │              ▼         ▼         ▼
+                 │          read_file   search   list_files
+                 │              │         │         │
+                 │              └─────────┼─────────┘
+                 │                        │
+                 │                        ▼
+                 │                   Local evidence
+                 │                        │
+                 │                        ▼
+                 │                  Update context
+                 │                        │
+                 │                        ▼
+                 │                sendAIRequest() AGAIN
+                 │                        │
+                 │                        ▼
+                 │                     Gemini
+                 │                        │
+                 │                  ...loop...
+                 │
+                 ▼
+             Final answer
+                 │
+                 ▼
+          TaskState.complete()
+                 │
+                 ▼
+          ConversationState
+                 │
+                 ▼
+               UI
