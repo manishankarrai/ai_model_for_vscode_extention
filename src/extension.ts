@@ -121,6 +121,27 @@ export function activate(
     )
   );
 
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "m3.openChat",
+      async () => {
+        flow("command.openChat", 1, "enter");
+        await provider.focusChat();
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "m3.addSelectionToChat",
+      async () => {
+        flow("command.addSelectionToChat", 1, "enter");
+        await provider.attachCurrentSelection();
+      }
+    )
+  );
+
   // ----------------------------------------------------------
   // Scan project
   // ----------------------------------------------------------

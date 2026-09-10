@@ -61,13 +61,13 @@ export class Planner {
             "run_tests"
           ],
 
-          maxSteps: 15,
+          maxSteps: 1000,
 
-          maxFiles: 18,
+          maxFiles: 1000,
 
-          maxChars: 60_000,
+          maxChars: 5_000_000,
 
-          maxSearchResults: 15,
+          maxSearchResults: 1000,
 
           depth: "deep"
         };
@@ -94,13 +94,13 @@ export class Planner {
             "run_tests"
           ],
 
-          maxSteps: 15,
+          maxSteps: 1000,
 
-          maxFiles: 15,
+          maxFiles: 1000,
 
-          maxChars: 50_000,
+          maxChars: 5_000_000,
 
-          maxSearchResults: 10,
+          maxSearchResults: 1000,
 
           depth: "deep"
         };
@@ -130,13 +130,13 @@ export class Planner {
             "search"
           ],
 
-          maxSteps: 12,
+          maxSteps: 1000,
 
-          maxFiles: 20,
+          maxFiles: 1000,
 
-          maxChars: 60_000,
+          maxChars: 5_000_000,
 
-          maxSearchResults: 15,
+          maxSearchResults: 1000,
 
           depth: "deep"
         };
@@ -164,13 +164,13 @@ export class Planner {
             "read_file"
           ],
 
-          maxSteps: 10,
+          maxSteps: 1000,
 
-          maxFiles: 12,
+          maxFiles: 1000,
 
-          maxChars: 40_000,
+          maxChars: 5_000_000,
 
-          maxSearchResults: 10,
+          maxSearchResults: 1000,
 
           depth: "medium"
         };
@@ -204,33 +204,13 @@ export class Planner {
             "read_file"
           ],
 
-          maxSteps:
-            this.isSimpleQuestion(
-              normalizedQuestion
-            )
-              ? 5
-              : 8,
+          maxSteps: 1000,
 
-          maxFiles:
-            this.isSimpleQuestion(
-              normalizedQuestion
-            )
-              ? 6
-              : 10,
+          maxFiles: 1000,
 
-          maxChars:
-            this.isSimpleQuestion(
-              normalizedQuestion
-            )
-              ? 20_000
-              : 30_000,
+          maxChars: 5_000_000,
 
-          maxSearchResults:
-            this.isSimpleQuestion(
-              normalizedQuestion
-            )
-              ? 5
-              : 8,
+          maxSearchResults: 1000,
 
           depth:
             this.isSimpleQuestion(

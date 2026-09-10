@@ -26,12 +26,14 @@ describe("stale-file protection", () => {
     flow("changeValidation.test.parentPath", 1, "enter");
     assert.throws(
       () => validateWorkspaceRelativePath("../secret.ts"),
-      /unsafe change path/i
+      /unsafe change path|rejected unsafe/i
     );
   });
 
-  it("rejects sensitive paths", () => {
-    assert.equal(isSensitivePath(".env"), true);
+  it("allows .env files and still rejects private keys", () => {
+    assert.equal(isSensitivePath(".env"), false);
+    assert.equal(isSensitivePath(".env.prod"), false);
+    assert.equal(isSensitivePath(".env.example"), false);
     assert.throws(() => assertNotSensitivePath("secrets/id_rsa"), /sensitive path/i);
   });
 

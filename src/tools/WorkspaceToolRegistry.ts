@@ -95,8 +95,16 @@ export class WorkspaceToolRegistry {
     if (changes.length === 0) {
       throw new Error("apply_change_set requires changes.");
     }
-    await this.changeApplier.offer(changes);
-    return this.result(request.tool, true, `Reviewed ${changes.length} file change(s).`);
+    const applied = await this.changeApplier.offer(changes);
+    const diffs = applied.map((item) => item.diff).join("\n\n");
+    return this.result(
+      request.tool,
+      true,
+      [
+        `Applied ${applied.length} file change(s).`,
+        diffs
+      ].filter(Boolean).join("\n\n")
+    );
   }
 
   private async editFile(request: ToolRequest): Promise<ToolResult> {
@@ -109,18 +117,19 @@ export class WorkspaceToolRegistry {
     if (updated === undefined) {
       throw new Error("edit_file requires updated content.");
     }
-    await this.changeApplier.offer([{
+    const applied = await this.changeApplier.offer([{
       path: validateWorkspaceRelativePath(filePath ?? ""),
       original,
       updated
     }]);
     const after = (await vscode.workspace.openTextDocument(uri)).getText();
-    const applied = after === updated;
+    const ok = after === updated;
+    const diff = applied[0]?.diff ?? "";
     return this.result(
       "edit_file",
-      applied,
-      applied
-        ? `Updated ${filePath}.`
+      ok,
+      ok
+        ? [`Updated ${filePath}.`, diff].filter(Boolean).join("\n\n")
         : `Edit for ${filePath} was not applied.`
     );
   }
@@ -131,13 +140,16 @@ export class WorkspaceToolRegistry {
   ): Promise<ToolResult> {
     assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const uri = this.resolvePath(filePath);
-    await this.confirm(`Create ${filePath}?`);
+    const parent = vscode.Uri.joinPath(uri, "..");
+    await vscode.workspace.fs.createDirectory(parent);
     const edit = new vscode.WorkspaceEdit();
-    edit.createFile(uri, { ignoreIfExists: false });
+    edit.createFile(uri, { ignoreIfExists: true, overwrite: true });
     edit.insert(uri, new vscode.Position(0, 0), content);
     if (!await vscode.workspace.applyEdit(edit)) {
       throw new Error(`Could not create ${filePath}.`);
     }
+    const document = await vscode.workspace.openTextDocument(uri);
+    await document.save();
     return this.result("create_file", true, `Created ${filePath}.`);
   }
 
@@ -147,7 +159,6 @@ export class WorkspaceToolRegistry {
     assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const uri = this.resolvePath(filePath);
     await vscode.workspace.openTextDocument(uri);
-    await this.confirm(`Delete ${filePath}?`);
     const edit = new vscode.WorkspaceEdit();
     edit.deleteFile(uri, { ignoreIfNotExists: false });
     if (!await vscode.workspace.applyEdit(edit)) {
@@ -164,7 +175,6 @@ export class WorkspaceToolRegistry {
     const source = this.resolvePath(filePath);
     const target = this.resolvePath(targetPath);
     await vscode.workspace.openTextDocument(source);
-    await this.confirm(`Move ${filePath} to ${targetPath}?`);
     const edit = new vscode.WorkspaceEdit();
     edit.renameFile(source, target, { overwrite: false });
     if (!await vscode.workspace.applyEdit(edit)) {

@@ -16,9 +16,7 @@ export function isSafeContextPath(filePath: string): boolean {
   return !normalized.startsWith("/") &&
     !normalized.split("/").includes("..") &&
     !normalized.endsWith(".pem") &&
-    !normalized.endsWith(".key") &&
-    !normalized.includes("/.env") &&
-    normalized !== ".env";
+    !normalized.endsWith(".key");
 }
 
 export function selectRankedFiles(
@@ -66,18 +64,38 @@ export function resolveRequestContext(options: {
 
   const files: ContextFile[] = [];
   const seen = new Set<string>();
+  const investigatedByPath = new Map(
+    options.investigated
+      .filter((file) => isSafeContextPath(file.path))
+      .map((file) => [file.path, file] as const)
+  );
 
+  // 1) Selected full-file attachments first (highest priority).
   for (const part of selected) {
     if (files.length >= options.maxFiles) {
       break;
     }
-    if (seen.has(part.path)) {
+    if (part.kind === "selection" || seen.has(part.path)) {
       continue;
     }
     seen.add(part.path);
     files.push({ path: part.path, content: part.content });
   }
 
+  // 2) Selected selection paths: prefer full investigated content when available.
+  for (const part of selected) {
+    if (files.length >= options.maxFiles) {
+      break;
+    }
+    if (part.kind !== "selection" || seen.has(part.path)) {
+      continue;
+    }
+    seen.add(part.path);
+    const full = investigatedByPath.get(part.path);
+    files.push(full ?? { path: part.path, content: part.content });
+  }
+
+  // 3) Remaining investigated evidence.
   for (const file of options.investigated) {
     if (files.length >= options.maxFiles) {
       break;
@@ -89,10 +107,24 @@ export function resolveRequestContext(options: {
     files.push(file);
   }
 
+  const selectedEvidence = selected.map((part) => ({
+    path: part.path,
+    score: 100,
+    reason: part.kind === "selection"
+      ? `User-selected code (${part.startLine ?? "?"}-${part.endLine ?? "?"})`
+      : "User-attached file (priority context)",
+    matchedSymbols: [] as string[],
+    matchedTerms: [] as string[]
+  }));
+
+  const otherEvidence = options.evidence.filter(
+    (item) => seen.has(item.path) && !selectedEvidence.some((s) => s.path === item.path)
+  );
+
   return {
     files,
     indexSummary: options.indexSummary,
-    evidence: options.evidence.filter((item) => seen.has(item.path)),
+    evidence: [...selectedEvidence, ...otherEvidence],
     parts: selected
   };
 }

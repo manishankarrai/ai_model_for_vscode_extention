@@ -97,6 +97,16 @@ export class InvestigationState {
   private readonly aiRequests =
     new Set<string>();
 
+  /** How many times each exact tool key has been requested. */
+  private readonly aiRequestCounts =
+    new Map<string, number>();
+
+  /** Most recent tool request key (for consecutive-loop checks). */
+  private lastAIRequestKey = "";
+
+  /** How many times the current key has been repeated back-to-back. */
+  private consecutiveAIRequestCount = 0;
+
 
   // ==========================================================
   // Investigation Limits
@@ -105,31 +115,31 @@ export class InvestigationState {
   /**
    * Maximum adaptive reasoning cycles.
    */
-  readonly maxSteps = 16;
+  readonly maxSteps = 1000;
 
 
   /**
    * Maximum number of files investigated.
    */
-  readonly maxFiles = 15;
+  readonly maxFiles = 1000;
 
 
   /**
    * Maximum evidence characters.
    */
-  readonly maxChars = 50_000;
+  readonly maxChars = 5_000_000;
 
 
   /**
-   * Maximum Gemini API calls.
+   * Maximum AI API calls.
    */
-  readonly maxAICalls = 8;
+  readonly maxAICalls = 1000;
 
 
   /**
-   * Maximum local read-only tool calls.
+   * Maximum local tool calls (reads, edits, commands, etc.).
    */
-  readonly maxToolCalls = 20;
+  readonly maxToolCalls = 1000;
 
 
   // ==========================================================
@@ -735,45 +745,65 @@ export class InvestigationState {
 
 
   /**
-   * Records an AI investigation request.
+   * Records an AI investigation request for telemetry only.
    *
-   * Returns:
-   *
-   * true  → new request
-   * false → duplicate request
-   *
-   * Duplicate requests automatically stop the investigation.
+   * Repeated tool keys (including re-reading the same file) are always
+   * allowed. Overall step / AI-call / tool-call budgets remain the
+   * safety limits — never stop solely because a tool was reused.
    */
   recordAIRequest(
     requestKey: string
   ): boolean {
 
     if (!requestKey) {
-      return false;
+      return true;
     }
 
+    const previousCount =
+      this.aiRequestCounts.get(requestKey) ?? 0;
+    const nextCount = previousCount + 1;
+    this.aiRequestCounts.set(requestKey, nextCount);
+    this.aiRequests.add(requestKey);
 
-    if (
-      this.aiRequests.has(
-        requestKey
-      )
-    ) {
-
-      this.stop(
-        "loop_detected"
-      );
-
-
-      return false;
+    if (requestKey === this.lastAIRequestKey) {
+      this.consecutiveAIRequestCount += 1;
+    } else {
+      this.lastAIRequestKey = requestKey;
+      this.consecutiveAIRequestCount = 1;
     }
-
-
-    this.aiRequests.add(
-      requestKey
-    );
-
 
     return true;
+  }
+
+  /**
+   * Clears recorded read/diagnostics keys for a path after a mutation
+   * so the agent can re-inspect the updated file.
+   */
+  clearPathInspectionKeys(
+    path: string
+  ): void {
+    const normalized = path.trim();
+    if (!normalized) {
+      return;
+    }
+
+    for (const key of [...this.aiRequestCounts.keys()]) {
+      if (
+        key.startsWith(`read_file|${normalized}|`) ||
+        key.startsWith(`get_diagnostics|${normalized}|`)
+      ) {
+        this.aiRequestCounts.delete(key);
+        this.aiRequests.delete(key);
+      }
+    }
+
+    if (
+      this.lastAIRequestKey.startsWith(`read_file|${normalized}|`) ||
+      this.lastAIRequestKey.startsWith(`get_diagnostics|${normalized}|`)
+    ) {
+      this.lastAIRequestKey = "";
+      this.consecutiveAIRequestCount = 0;
+    }
   }
 
 

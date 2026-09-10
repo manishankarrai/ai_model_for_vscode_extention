@@ -131,13 +131,13 @@ export class InvestigationEngine {
     // --------------------------------------------------------
 
     const maxSteps =
-      options.maxSteps ?? 10;
+      options.maxSteps ?? 1000;
 
     const maxFiles =
-      options.maxFiles ?? 10;
+      options.maxFiles ?? 1000;
 
     const maxChars =
-      options.maxChars ?? 30000;
+      options.maxChars ?? 5_000_000;
 
 
     const state =

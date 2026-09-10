@@ -166,6 +166,10 @@ export class M3ViewProvider
         await this.attachFiles();
         break;
 
+      case "add_selection":
+        await this.attachCurrentSelection();
+        break;
+
       case "remove_context":
         this.selectedContext = this.selectedContext.filter(
           (part) => part.path !== message.path
@@ -287,10 +291,30 @@ export class M3ViewProvider
 
       await this.refreshBilling();
 
-      if (response.implementation_plan?.changes) {
-        await this.codeChangeApplier.offer(
-          response.implementation_plan.changes
-        );
+      if (response.implementation_plan?.changes?.length) {
+        try {
+          const applied = await this.codeChangeApplier.offer(
+            response.implementation_plan.changes
+          );
+          if (applied.length > 0) {
+            this.post({
+              type: "answer",
+              answer: applied.map((item) => {
+                const fence = String.fromCharCode(96, 96, 96);
+                return "### Updated `" + item.path + "`\n\n" + fence + "diff\n" + item.diff + "\n" + fence;
+              }).join("\n\n"),
+              requestId: response.request_id,
+              model: response.model,
+              agents: []
+            });
+          }
+        } catch (applyError) {
+          this.logger.error("M3 failed to apply planned file changes", applyError);
+          this.post({
+            type: "error",
+            error: this.getErrorMessage(applyError)
+          });
+        }
       }
 
     } catch (error) {
@@ -444,6 +468,60 @@ export class M3ViewProvider
     this.postContextParts();
   }
 
+  async attachCurrentSelection(): Promise<void> {
+    flow("M3ViewProvider.attachCurrentSelection", 1, "enter");
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.selection.isEmpty) {
+      vscode.window.showInformationMessage("Select code first, then add it to M3 chat.");
+      return;
+    }
+
+    const relativePath = vscode.workspace.asRelativePath(editor.document.uri, false);
+    if (!isSafeContextPath(relativePath)) {
+      vscode.window.showWarningMessage("That file cannot be attached to M3 chat.");
+      return;
+    }
+
+    const startLine = editor.selection.start.line + 1;
+    const endLine = editor.selection.end.line + 1;
+    const selectedText = editor.document.getText(editor.selection);
+    if (!selectedText.trim()) {
+      return;
+    }
+
+    this.selectedContext = this.selectedContext.filter(
+      (part) => !(part.path === relativePath && part.kind === "selection" && part.startLine === startLine && part.endLine === endLine)
+    );
+    this.selectedContext.unshift({
+      kind: "selection",
+      path: relativePath,
+      content: selectedText,
+      language: editor.document.languageId,
+      startLine,
+      endLine
+    });
+    this.postContextParts();
+    await this.focusChat();
+    vscode.window.showInformationMessage(
+      `Added ${relativePath}:${startLine}-${endLine} to M3 chat`
+    );
+  }
+
+  async focusChat(): Promise<void> {
+    flow("M3ViewProvider.focusChat", 1, "enter");
+    try {
+      await vscode.commands.executeCommand("workbench.view.extension.m3");
+    } catch {
+      // Sidebar may already be visible.
+    }
+    this.show();
+    try {
+      await vscode.commands.executeCommand(`${M3ViewProvider.viewType}.focus`);
+    } catch {
+      // View focus command is unavailable until the webview has resolved.
+    }
+  }
+
   private postContextParts(
     parts: ContextPart[] = this.selectedContext
   ): void {
@@ -455,7 +533,9 @@ export class M3ViewProvider
         kind: part.kind,
         language: part.language,
         size: part.content.length,
-        tokens: Math.ceil(part.content.length / 4)
+        tokens: Math.ceil(part.content.length / 4),
+        startLine: part.startLine,
+        endLine: part.endLine
       }))
     });
   }
@@ -1277,9 +1357,10 @@ textarea:disabled {
       ></textarea>
       <div class="composer-toolbar">
         <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
+        <button id="add-selection" class="icon-btn" type="button" title="Add selection to chat">↧</button>
         <select id="mode" aria-label="Mode">
+          <option value="agent" selected>Agent</option>
           <option value="ask">Ask</option>
-          <option value="agent">Agent</option>
         </select>
         <select id="agent-profile" aria-label="Agent">
           <option value="">Agents</option>
@@ -1311,6 +1392,9 @@ const agentProfile =
 
 const attach =
   document.getElementById("attach");
+
+const addSelection =
+  document.getElementById("add-selection");
 
 const messages =
   document.getElementById("messages");
@@ -1355,7 +1439,12 @@ function renderContextParts() {
   contextParts.forEach((part) => {
     const chip = document.createElement("span");
     chip.className = "context-chip";
-    chip.textContent = part.kind + " " + part.path +
+    const rangeLabel = (part.startLine && part.endLine)
+      ? (":" + part.startLine + "-" + part.endLine)
+      : "";
+    const baseName = String(part.path || "").split("/").pop() || part.path;
+    chip.textContent = baseName + rangeLabel;
+    chip.title = part.kind + " " + part.path + rangeLabel +
       " (" + part.tokens + " tokens)";
 
     const remove = document.createElement("button");
@@ -1376,6 +1465,10 @@ function renderContextParts() {
 
 attach.addEventListener("click", () => {
   vscode.postMessage({ type: "attach_files" });
+});
+
+addSelection.addEventListener("click", () => {
+  vscode.postMessage({ type: "add_selection" });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -1958,21 +2051,24 @@ function addUsage(
     return;
   }
 
+  const charged =
+    Number(usage.charged_credits ?? usage.estimated_cost ?? 0);
+  const wallet =
+    Number(usage.wallet_balance ?? 0);
+  const aiApiCalls =
+    Number(usage.ai_api_calls ?? 0);
+  const totalTokens =
+    Number(usage.total_tokens ?? 0);
+
+  if (aiApiCalls === 0 && totalTokens === 0 && charged === 0 && wallet === 0) {
+    return;
+  }
+
   const element =
     document.createElement("div");
 
   element.className =
     "usage";
-
-  const aiApiCalls =
-    Number(
-      usage.ai_api_calls ?? 0
-    );
-
-  const totalTokens =
-    Number(
-      usage.total_tokens ?? 0
-    );
 
   element.textContent =
     "AI calls: " +
@@ -1980,9 +2076,13 @@ function addUsage(
     " • Tokens: " +
     totalTokens +
     " • Credits: " +
-    Number(usage.charged_credits ?? 0).toFixed(4) +
+    charged.toFixed(4) +
     " • Wallet: " +
-    Number(usage.wallet_balance ?? 0).toFixed(2);
+    wallet.toFixed(2);
+
+  if (walletBalance && wallet > 0) {
+    walletBalance.textContent = wallet.toFixed(2) + " credits";
+  }
 
   messages.appendChild(
     element
@@ -2285,6 +2385,11 @@ action.addEventListener("click", () => {
     return;
   }
   if (composerState === "failed") {
+    // Prefer a fresh send when the user typed a new question.
+    if (input.value.trim()) {
+      sendMessage();
+      return;
+    }
     vscode.postMessage({ type: "retry_last" });
     return;
   }
@@ -2292,6 +2397,16 @@ action.addEventListener("click", () => {
 });
 
 vscode.postMessage({ type: "load_billing" });
+
+input.addEventListener("input", () => {
+  if (composerState === "failed" && input.value.trim()) {
+    action.textContent = "↑";
+    action.title = "Send";
+  } else if (composerState === "failed" && !input.value.trim()) {
+    action.textContent = "↻";
+    action.title = "Retry";
+  }
+});
 
 input.addEventListener(
   "keydown",
@@ -2596,6 +2711,9 @@ type WebviewMessage =
       type: "attach_files";
     }
   | {
+      type: "add_selection";
+    }
+  | {
       type: "remove_context";
       path: string;
     }
@@ -2622,7 +2740,7 @@ type WebviewResponse =
   | {
       type: "answer";
       answer: string;
-      usage: AIUsage;
+      usage?: AIUsage;
       requestId: string;
       model: string;
       agents: AgentRun[];

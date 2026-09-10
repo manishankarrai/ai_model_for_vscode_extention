@@ -635,14 +635,14 @@ export class Agent {
       const maxFiles =
         config.get<number>(
           "maxFilesInContext",
-          30
+          1000
         );
 
 
       const maxChars =
         config.get<number>(
           "maxContextChars",
-          300000
+          5_000_000
         );
 
 
@@ -869,7 +869,8 @@ export class Agent {
           ranked,
           plan,
           context,
-          signal
+          signal,
+          onEvent
         );
 
 
@@ -1001,7 +1002,9 @@ export class Agent {
     initialContext:
       any,
 
-    signal?: AbortSignal
+    signal?: AbortSignal,
+
+    onEvent?: (event: AgentEvent) => void
   ): Promise<AIResponse> {
     flow("Agent.runAdaptiveInvestigation", 1, "enter");
 
@@ -1080,6 +1083,12 @@ export class Agent {
         0,
 
       estimated_cost:
+        0,
+
+      charged_credits:
+        0,
+
+      wallet_balance:
         0
     };
 
@@ -1249,6 +1258,16 @@ export class Agent {
 
       totalUsage.estimated_cost +=
         response.usage.estimated_cost;
+
+      totalUsage.charged_credits +=
+        response.usage.charged_credits ??
+        response.usage.estimated_cost ??
+        0;
+
+      if (typeof response.usage.wallet_balance === "number") {
+        totalUsage.wallet_balance =
+          response.usage.wallet_balance;
+      }
 
 
       // ======================================================
@@ -1450,7 +1469,7 @@ export class Agent {
 
 
       // ======================================================
-      // LOOP DETECTION
+      // TOOL REQUEST TRACKING (repeats are allowed)
       // ======================================================
 
       const toolKey =
@@ -1458,37 +1477,9 @@ export class Agent {
           tool
         );
 
-
-      if (
-        !state.recordAIRequest(
-          toolKey
-        )
-      ) {
-
-        this.logger.info(
-          "Adaptive investigation loop detected",
-          {
-            requestId:
-              request.request_id,
-
-            step:
-              currentStep,
-
-            tool:
-              tool.tool,
-
-            toolKey,
-
-            stopReason:
-              state.stopReason
-          }
-        );
-
-
-        throw new Error(
-          `Adaptive investigation stopped because the same tool request was repeated: ${toolKey}`
-        );
-      }
+      state.recordAIRequest(
+        toolKey
+      );
 
 
       // ======================================================
@@ -1571,6 +1562,57 @@ export class Agent {
             workspaceUri,
             index
           );
+
+        // After file mutations or diagnostics, allow re-reading the same path.
+        const mutatingTools = new Set([
+          "edit_file",
+          "write_file",
+          "create_file",
+          "delete_file",
+          "rename_file",
+          "move_file",
+          "apply_change_set",
+          "apply_patch",
+          "get_diagnostics"
+        ]);
+        if (mutatingTools.has(tool.tool) && tool.path?.trim()) {
+          state.clearPathInspectionKeys(tool.path.trim());
+        }
+        const target = tool.targetPath ?? tool.target_path;
+        if (
+          (tool.tool === "rename_file" || tool.tool === "move_file") &&
+          target?.trim()
+        ) {
+          state.clearPathInspectionKeys(target.trim());
+        }
+
+        // Surface applied file diffs in chat during continuous agent edits.
+        const fileChangeTools = new Set([
+          "edit_file",
+          "write_file",
+          "create_file",
+          "delete_file",
+          "rename_file",
+          "move_file",
+          "apply_change_set",
+          "apply_patch"
+        ]);
+        if (onEvent && fileChangeTools.has(tool.tool)) {
+          const body = evidence
+            .map((item) => item.content)
+            .filter(Boolean)
+            .join("\n\n");
+          if (body.trim()) {
+            onEvent({
+              profile: (initialRequest.agent?.profile || "agent") as AgentEvent["profile"],
+              type: "progress",
+              message: body.includes("diff")
+                ? "Updated `" + (tool.path || "file") + "`\n\n" + body
+                : body,
+              timestamp: Date.now()
+            });
+          }
+        }
       } catch (error) {
         const message =
           error instanceof Error ? error.message : String(error);
@@ -2667,26 +2709,8 @@ export class Agent {
         .pop() ?? "";
 
 
-    // --------------------------------------------------------
-    // Environment files
-    // --------------------------------------------------------
-
-    if (
-      fileName ===
-      ".env"
-      ||
-      (
-        fileName.startsWith(
-          ".env."
-        )
-        &&
-        fileName !==
-        ".env.example"
-      )
-    ) {
-
-      return true;
-    }
+    // Environment files (.env, .env.prod, etc.) are allowed so the agent
+    // can read/update project configuration when the user asks.
 
 
     // --------------------------------------------------------

@@ -14,7 +14,6 @@ const SENSITIVE_EXTENSIONS = [
 ];
 
 const SENSITIVE_BASENAMES = new Set([
-  ".env",
   "id_rsa",
   "id_dsa",
   "id_ecdsa",
@@ -43,11 +42,9 @@ export function isSensitivePath(filePath: string): boolean {
   const clean = filePath.replace(/\\/g, "/").toLowerCase().trim();
   const base = clean.split("/").pop() ?? "";
 
-  if (SENSITIVE_BASENAMES.has(base)) {
-    return true;
-  }
+  // .env / .env.* are allowed for read/edit when the user requests it.
 
-  if (base.startsWith(".env.") && base !== ".env.example") {
+  if (SENSITIVE_BASENAMES.has(base)) {
     return true;
   }
 
@@ -131,3 +128,4 @@ export function assertWorkspaceTrusted(isTrusted: boolean): void {
     );
   }
 }
+

@@ -11,10 +11,8 @@ const READ_TOOLS: AgentToolName[] = [
   "git_status"
 ];
 
-const APPROVAL_TOOLS: AgentToolName[] = [
-  "run_task",
-  "run_command",
-  "run_tests",
+/** File mutations apply automatically during agent runs; only shell work needs approval. */
+const FILE_MUTATION_TOOLS: AgentToolName[] = [
   "apply_change_set",
   "apply_patch",
   "create_file",
@@ -25,13 +23,19 @@ const APPROVAL_TOOLS: AgentToolName[] = [
   "move_file"
 ];
 
+const TERMINAL_APPROVAL_TOOLS: AgentToolName[] = [
+  "run_task",
+  "run_command",
+  "run_tests"
+];
+
 export function availableTools(mode: InteractionMode): AgentToolName[] {
   flow("availableTools", 1, "enter");
   if (mode === "ask") {
     return [];
   }
 
-  return [...READ_TOOLS, ...APPROVAL_TOOLS];
+  return [...READ_TOOLS, ...FILE_MUTATION_TOOLS, ...TERMINAL_APPROVAL_TOOLS];
 }
 
 export function getToolPolicy(mode: InteractionMode): ToolPolicy {
@@ -45,7 +49,7 @@ export function getToolPolicy(mode: InteractionMode): ToolPolicy {
 
   return {
     allowed: availableTools(mode),
-    approval_required: [...APPROVAL_TOOLS]
+    approval_required: [...TERMINAL_APPROVAL_TOOLS]
   };
 }
 
@@ -58,9 +62,13 @@ export function isToolAllowed(
 
 export function requiresApproval(tool: AgentToolName): boolean {
   flow("requiresApproval", 1, "enter");
-  return APPROVAL_TOOLS.includes(tool);
+  return TERMINAL_APPROVAL_TOOLS.includes(tool);
 }
 
 export function isReadOnlyTool(tool: AgentToolName): boolean {
   return READ_TOOLS.includes(tool);
+}
+
+export function isFileMutationTool(tool: AgentToolName): boolean {
+  return FILE_MUTATION_TOOLS.includes(tool);
 }

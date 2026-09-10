@@ -60,6 +60,10 @@
       {
         "command": "m3.inspectProject",
         "title": "M3: Inspect Project"
+      },
+      {
+        "command": "m3.addSelectionToChat",
+        "title": "M3: Add Selection to Chat"
       }
     ],
     "configuration": {
@@ -72,12 +76,12 @@
         },
         "m3.maxContextChars": {
           "type": "number",
-          "default": 300000,
+          "default": 5000000,
           "description": "Maximum source context sent to the backend"
         },
         "m3.maxFilesInContext": {
           "type": "number",
-          "default": 30,
+          "default": 1000,
           "description": "Maximum files selected for AI context"
         },
         "m3.enableAutoIndex": {
@@ -92,6 +96,18 @@
         {
           "command": "m3.openChat",
           "when": "editorTextFocus"
+        },
+        {
+          "command": "m3.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "navigation@9"
+        }
+      ],
+      "editor/title/context": [
+        {
+          "command": "m3.addSelectionToChat",
+          "when": "editorHasSelection",
+          "group": "1_modification"
         }
       ]
     }
