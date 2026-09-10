@@ -2071,8 +2071,6 @@ function addUsage(
     "usage";
 
   element.textContent =
-    "AI calls: " +
-    aiApiCalls +
     " • Tokens: " +
     totalTokens +
     " • Credits: " +

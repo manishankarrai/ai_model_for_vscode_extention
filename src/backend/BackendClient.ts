@@ -258,7 +258,7 @@ export class BackendClient {
     } catch (error) {
 
       throw new Error(
-        `Unable to connect to M3 backend: ${
+        `Unable to connect to M3 AI: ${
           error instanceof Error
             ? error.message
             : String(error)
@@ -312,7 +312,7 @@ export class BackendClient {
     } catch (error) {
 
       throw new Error(
-        `Unable to connect to M3 backend: ${
+        `Unable to connect to M3 AI: ${
           error instanceof Error
             ? error.message
             : String(error)
