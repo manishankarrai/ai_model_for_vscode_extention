@@ -8,6 +8,7 @@ import {
   assertWorkspaceTrusted,
   hashContent,
   isSensitivePath,
+  resolveApplyContent,
   validateChangeSize,
   validateWorkspaceRelativePath
 } from "./changeValidation.ts";
@@ -51,6 +52,25 @@ describe("stale-file protection", () => {
   it("accepts an unchanged apply candidate", () => {
     validateChangeSize("src/a.ts", "old", "new");
     assertFileHashMatches("src/a.ts", "old", hashContent("old"), "apply");
+  });
+
+  it("applies planned updates when original is a selection or has different newlines", () => {
+    assert.equal(
+      resolveApplyContent("a\r\nb\r\nc\r\n", "a\nb\nc\n", "a\nB\nc\n"),
+      "a\r\nB\r\nc\r\n"
+    );
+    assert.equal(
+      resolveApplyContent(
+        "header\nfunc Update() {}\nfooter\n",
+        "func Update() {}",
+        "func Update() { return nil }"
+      ),
+      "header\nfunc Update() { return nil }\nfooter\n"
+    );
+    assert.equal(
+      resolveApplyContent("current-full-file\n", "stale-snippet", "new-full-file\n"),
+      "new-full-file\n"
+    );
   });
 });
 

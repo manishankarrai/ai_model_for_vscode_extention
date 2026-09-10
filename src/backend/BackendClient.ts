@@ -275,9 +275,11 @@ export class BackendClient {
         data as BackendErrorResponse;
 
       throw new Error(
-        errorData.error ??
-        errorData.message ??
-        `Backend error: ${response.status}`
+        response.status === 401
+          ? "Authentication expired (401). Reset the M3 access token."
+          : errorData.error ??
+            errorData.message ??
+            `Backend error: ${response.status}`
       );
     }
 
@@ -329,9 +331,11 @@ export class BackendClient {
         data as BackendErrorResponse;
 
       throw new Error(
-        errorData.error ??
-        errorData.message ??
-        `Backend error: ${response.status}`
+        response.status === 401
+          ? "Authentication expired (401). Reset the M3 access token."
+          : errorData.error ??
+            errorData.message ??
+            `Backend error: ${response.status}`
       );
     }
 

@@ -64,6 +64,10 @@
       {
         "command": "m3.addSelectionToChat",
         "title": "M3: Add Selection to Chat"
+      },
+      {
+        "command": "m3.resetAccessToken",
+        "title": "M3: Reset Access Token"
       }
     ],
     "configuration": {

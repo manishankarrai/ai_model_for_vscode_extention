@@ -106,6 +106,10 @@ export function activate(
         return getAccessToken(
           context
         );
+      },
+      async () => {
+        flow("activate.resetAccessTokenCallback", 1, "enter");
+        return resetAccessToken(context);
       }
     );
 
@@ -128,6 +132,19 @@ export function activate(
       async () => {
         flow("command.openChat", 1, "enter");
         await provider.focusChat();
+      }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "m3.resetAccessToken",
+      async () => {
+        flow("command.resetAccessToken", 1, "enter");
+        const token = await resetAccessToken(context);
+        if (token) {
+          vscode.window.showInformationMessage("M3 access token updated.");
+        }
       }
     )
   );
@@ -467,28 +484,28 @@ async function scanProject(
 }
 
 async function getAccessToken(
-  context: vscode.ExtensionContext
+  context: vscode.ExtensionContext,
+  forcePrompt = false
 ): Promise<string> {
-  flow("getAccessToken", 1, "enter");
+  flow("getAccessToken", 1, "enter", { forcePrompt });
 
-  const token =
-    await context.secrets.get(
-      "m3.accessToken"
-    );
+  if (!forcePrompt) {
+    const token =
+      await context.secrets.get(
+        "m3.accessToken"
+      );
 
-  if (token) {
-    return token;
+    if (token) {
+      return token;
+    }
   }
-
-  // Temporary V1 behavior.
-  //
-  // Next step should replace this with
-  // a proper M3 login UI.
 
   const entered =
     await vscode.window.showInputBox({
       prompt:
-        "Enter your M3 access token",
+        forcePrompt
+          ? "Enter a new M3 access token (replaces the stored token)"
+          : "Enter your M3 access token",
 
       password: true,
 
@@ -501,10 +518,18 @@ async function getAccessToken(
 
   await context.secrets.store(
     "m3.accessToken",
-    entered
+    entered.trim()
   );
 
-  return entered;
+  return entered.trim();
+}
+
+async function resetAccessToken(
+  context: vscode.ExtensionContext
+): Promise<string> {
+  flow("resetAccessToken", 1, "enter");
+  await context.secrets.delete("m3.accessToken");
+  return getAccessToken(context, true);
 }
 
 export function deactivate(): void {

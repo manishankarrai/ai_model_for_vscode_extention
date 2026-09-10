@@ -34,6 +34,30 @@ describe("context selection", () => {
     assert.equal(context.parts?.[0].kind, "selection");
   });
 
+  it("uses full investigated file when the user selected a snippet", () => {
+    const context = resolveRequestContext({
+      mode: "agent",
+      selected: [{
+        kind: "selection",
+        path: "api/handlers/shop.go",
+        content: "func GetShop() {}",
+        language: "go",
+        startLine: 10,
+        endLine: 12
+      }],
+      investigated: [{
+        path: "api/handlers/shop.go",
+        content: "package handlers\n\nfunc GetShop() {}\n"
+      }],
+      evidence: [],
+      indexSummary: "summary",
+      maxFiles: 8
+    });
+
+    assert.equal(context.files[0].content, "package handlers\n\nfunc GetShop() {}\n");
+    assert.equal(context.parts?.[0].kind, "selection");
+  });
+
   it("caps and ranks agent investigation files", () => {
     const ranked = selectRankedFiles([
       { path: "src/low.ts", score: 1, matches: 1, reason: "low" },

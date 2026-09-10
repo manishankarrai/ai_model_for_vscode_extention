@@ -9,6 +9,7 @@ import {
   AgentEvent,
   AgentTaskStatus,
   ContextPart,
+  ContextFile,
   InteractionMode,
   InvestigationResult,
   ImplementationPlan,
@@ -721,10 +722,13 @@ export class Agent {
             investigationEvidence
           );
 
+        const selectedFiles =
+          await this.readSelectedWorkspaceFiles(selectedContext);
+
         context = resolveRequestContext({
           mode,
           selected: selectedContext,
-          investigated: investigated.files,
+          investigated: [...selectedFiles, ...investigated.files],
           evidence: investigated.evidence,
           indexSummary: investigated.indexSummary,
           maxFiles
@@ -969,6 +973,46 @@ export class Agent {
       signal
     ) as { answer: string };
     return result.answer;
+  }
+
+  private async readSelectedWorkspaceFiles(
+    selected: ContextPart[]
+  ): Promise<ContextFile[]> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace || selected.length === 0) {
+      return [];
+    }
+
+    const files: ContextFile[] = [];
+    const seen = new Set<string>();
+
+    for (const part of selected) {
+      const relativePath = part.path.replace(/\\/g, "/");
+      if (!relativePath || seen.has(relativePath)) {
+        continue;
+      }
+      seen.add(relativePath);
+      try {
+        const uri = vscode.Uri.joinPath(
+          workspace.uri,
+          ...relativePath.split("/")
+        );
+        const document = await vscode.workspace.openTextDocument(uri);
+        files.push({
+          path: relativePath,
+          content: document.getText()
+        });
+      } catch {
+        if (part.content) {
+          files.push({
+            path: relativePath,
+            content: part.content
+          });
+        }
+      }
+    }
+
+    return files;
   }
 
 

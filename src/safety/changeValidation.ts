@@ -77,6 +77,58 @@ export function hashContent(text: string): string {
   return createHash("sha256").update(text, "utf8").digest("hex");
 }
 
+export function normalizeNewlines(text: string): string {
+  return text.replace(/\r\n/g, "\n");
+}
+
+export function restoreDocumentNewlines(text: string, sample: string): string {
+  if (sample.includes("\r\n")) {
+    return normalizeNewlines(text).replace(/\n/g, "\r\n");
+  }
+  return normalizeNewlines(text);
+}
+
+/**
+ * Map a planned original/updated pair onto the live document.
+ * Selected snippets and CRLF/LF mismatches used to fail as "changed since investigation".
+ */
+export function resolveApplyContent(
+  current: string,
+  original: string,
+  updated: string
+): string {
+  const currentN = normalizeNewlines(current);
+  const originalN = normalizeNewlines(original ?? "");
+  const updatedN = normalizeNewlines(updated ?? "");
+
+  if (!updatedN) {
+    return current;
+  }
+
+  if (!originalN || currentN === originalN || currentN.trimEnd() === originalN.trimEnd()) {
+    return restoreDocumentNewlines(updatedN, current);
+  }
+
+  if (
+    originalN.length < currentN.length &&
+    currentN.includes(originalN) &&
+    updatedN.length < currentN.length &&
+    updatedN.length <= Math.max(originalN.length * 2, originalN.length + 800)
+  ) {
+    const first = currentN.indexOf(originalN);
+    const second = currentN.indexOf(originalN, first + 1);
+    if (second === -1) {
+      const merged =
+        currentN.slice(0, first) +
+        updatedN +
+        currentN.slice(first + originalN.length);
+      return restoreDocumentNewlines(merged, current);
+    }
+  }
+
+  return restoreDocumentNewlines(updatedN, current);
+}
+
 export function assertFileHashMatches(
   path: string,
   currentText: string,
@@ -105,7 +157,10 @@ export function assertFileNotStale(
   expectedText: string,
   action: "apply" | "rollback"
 ): void {
-  if (currentText === expectedText) {
+  if (
+    normalizeNewlines(currentText) === normalizeNewlines(expectedText) ||
+    normalizeNewlines(currentText).trimEnd() === normalizeNewlines(expectedText).trimEnd()
+  ) {
     return;
   }
 

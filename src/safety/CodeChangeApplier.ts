@@ -15,6 +15,7 @@ import {
   assertNotSensitivePath,
   assertWorkspaceTrusted,
   hashContent,
+  resolveApplyContent,
   validateChangeSize,
   validateWorkspaceRelativePath
 } from "./changeValidation";
@@ -145,38 +146,33 @@ export class CodeChangeApplier {
         const review = changeSet.files.find((file) => file.path === change.path)!;
         const exists = await fileExists(uri);
         const createNew = !exists;
+        let originalText = "";
+        let updatedText = change.updated ?? "";
 
         if (createNew) {
           const parent = vscode.Uri.joinPath(uri, "..");
           await vscode.workspace.fs.createDirectory(parent);
           await vscode.workspace.fs.writeFile(
             uri,
-            new TextEncoder().encode(change.updated)
+            new TextEncoder().encode(updatedText)
           );
         } else {
           const document = await vscode.workspace.openTextDocument(uri);
           const current = document.getText();
-          if ((change.original ?? "") !== "") {
-            assertFileNotStale(
-              change.path,
-              current,
-              change.original,
-              "apply"
-            );
-            assertFileHashMatches(
-              change.path,
-              current,
-              review.originalHash,
-              "apply"
-            );
-          }
+          const next = resolveApplyContent(
+            current,
+            change.original ?? "",
+            change.updated ?? ""
+          );
+          originalText = current;
+          updatedText = next;
 
           const edit = new vscode.WorkspaceEdit();
           const fullRange = new vscode.Range(
             document.positionAt(0),
             document.positionAt(current.length)
           );
-          edit.replace(document.uri, fullRange, change.updated);
+          edit.replace(document.uri, fullRange, next);
           if (!await vscode.workspace.applyEdit(edit)) {
             throw new Error(`Could not update ${relativePath}.`);
           }
@@ -193,20 +189,20 @@ export class CodeChangeApplier {
         appliedItems.push({
           uri,
           path: change.path,
-          original: createNew ? "" : change.original,
-          updated: change.updated,
-          originalHash: review.originalHash,
-          updatedHash: contentHash(change.updated),
+          original: originalText,
+          updated: updatedText,
+          originalHash: hashContent(originalText),
+          updatedHash: contentHash(updatedText),
           created: createNew
         });
         summaries.push({
           path: change.path,
-          original: createNew ? "" : change.original,
-          updated: change.updated,
+          original: originalText,
+          updated: updatedText,
           diff: buildUnifiedDiff(
             change.path,
-            createNew ? "" : change.original,
-            change.updated
+            originalText,
+            updatedText
           )
         });
       } catch (error) {
@@ -242,6 +238,19 @@ export class CodeChangeApplier {
     }
 
     return summaries;
+  }
+
+  getSessionDiffs(): AppliedChangeSummary[] {
+    const changeSet = this.store.latestApplied();
+    const snapshot = this.lastAppliedChanges.length > 0
+      ? this.lastAppliedChanges
+      : (changeSet?.appliedSnapshot ?? []);
+    return snapshot.map((item) => ({
+      path: item.path,
+      original: item.original,
+      updated: item.updated,
+      diff: buildUnifiedDiff(item.path, item.original, item.updated)
+    }));
   }
 
   async rollbackLast(): Promise<void> {

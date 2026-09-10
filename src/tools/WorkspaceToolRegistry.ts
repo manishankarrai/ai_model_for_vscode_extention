@@ -13,6 +13,7 @@ import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import {
   assertNotSensitivePath,
   assertWorkspaceTrusted,
+  normalizeNewlines,
   validateWorkspaceRelativePath
 } from "../safety/changeValidation";
 import { availableTools, isToolAllowed, isReadOnlyTool } from "./toolPolicy";
@@ -123,7 +124,7 @@ export class WorkspaceToolRegistry {
       updated
     }]);
     const after = (await vscode.workspace.openTextDocument(uri)).getText();
-    const ok = after === updated;
+    const ok = normalizeNewlines(after) === normalizeNewlines(updated);
     const diff = applied[0]?.diff ?? "";
     return this.result(
       "edit_file",
@@ -296,7 +297,7 @@ export class WorkspaceToolRegistry {
     args: string[]
   ): Promise<ToolResult> {
     const workspace = this.requireWorkspace();
-
+    const fallback = this.gitFallbackDiff(tool);
     try {
       const result = await execFileAsync("git", args, {
         cwd: workspace.uri.fsPath,
@@ -305,10 +306,38 @@ export class WorkspaceToolRegistry {
       });
       return this.result(tool, true, result.stdout || "No changes.");
     } catch (error) {
-      throw new Error(
-        `Git inspection failed: ${error instanceof Error ? error.message : String(error)}`
-      );
+      const detail = error instanceof Error ? error.message : String(error);
+      if (this.isMissingGit(error)) {
+        return this.result(tool, true, fallback);
+      }
+      throw new Error(`Git inspection failed: ${detail}`);
     }
+  }
+
+  private isMissingGit(error: unknown): boolean {
+    const text = error instanceof Error ? `${error.message} ${(error as NodeJS.ErrnoException).code ?? ""}` : String(error);
+    return /ENOENT|not a git repository|git: not found|spawn git/i.test(text);
+  }
+
+  private gitFallbackDiff(tool: "git_diff" | "git_status"): string {
+    const diffs = this.changeApplier.getSessionDiffs();
+    if (diffs.length === 0) {
+      return [
+        "Git is not available in this workspace.",
+        "M3 still shows file differences from before/after content when it edits files — no git repo is required for that.",
+        "Open the chat diffs after an edit, or ask M3 to apply changes so an in-memory diff can be shown here."
+      ].join("\n");
+    }
+    const header = tool === "git_status"
+      ? "Git is not available. Files M3 changed this session:"
+      : "Git is not available. In-memory before/after diffs of files M3 changed:";
+    const body = diffs.map((item) => {
+      if (tool === "git_status") {
+        return `${item.original ? "M" : "A"} ${item.path}`;
+      }
+      return item.diff;
+    }).join("\n\n");
+    return `${header}\n\n${body}`;
   }
 
   private requireWorkspace(): vscode.WorkspaceFolder {

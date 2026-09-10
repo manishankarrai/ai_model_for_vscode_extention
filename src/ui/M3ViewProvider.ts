@@ -30,6 +30,7 @@ export class M3ViewProvider
   private isProcessing = false;
 
   private selectedContext: ContextPart[] = [];
+  private readonly dismissedContextKeys = new Set<string>();
 
   private readonly codeChangeApplier =
     new CodeChangeApplier();
@@ -50,7 +51,8 @@ export class M3ViewProvider
     private readonly extensionUri: vscode.Uri,
     private readonly agent: Agent,
     private readonly logger: Logger,
-    private readonly getAccessToken: () => Promise<string>
+    private readonly getAccessToken: () => Promise<string>,
+    private readonly resetAccessToken: () => Promise<string>
   ) {
     flow("M3ViewProvider.constructor", 1, "enter");
   }
@@ -171,15 +173,36 @@ export class M3ViewProvider
         break;
 
       case "remove_context":
-        this.selectedContext = this.selectedContext.filter(
-          (part) => part.path !== message.path
-        );
+        this.dismissedContextKeys.add(contextPartKey({
+          path: message.path,
+          kind: message.kind,
+          startLine: message.startLine,
+          endLine: message.endLine
+        }));
+        this.selectedContext = this.selectedContext.filter((part) => {
+          if (message.kind || message.startLine) {
+            return contextPartKey(part) !== contextPartKey({
+              path: message.path,
+              kind: message.kind,
+              startLine: message.startLine,
+              endLine: message.endLine
+            });
+          }
+          return part.path !== message.path;
+        });
         this.postContextParts();
+        break;
+
+      case "reset_token":
+        await this.resetAccessToken();
+        await this.refreshBilling();
+        vscode.window.showInformationMessage("M3 access token updated.");
         break;
 
       case "clear":
         this.agent.clearConversation();
         this.selectedContext = [];
+        this.dismissedContextKeys.clear();
 
         this.post({
           type: "cleared",
@@ -269,7 +292,10 @@ export class M3ViewProvider
           (event: AgentEvent) => {
             this.post({
               type: "agent_event",
-              event
+              event: {
+                ...event,
+                message: this.sanitizeUserError(event.message)
+              }
             });
           }
         );
@@ -328,6 +354,17 @@ export class M3ViewProvider
 
       const message =
         this.getErrorMessage(error);
+
+      if (/401|unauthoriz|expired|authentication required/i.test(message)) {
+        const replaced = await this.resetAccessToken();
+        if (replaced) {
+          this.post({
+            type: "error",
+            error: "Access token expired or invalid. A new token was saved. Send the request again."
+          });
+          return;
+        }
+      }
 
       this.post({
         type: "error",
@@ -392,41 +429,9 @@ export class M3ViewProvider
 
   private async getRequestContext(): Promise<ContextPart[]> {
     flow("M3ViewProvider.getRequestContext", 1, "enter");
-    const parts = [...this.selectedContext];
-    const editor = vscode.window.activeTextEditor;
-
-    if (!editor) {
-      return parts;
-    }
-
-    const relativePath = vscode.workspace.asRelativePath(
-      editor.document.uri,
-      false
+    return this.selectedContext.filter(
+      (part) => !this.dismissedContextKeys.has(contextPartKey(part))
     );
-
-    if (!isSafeContextPath(relativePath)) {
-      return parts;
-    }
-
-    const selection = editor.selection;
-    const selectedText = editor.document.getText(selection);
-    const content = selectedText || editor.document.getText();
-    const duplicate = parts.some((part) => part.path === relativePath);
-
-    if (!duplicate) {
-      parts.unshift({
-        kind: selectedText ? "selection" : "file",
-        path: relativePath,
-        content,
-        language: editor.document.languageId,
-        startLine: selection.start.line + 1,
-        endLine: selection.end.line + 1
-      });
-    }
-
-    this.postContextParts(parts);
-
-    return parts;
   }
 
   private async attachFiles(): Promise<void> {
@@ -457,6 +462,10 @@ export class M3ViewProvider
       this.selectedContext = this.selectedContext.filter(
         (part) => part.path !== relativePath
       );
+      this.dismissedContextKeys.delete(contextPartKey({
+        kind: "attachment",
+        path: relativePath
+      }));
       this.selectedContext.push({
         kind: "attachment",
         path: relativePath,
@@ -492,14 +501,16 @@ export class M3ViewProvider
     this.selectedContext = this.selectedContext.filter(
       (part) => !(part.path === relativePath && part.kind === "selection" && part.startLine === startLine && part.endLine === endLine)
     );
-    this.selectedContext.unshift({
+    const nextPart: ContextPart = {
       kind: "selection",
       path: relativePath,
       content: selectedText,
       language: editor.document.languageId,
       startLine,
       endLine
-    });
+    };
+    this.dismissedContextKeys.delete(contextPartKey(nextPart));
+    this.selectedContext.unshift(nextPart);
     this.postContextParts();
     await this.focusChat();
     vscode.window.showInformationMessage(
@@ -582,10 +593,25 @@ export class M3ViewProvider
     if (
       error instanceof Error
     ) {
-      return error.message;
+      return this.sanitizeUserError(error.message);
     }
 
     return "An unexpected error occurred.";
+  }
+
+  private sanitizeUserError(message: string | undefined): string {
+    const text = (message || "").trim();
+    if (!text) {
+      return "An unexpected error occurred.";
+    }
+    if (
+      /i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT/i.test(
+        text
+      )
+    ) {
+      return "The AI took longer than expected. Please try another agent.";
+    }
+    return text;
   }
 
   private formatAnswer(
@@ -769,6 +795,59 @@ body {
     var(--vscode-inputValidation-errorBorder);
 
   white-space: pre-wrap;
+}
+
+.thinking-indicator {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 10px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  border: 1px solid var(--vscode-panel-border);
+  background: var(--vscode-editor-background);
+  font-size: 12px;
+  opacity: 0.9;
+}
+
+.thinking-indicator[hidden] {
+  display: none;
+}
+
+.thinking-dots {
+  display: inline-flex;
+  gap: 4px;
+}
+
+.thinking-dots span {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--vscode-progressBar-background, var(--vscode-textLink-foreground));
+  animation: m3-think-bounce 1s infinite ease-in-out;
+}
+
+.thinking-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.thinking-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+.thinking-label {
+  opacity: 0.8;
+}
+
+@keyframes m3-think-bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+    opacity: 0.35;
+  }
+  40% {
+    transform: translateY(-3px);
+    opacity: 1;
+  }
 }
 
 /* -------------------------------------------------------------------------- */
@@ -1358,6 +1437,7 @@ textarea:disabled {
       <div class="composer-toolbar">
         <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
         <button id="add-selection" class="icon-btn" type="button" title="Add selection to chat">↧</button>
+        <button id="reset-token" class="icon-btn" type="button" title="Reset access token">🔑</button>
         <select id="mode" aria-label="Mode">
           <option value="agent" selected>Agent</option>
           <option value="ask">Ask</option>
@@ -1396,6 +1476,9 @@ const attach =
 const addSelection =
   document.getElementById("add-selection");
 
+const resetToken =
+  document.getElementById("reset-token");
+
 const messages =
   document.getElementById("messages");
 
@@ -1413,6 +1496,8 @@ const walletBalance =
 
 let processing = false;
 let composerState = "idle";
+let streamPauseTimer = 0;
+const STREAM_PAUSE_MS = 180;
 
 const contextParts = [];
 
@@ -1454,7 +1539,10 @@ function renderContextParts() {
     remove.addEventListener("click", () => {
       vscode.postMessage({
         type: "remove_context",
-        path: part.path
+        path: part.path,
+        kind: part.kind,
+        startLine: part.startLine,
+        endLine: part.endLine
       });
     });
 
@@ -1469,6 +1557,10 @@ attach.addEventListener("click", () => {
 
 addSelection.addEventListener("click", () => {
   vscode.postMessage({ type: "add_selection" });
+});
+
+resetToken.addEventListener("click", () => {
+  vscode.postMessage({ type: "reset_token" });
 });
 
 /* -------------------------------------------------------------------------- */
@@ -2319,6 +2411,59 @@ function setStatus(
     String(text ?? "");
 }
 
+function thinkingLabel(text) {
+  if (text) {
+    return String(text);
+  }
+  if (composerState === "running") {
+    return "Working";
+  }
+  return "Thinking";
+}
+
+function showThinking(text) {
+  if (empty) {
+    empty.remove();
+  }
+  let row = document.getElementById("thinking-indicator");
+  if (!row) {
+    row = document.createElement("div");
+    row.id = "thinking-indicator";
+    row.className = "thinking-indicator";
+    row.setAttribute("aria-live", "polite");
+    row.innerHTML =
+      '<span class="thinking-dots"><span></span><span></span><span></span></span>' +
+      '<span class="thinking-label">Thinking</span>';
+  }
+  const label = row.querySelector(".thinking-label");
+  if (label) {
+    label.textContent = thinkingLabel(text);
+  }
+  row.hidden = false;
+  messages.appendChild(row);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function hideThinking() {
+  if (streamPauseTimer) {
+    clearTimeout(streamPauseTimer);
+    streamPauseTimer = 0;
+  }
+  const row = document.getElementById("thinking-indicator");
+  if (row) {
+    row.hidden = true;
+  }
+}
+
+function noteStreamActivity(label) {
+  hideThinking();
+  streamPauseTimer = setTimeout(() => {
+    if (composerState === "running") {
+      showThinking(label || "Thinking");
+    }
+  }, STREAM_PAUSE_MS);
+}
+
 /* -------------------------------------------------------------------------- */
 /* Processing                                                                 */
 /* -------------------------------------------------------------------------- */
@@ -2364,6 +2509,7 @@ function sendMessage() {
   addMessage(value, "user");
   input.value = "";
   setComposerState("running");
+  showThinking("Thinking");
   vscode.postMessage({
     type: "send_message",
     value: value,
@@ -2443,9 +2589,13 @@ window.addEventListener(
           "Analyzing project..."
         );
 
+        showThinking("Thinking");
+
         break;
 
       case "answer":
+
+        hideThinking();
 
         setProcessing(
           false
@@ -2521,6 +2671,7 @@ window.addEventListener(
 
       case "agent_event":
         if (message.event.type === "token" && message.event.delta) {
+          noteStreamActivity("Writing");
           let assistantMessage = messages.querySelector(".message.assistant:last-child");
           if (!assistantMessage || assistantMessage.dataset.stream !== "true") {
             assistantMessage = document.createElement("div");
@@ -2536,9 +2687,15 @@ window.addEventListener(
           if (markdown) {
             markdown.innerHTML = renderMarkdown((markdown.textContent || "") + message.event.delta);
           }
+          const thinkingRow = document.getElementById("thinking-indicator");
+          if (thinkingRow && !thinkingRow.hidden) {
+            messages.appendChild(thinkingRow);
+          }
           messages.scrollTop = messages.scrollHeight;
           break;
         }
+
+        showThinking(message.event.message || "Working");
 
         if (message.event.type === "citation" && message.event.path) {
           addCitationList([{
@@ -2566,6 +2723,7 @@ window.addEventListener(
         break;
 
       case "error":
+        hideThinking();
         setComposerState("failed");
         addMessage(message.error, "error");
         input.focus();
@@ -2599,10 +2757,12 @@ window.addEventListener(
         break;
 
       case "cancelled":
+        hideThinking();
         setComposerState("idle");
         break;
 
       case "ready":
+        hideThinking();
         if (composerState === "running") {
           setComposerState("idle");
         }
@@ -2714,6 +2874,12 @@ type WebviewMessage =
   | {
       type: "remove_context";
       path: string;
+      kind?: string;
+      startLine?: number;
+      endLine?: number;
+    }
+  | {
+      type: "reset_token";
     }
   | {
       type: "clear";
@@ -2818,5 +2984,19 @@ class AuthenticationError extends Error {
     this.name =
       "AuthenticationError";
   }
+}
+
+function contextPartKey(part: {
+  path: string;
+  kind?: string;
+  startLine?: number;
+  endLine?: number;
+}): string {
+  return [
+    part.path,
+    part.kind ?? "",
+    String(part.startLine ?? ""),
+    String(part.endLine ?? "")
+  ].join("|");
 }
 

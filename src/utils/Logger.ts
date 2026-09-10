@@ -49,7 +49,14 @@ export class Logger {
     let line = `[${timestamp}] [${level}] ${message}`;
     if (data !== undefined) {
       try {
-        line += ` ${JSON.stringify(data)}`;
+        if (data instanceof Error) {
+          line += ` ${JSON.stringify({
+            name: data.name,
+            message: data.message
+          })}`;
+        } else {
+          line += ` ${JSON.stringify(data)}`;
+        }
       } catch {
         line += " [unserializable]";
       }
