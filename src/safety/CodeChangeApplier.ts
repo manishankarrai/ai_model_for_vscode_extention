@@ -1,3 +1,5 @@
+import * as os from "node:os";
+import * as path from "node:path";
 import * as vscode from "vscode";
 
 import { CodeChange } from "../models/types";
@@ -27,6 +29,17 @@ export interface AppliedChangeSummary {
   original: string;
   updated: string;
   diff: string;
+}
+
+export interface PendingFileReview {
+  path: string;
+  original: string;
+  updated: string;
+  created: boolean;
+  deleted: boolean;
+  uri: vscode.Uri;
+  previousPath?: string;
+  previousUri?: vscode.Uri;
 }
 
 function buildUnifiedDiff(path: string, original: string, updated: string): string {
@@ -72,6 +85,7 @@ export class CodeChangeApplier {
     originalHash: string;
     updatedHash: string;
   }> = [];
+  private readonly pendingReviews = new Map<string, PendingFileReview>();
 
   getChangeSets(): NamedChangeSet[] {
     flow("CodeChangeApplier.getChangeSets", 1, "enter");
@@ -194,6 +208,14 @@ export class CodeChangeApplier {
           originalHash: hashContent(originalText),
           updatedHash: contentHash(updatedText),
           created: createNew
+        });
+        this.upsertPending({
+          path: change.path,
+          original: originalText,
+          updated: updatedText,
+          created: createNew,
+          deleted: false,
+          uri
         });
         summaries.push({
           path: change.path,
@@ -336,10 +358,231 @@ export class CodeChangeApplier {
     }
 
     this.lastAppliedChanges = [];
+    this.dismissPending();
     vscode.window.showInformationMessage(
       changeSet
         ? `M3 rolled back "${changeSet.name}".`
         : "M3 rolled back the last approved changes."
     );
+  }
+
+  getPendingReviews(): PendingFileReview[] {
+    flow("CodeChangeApplier.getPendingReviews", 1, "enter");
+    return [...this.pendingReviews.values()];
+  }
+
+  acceptFile(filePath: string): void {
+    flow("CodeChangeApplier.acceptFile", 1, "enter", { filePath });
+    this.pendingReviews.delete(filePath);
+  }
+
+  acceptAll(): void {
+    flow("CodeChangeApplier.acceptAll", 1, "enter");
+    this.pendingReviews.clear();
+  }
+
+  dismissPending(): void {
+    flow("CodeChangeApplier.dismissPending", 1, "enter");
+    this.pendingReviews.clear();
+  }
+
+  async rejectFile(filePath: string): Promise<void> {
+    flow("CodeChangeApplier.rejectFile", 1, "enter", { filePath });
+    const item = this.pendingReviews.get(filePath);
+    if (!item) {
+      return;
+    }
+
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
+
+    if (item.previousUri && item.previousPath) {
+      const edit = new vscode.WorkspaceEdit();
+      try {
+        await vscode.workspace.fs.stat(item.uri);
+        edit.renameFile(item.uri, item.previousUri, { overwrite: true });
+      } catch {
+        const parent = vscode.Uri.joinPath(item.previousUri, "..");
+        await vscode.workspace.fs.createDirectory(parent);
+        await vscode.workspace.fs.writeFile(
+          item.previousUri,
+          new TextEncoder().encode(item.original)
+        );
+        try {
+          await vscode.workspace.fs.delete(item.uri, { useTrash: false });
+        } catch {
+          // Target may already be gone.
+        }
+      }
+      if (edit.size > 0 && !await vscode.workspace.applyEdit(edit)) {
+        throw new Error(`Could not restore ${item.previousPath}.`);
+      }
+      if (item.original) {
+        const restored = await vscode.workspace.openTextDocument(item.previousUri);
+        await restored.save();
+      }
+      this.pendingReviews.delete(filePath);
+      return;
+    }
+
+    if (item.deleted) {
+      const parent = vscode.Uri.joinPath(item.uri, "..");
+      await vscode.workspace.fs.createDirectory(parent);
+      await vscode.workspace.fs.writeFile(
+        item.uri,
+        new TextEncoder().encode(item.original)
+      );
+      this.pendingReviews.delete(filePath);
+      return;
+    }
+
+    if (item.created && !item.original) {
+      const edit = new vscode.WorkspaceEdit();
+      edit.deleteFile(item.uri, { ignoreIfNotExists: true });
+      if (!await vscode.workspace.applyEdit(edit)) {
+        throw new Error(`Could not remove ${filePath}.`);
+      }
+      this.pendingReviews.delete(filePath);
+      return;
+    }
+
+    const document = await vscode.workspace.openTextDocument(item.uri);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      item.uri,
+      new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(document.getText().length)
+      ),
+      item.original
+    );
+    if (!await vscode.workspace.applyEdit(edit)) {
+      throw new Error(`Could not revert ${filePath}.`);
+    }
+    const saved = await vscode.workspace.openTextDocument(item.uri);
+    await saved.save();
+    this.pendingReviews.delete(filePath);
+  }
+
+  async showFileDiff(filePath: string): Promise<void> {
+    flow("CodeChangeApplier.showFileDiff", 1, "enter", { filePath });
+    const item = this.pendingReviews.get(filePath);
+    if (!item) {
+      vscode.window.showInformationMessage("That file is no longer pending review.");
+      return;
+    }
+
+    const tmpDir = path.join(os.tmpdir(), "m3-ai-diff");
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(tmpDir));
+    const safe = filePath.replace(/[^a-zA-Z0-9._-]+/g, "_");
+    const leftUri = vscode.Uri.file(path.join(tmpDir, `${safe}.original`));
+    await vscode.workspace.fs.writeFile(
+      leftUri,
+      new TextEncoder().encode(item.original)
+    );
+    await vscode.workspace.openTextDocument(leftUri);
+
+    let rightUri = item.uri;
+    if (item.deleted) {
+      rightUri = vscode.Uri.file(path.join(tmpDir, `${safe}.current`));
+      await vscode.workspace.fs.writeFile(
+        rightUri,
+        new TextEncoder().encode(item.updated)
+      );
+    }
+
+    await vscode.commands.executeCommand(
+      "vscode.diff",
+      leftUri,
+      rightUri,
+      `${filePath} (original ↔ current)`
+    );
+  }
+
+  async deleteAndRecord(relativePath: string): Promise<AppliedChangeSummary> {
+    flow("CodeChangeApplier.deleteAndRecord", 1, "enter", { relativePath });
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
+    const uri = this.resolveWorkspaceUri(relativePath);
+    const document = await vscode.workspace.openTextDocument(uri);
+    const original = document.getText();
+    const edit = new vscode.WorkspaceEdit();
+    edit.deleteFile(uri, { ignoreIfNotExists: false });
+    if (!await vscode.workspace.applyEdit(edit)) {
+      throw new Error(`Could not delete ${relativePath}.`);
+    }
+    this.upsertPending({
+      path: relativePath,
+      original,
+      updated: "",
+      created: false,
+      deleted: true,
+      uri
+    });
+    return {
+      path: relativePath,
+      original,
+      updated: "",
+      diff: buildUnifiedDiff(relativePath, original, "")
+    };
+  }
+
+  async moveAndRecord(
+    fromPath: string,
+    toPath: string
+  ): Promise<AppliedChangeSummary> {
+    flow("CodeChangeApplier.moveAndRecord", 1, "enter", { fromPath, toPath });
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
+    const fromUri = this.resolveWorkspaceUri(fromPath);
+    const toUri = this.resolveWorkspaceUri(toPath);
+    const document = await vscode.workspace.openTextDocument(fromUri);
+    const original = document.getText();
+    const edit = new vscode.WorkspaceEdit();
+    edit.renameFile(fromUri, toUri, { overwrite: false });
+    if (!await vscode.workspace.applyEdit(edit)) {
+      throw new Error(`Could not move ${fromPath}.`);
+    }
+    this.pendingReviews.delete(fromPath);
+    this.upsertPending({
+      path: toPath,
+      original,
+      updated: original,
+      created: true,
+      deleted: false,
+      uri: toUri,
+      previousPath: fromPath,
+      previousUri: fromUri
+    });
+    return {
+      path: toPath,
+      original,
+      updated: original,
+      diff: buildUnifiedDiff(toPath, original, original)
+    };
+  }
+
+  private upsertPending(next: PendingFileReview): void {
+    const existing = this.pendingReviews.get(next.path);
+    if (!existing) {
+      this.pendingReviews.set(next.path, next);
+      return;
+    }
+    this.pendingReviews.set(next.path, {
+      ...existing,
+      updated: next.updated,
+      created: existing.created || next.created,
+      deleted: next.deleted,
+      uri: next.uri,
+      previousPath: next.previousPath ?? existing.previousPath,
+      previousUri: next.previousUri ?? existing.previousUri
+    });
+  }
+
+  private resolveWorkspaceUri(relativePath: string): vscode.Uri {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      throw new Error("M3 cannot apply changes without an open workspace.");
+    }
+    const normalized = validateWorkspaceRelativePath(relativePath);
+    assertNotSensitivePath(normalized);
+    return vscode.Uri.joinPath(workspace.uri, ...normalized.split("/"));
   }
 }

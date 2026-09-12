@@ -16,6 +16,7 @@ import { ProjectMemory } from "./state/ProjectMemory";
 import { Agent } from "./agent/Agent";
 
 import { M3ViewProvider } from "./ui/M3ViewProvider";
+import { CodeChangeApplier } from "./safety/CodeChangeApplier";
 import { ProjectUnderstanding } from "./project/project-understanding";
 
 import { flow } from "./utils/flowLog";
@@ -79,6 +80,9 @@ export function activate(
   // Agent
   // ----------------------------------------------------------
 
+  const changeApplier =
+    new CodeChangeApplier();
+
   const agent =
     new Agent(
       indexer,
@@ -86,7 +90,8 @@ export function activate(
       conversation,
       taskState,
       projectMemory,
-      logger
+      logger,
+      changeApplier
     );
 
   // ----------------------------------------------------------
@@ -110,7 +115,8 @@ export function activate(
       async () => {
         flow("activate.resetAccessTokenCallback", 1, "enter");
         return resetAccessToken(context);
-      }
+      },
+      changeApplier
     );
 
   context.subscriptions.push(

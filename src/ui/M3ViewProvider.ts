@@ -18,6 +18,14 @@ import {
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { isSafeContextPath } from "../intelligence/contextSelection";
 import { BackendClient } from "../backend/BackendClient";
+import {
+  classifyErrorMessage,
+  formatUserFacingError,
+  M3_CRM_URL,
+  M3_SUPPORT_EMAIL,
+  userFacingErrorHelp,
+  type UserFacingErrorHelp
+} from "../backend/userFacingError";
 import type { BillingAgent, CreditPlan, WalletSummary } from "../models/types";
 
 export class M3ViewProvider
@@ -31,9 +39,6 @@ export class M3ViewProvider
 
   private selectedContext: ContextPart[] = [];
   private readonly dismissedContextKeys = new Set<string>();
-
-  private readonly codeChangeApplier =
-    new CodeChangeApplier();
 
   private readonly billingClient =
     new BackendClient();
@@ -52,7 +57,8 @@ export class M3ViewProvider
     private readonly agent: Agent,
     private readonly logger: Logger,
     private readonly getAccessToken: () => Promise<string>,
-    private readonly resetAccessToken: () => Promise<string>
+    private readonly resetAccessToken: () => Promise<string>,
+    private readonly codeChangeApplier = new CodeChangeApplier()
   ) {
     flow("M3ViewProvider.constructor", 1, "enter");
   }
@@ -88,8 +94,11 @@ export class M3ViewProvider
 
           this.post({
             type: "error",
-            error:
-              "Something went wrong while processing your request.",
+            error: formatUserFacingError(
+              "unexpected",
+              "Something went wrong while processing your request."
+            ),
+            help: userFacingErrorHelp("unexpected")
           });
         }
       },
@@ -105,10 +114,11 @@ export class M3ViewProvider
   async rollbackLastChanges(): Promise<void> {
     flow("M3ViewProvider.rollbackLastChanges", 1, "enter");
     await this.codeChangeApplier.rollbackLast();
+    this.clearFileReviews();
   }
 
-  private async refreshBilling(): Promise<void> {
-    flow("M3ViewProvider.refreshBilling", 1, "enter");
+  private async refreshBilling(silent = false): Promise<void> {
+    flow("M3ViewProvider.refreshBilling", 1, "enter", { silent });
     try {
       const accessToken = await this.getAccessToken();
       if (!accessToken) {
@@ -128,6 +138,9 @@ export class M3ViewProvider
       this.logger.warn(
         `Unable to load billing: ${error instanceof Error ? error.message : String(error)}`
       );
+      if (!silent) {
+        this.postError(error);
+      }
     }
   }
  // handle message
@@ -203,6 +216,7 @@ export class M3ViewProvider
         this.agent.clearConversation();
         this.selectedContext = [];
         this.dismissedContextKeys.clear();
+        this.clearFileReviews();
 
         this.post({
           type: "cleared",
@@ -228,6 +242,33 @@ export class M3ViewProvider
         await this.refreshBilling();
         break;
 
+      case "open_external":
+        await vscode.env.openExternal(vscode.Uri.parse(message.url));
+        break;
+
+      case "review_accept":
+        this.codeChangeApplier.acceptFile(message.path);
+        this.postFileReviewRemoved(message.path);
+        break;
+
+      case "review_accept_all":
+        this.codeChangeApplier.acceptAll();
+        this.post({ type: "file_reviews_cleared" });
+        break;
+
+      case "review_reject":
+        try {
+          await this.codeChangeApplier.rejectFile(message.path);
+          this.postFileReviewRemoved(message.path);
+        } catch (error) {
+          this.postError(error);
+        }
+        break;
+
+      case "review_open_diff":
+        await this.codeChangeApplier.showFileDiff(message.path);
+        break;
+
       default:
         break;
     }
@@ -248,15 +289,11 @@ export class M3ViewProvider
     }
 
     if (this.isProcessing) {
-      this.post({
-        type: "error",
-        error:
-          "M3 is already processing another request.",
-      });
-
+      this.postError("M3 is already processing another request.");
       return;
     }
 
+    this.clearFileReviews();
     this.isProcessing = true;
     this.requestController = new AbortController();
     this.lastQuestion = {
@@ -276,7 +313,10 @@ export class M3ViewProvider
 
       if (!accessToken) {
         throw new AuthenticationError(
-          "M3 authentication required."
+          formatUserFacingError(
+            "auth",
+            "M3 authentication is required."
+          )
         );
       }
 
@@ -315,33 +355,20 @@ export class M3ViewProvider
         implementationPlan: response.implementation_plan
       });
 
-      await this.refreshBilling();
+      await this.refreshBilling(true);
 
       if (response.implementation_plan?.changes?.length) {
         try {
-          const applied = await this.codeChangeApplier.offer(
+          await this.codeChangeApplier.offer(
             response.implementation_plan.changes
           );
-          if (applied.length > 0) {
-            this.post({
-              type: "answer",
-              answer: applied.map((item) => {
-                const fence = String.fromCharCode(96, 96, 96);
-                return "### Updated `" + item.path + "`\n\n" + fence + "diff\n" + item.diff + "\n" + fence;
-              }).join("\n\n"),
-              requestId: response.request_id,
-              model: response.model,
-              agents: []
-            });
-          }
         } catch (applyError) {
           this.logger.error("M3 failed to apply planned file changes", applyError);
-          this.post({
-            type: "error",
-            error: this.getErrorMessage(applyError)
-          });
+          this.postError(applyError);
         }
       }
+
+      this.postPendingFileReviews();
 
     } catch (error) {
 
@@ -352,25 +379,7 @@ export class M3ViewProvider
         return;
       }
 
-      const message =
-        this.getErrorMessage(error);
-
-      if (/401|unauthoriz|expired|authentication required/i.test(message)) {
-        const replaced = await this.resetAccessToken();
-        if (replaced) {
-          this.post({
-            type: "error",
-            error: "Access token expired or invalid. A new token was saved. Send the request again."
-          });
-          return;
-        }
-      }
-
-      this.post({
-        type: "error",
-        error: message,
-      });
-
+      this.postError(error);
       this.logger.error(
         "M3 request failed",
         error
@@ -397,7 +406,9 @@ export class M3ViewProvider
 
     const accessToken = await this.getAccessToken();
     if (!accessToken) {
-      throw new AuthenticationError("M3 authentication required.");
+      throw new AuthenticationError(
+        formatUserFacingError("auth", "M3 authentication is required.")
+      );
     }
 
     this.isProcessing = true;
@@ -584,10 +595,14 @@ export class M3ViewProvider
   ): string {
     flow("M3ViewProvider.getErrorMessage", 1, "enter");
 
+    if (typeof error === "string" && error.trim()) {
+      return this.sanitizeUserError(error);
+    }
+
     if (
       error instanceof AuthenticationError
     ) {
-      return error.message;
+      return this.sanitizeUserError(error.message);
     }
 
     if (
@@ -596,22 +611,71 @@ export class M3ViewProvider
       return this.sanitizeUserError(error.message);
     }
 
-    return "An unexpected error occurred.";
+    return formatUserFacingError("unexpected");
   }
 
   private sanitizeUserError(message: string | undefined): string {
     const text = (message || "").trim();
     if (!text) {
-      return "An unexpected error occurred.";
+      return formatUserFacingError("unexpected");
+    }
+    if (text.includes(M3_CRM_URL) || text.includes(M3_SUPPORT_EMAIL)) {
+      return text;
+    }
+    if (text === "M3 is already processing another request.") {
+      return text;
     }
     if (
-      /i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT/i.test(
+      /i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|unable to reach|unable to connect/i.test(
         text
       )
     ) {
-      return "The AI took longer than expected. Please try another agent.";
+      return formatUserFacingError(
+        "api",
+        "The M3 service did not respond in time. Please try again."
+      );
     }
-    return text;
+    return formatUserFacingError(classifyErrorMessage(text), text);
+  }
+
+  private postError(error: unknown): void {
+    const message = this.getErrorMessage(error);
+    this.post({
+      type: "error",
+      error: message,
+      help: userFacingErrorHelp(classifyErrorMessage(message))
+    });
+  }
+
+  private clearFileReviews(): void {
+    this.codeChangeApplier.dismissPending();
+    this.post({ type: "file_reviews_cleared" });
+  }
+
+  private postPendingFileReviews(): void {
+    const files = this.codeChangeApplier.getPendingReviews().map((item) => ({
+      path: item.path,
+      created: item.created,
+      deleted: item.deleted
+    }));
+    if (files.length === 0) {
+      return;
+    }
+    this.post({
+      type: "file_reviews",
+      files
+    });
+  }
+
+  private postFileReviewRemoved(filePath: string): void {
+    if (this.codeChangeApplier.getPendingReviews().length === 0) {
+      this.post({ type: "file_reviews_cleared" });
+      return;
+    }
+    this.post({
+      type: "file_review_removed",
+      path: filePath
+    });
   }
 
   private formatAnswer(
@@ -728,6 +792,14 @@ body {
   align-items: center;
   gap: 8px;
   font-size: 13px;
+  min-width: 0;
+  flex: 1;
+}
+
+.header-actions {
+  display: flex;
+  align-items: center;
+  flex-shrink: 0;
 }
 
 .credits {
@@ -795,6 +867,105 @@ body {
     var(--vscode-inputValidation-errorBorder);
 
   white-space: pre-wrap;
+}
+
+.error-body p {
+  margin: 0 0 8px;
+}
+
+.error-body p:last-child {
+  margin-bottom: 0;
+}
+
+.error-help {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  padding-top: 8px;
+  border-top: 1px solid var(--vscode-inputValidation-errorBorder);
+  font-size: 12px;
+}
+
+.error-help a,
+.error-body a {
+  color: var(--vscode-textLink-foreground);
+}
+
+.file-reviews {
+  margin: 0 0 12px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.file-reviews-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  font-size: 12px;
+}
+
+.file-reviews-title {
+  opacity: 0.85;
+}
+
+.file-review-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 10px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+}
+
+.file-review-row:last-child {
+  border-bottom: none;
+}
+
+.file-review-name {
+  flex: 1;
+  min-width: 0;
+  background: none;
+  border: none;
+  padding: 0;
+  color: var(--vscode-textLink-foreground);
+  cursor: pointer;
+  text-align: left;
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-review-name:hover {
+  text-decoration: underline;
+}
+
+.file-review-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.file-review-actions button,
+.file-reviews-header button {
+  border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+  background: var(--vscode-button-secondaryBackground);
+  color: var(--vscode-button-secondaryForeground);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.file-review-actions .accept {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  border-color: transparent;
 }
 
 .thinking-indicator {
@@ -1397,10 +1568,14 @@ textarea:disabled {
 
     <div class="header-title">
 
-      <span>M3</span>
+      <span>M3 AI Agent</span>
       <span id="wallet-balance" class="credits">0 credits</span>
       <span id="model" class="model"></span>
 
+    </div>
+
+    <div class="header-actions">
+      <button id="reset-token" class="icon-btn" type="button" title="Reset access token">🔑</button>
     </div>
 
   </div>
@@ -1437,7 +1612,6 @@ textarea:disabled {
       <div class="composer-toolbar">
         <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
         <button id="add-selection" class="icon-btn" type="button" title="Add selection to chat">↧</button>
-        <button id="reset-token" class="icon-btn" type="button" title="Reset access token">🔑</button>
         <select id="mode" aria-label="Mode">
           <option value="agent" selected>Agent</option>
           <option value="ask">Ask</option>
@@ -2089,6 +2263,8 @@ function addMessage(
       markdown
     );
 
+  } else if (type === "error") {
+    addErrorContent(element, String(text ?? ""), null);
   } else {
 
     element.textContent =
@@ -2101,6 +2277,173 @@ function addMessage(
 
   messages.scrollTop =
     messages.scrollHeight;
+}
+
+function addErrorMessage(text, help) {
+  if (empty) {
+    empty.remove();
+  }
+  const element = document.createElement("div");
+  element.className = "message error";
+  addErrorContent(element, String(text ?? ""), help);
+  messages.appendChild(element);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addErrorContent(element, text, help) {
+  const body = document.createElement("div");
+  body.className = "error-body";
+  String(text ?? "").split(/\\n\\n/).forEach((para) => {
+    if (!para.trim()) {
+      return;
+    }
+    const p = document.createElement("p");
+    appendLinkedText(p, para.replace(/\\n/g, " "));
+    body.appendChild(p);
+  });
+  element.appendChild(body);
+
+  const helpBox = document.createElement("div");
+  helpBox.className = "error-help";
+  const crm = document.createElement("a");
+  crm.href = (help && help.crmUrl) || "https://crm.mm3ai.com";
+  crm.textContent = "Reset token at crm.mm3ai.com";
+  const support = document.createElement("a");
+  support.href = "mailto:" + ((help && help.supportEmail) || "support@mm3ai.com");
+  support.textContent = "Unexpected issue? Email support@mm3ai.com";
+  helpBox.appendChild(crm);
+  helpBox.appendChild(support);
+  element.appendChild(helpBox);
+}
+
+function appendLinkedText(target, text) {
+  const pattern = /(https?:\\/\\/[^\\s]+|crm\\.mm3ai\\.com|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,})/g;
+  let last = 0;
+  let match;
+  while ((match = pattern.exec(text))) {
+    if (match.index > last) {
+      target.appendChild(document.createTextNode(text.slice(last, match.index)));
+    }
+    const token = match[0];
+    const link = document.createElement("a");
+    if (token.indexOf("@") > 0 && token.indexOf("://") === -1) {
+      link.href = "mailto:" + token;
+    } else {
+      link.href = token.indexOf("://") === -1 ? "https://" + token : token;
+    }
+    link.textContent = token;
+    target.appendChild(link);
+    last = match.index + token.length;
+  }
+  if (last < text.length) {
+    target.appendChild(document.createTextNode(text.slice(last)));
+  }
+}
+
+function fileReviewsPanel() {
+  let panel = document.getElementById("file-reviews");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "file-reviews";
+    panel.className = "file-reviews";
+  }
+  return panel;
+}
+
+function renderFileReviews(files) {
+  if (!files || files.length === 0) {
+    clearFileReviews();
+    return;
+  }
+  if (empty) {
+    empty.remove();
+  }
+  const panel = fileReviewsPanel();
+  panel.textContent = "";
+
+  const header = document.createElement("div");
+  header.className = "file-reviews-header";
+  const title = document.createElement("span");
+  title.className = "file-reviews-title";
+  title.textContent = "Changed files";
+  const acceptAll = document.createElement("button");
+  acceptAll.type = "button";
+  acceptAll.textContent = "Accept all";
+  acceptAll.addEventListener("click", () => {
+    vscode.postMessage({ type: "review_accept_all" });
+    clearFileReviews();
+  });
+  header.appendChild(title);
+  header.appendChild(acceptAll);
+  panel.appendChild(header);
+
+  files.forEach((file) => {
+    panel.appendChild(createFileReviewRow(file));
+  });
+
+  messages.appendChild(panel);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function createFileReviewRow(file) {
+  const row = document.createElement("div");
+  row.className = "file-review-row";
+  row.dataset.path = file.path;
+
+  const name = document.createElement("button");
+  name.type = "button";
+  name.className = "file-review-name";
+  const base = String(file.path || "").split("/").pop() || file.path;
+  name.textContent = file.deleted ? base + " (deleted)" : file.created ? base + " (new)" : base;
+  name.title = "Show difference for " + file.path;
+  name.addEventListener("click", () => {
+    vscode.postMessage({ type: "review_open_diff", path: file.path });
+  });
+
+  const actions = document.createElement("div");
+  actions.className = "file-review-actions";
+  const accept = document.createElement("button");
+  accept.type = "button";
+  accept.className = "accept";
+  accept.textContent = "Accept";
+  accept.addEventListener("click", () => {
+    vscode.postMessage({ type: "review_accept", path: file.path });
+    removeFileReviewRow(file.path);
+  });
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.textContent = "Reject";
+  reject.addEventListener("click", () => {
+    vscode.postMessage({ type: "review_reject", path: file.path });
+  });
+  actions.appendChild(accept);
+  actions.appendChild(reject);
+
+  row.appendChild(name);
+  row.appendChild(actions);
+  return row;
+}
+
+function removeFileReviewRow(filePath) {
+  const panel = document.getElementById("file-reviews");
+  if (!panel) {
+    return;
+  }
+  panel.querySelectorAll(".file-review-row").forEach((row) => {
+    if (row.dataset.path === filePath) {
+      row.remove();
+    }
+  });
+  if (!panel.querySelector(".file-review-row")) {
+    clearFileReviews();
+  }
+}
+
+function clearFileReviews() {
+  const panel = document.getElementById("file-reviews");
+  if (panel) {
+    panel.remove();
+  }
 }
 
 function addAgentRetryControls(agents) {
@@ -2506,6 +2849,7 @@ function sendMessage() {
   if (!value) {
     return;
   }
+  clearFileReviews();
   addMessage(value, "user");
   input.value = "";
   setComposerState("running");
@@ -2535,6 +2879,7 @@ action.addEventListener("click", () => {
       return;
     }
     vscode.postMessage({ type: "retry_last" });
+    clearFileReviews();
     return;
   }
   sendMessage();
@@ -2567,6 +2912,15 @@ input.addEventListener(
     }
   }
 );
+
+document.addEventListener("click", (event) => {
+  const link = event.target && event.target.closest ? event.target.closest("a[href]") : null;
+  if (!link) {
+    return;
+  }
+  event.preventDefault();
+  vscode.postMessage({ type: "open_external", url: link.href });
+});
 
 window.addEventListener(
   "message",
@@ -2636,10 +2990,6 @@ window.addEventListener(
           addExpandableList(
             "Risks and Assumptions",
             message.implementationPlan.risks || []
-          );
-
-          addDiffPreviews(
-            message.implementationPlan.changes || []
           );
         }
 
@@ -2725,8 +3075,20 @@ window.addEventListener(
       case "error":
         hideThinking();
         setComposerState("failed");
-        addMessage(message.error, "error");
+        addErrorMessage(message.error, message.help);
         input.focus();
+        break;
+
+      case "file_reviews":
+        renderFileReviews(message.files || []);
+        break;
+
+      case "file_review_removed":
+        removeFileReviewRow(message.path);
+        break;
+
+      case "file_reviews_cleared":
+        clearFileReviews();
         break;
 
       case "billing":
@@ -2895,6 +3257,25 @@ type WebviewMessage =
     }
   | {
       type: "load_billing";
+    }
+  | {
+      type: "open_external";
+      url: string;
+    }
+  | {
+      type: "review_accept";
+      path: string;
+    }
+  | {
+      type: "review_accept_all";
+    }
+  | {
+      type: "review_reject";
+      path: string;
+    }
+  | {
+      type: "review_open_diff";
+      path: string;
     };
 
 type WebviewResponse =
@@ -2960,6 +3341,22 @@ type WebviewResponse =
   | {
       type: "error";
       error: string;
+      help?: UserFacingErrorHelp;
+    }
+  | {
+      type: "file_reviews";
+      files: Array<{
+        path: string;
+        created: boolean;
+        deleted: boolean;
+      }>;
+    }
+  | {
+      type: "file_review_removed";
+      path: string;
+    }
+  | {
+      type: "file_reviews_cleared";
     }
   | {
       type: "ready";

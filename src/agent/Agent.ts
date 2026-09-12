@@ -45,6 +45,7 @@ import { resolveRequestContext } from "../intelligence/contextSelection";
 import { getToolPolicy, isToolAllowed } from "../tools/toolPolicy";
 import { WorkspaceToolRegistry } from "../tools/WorkspaceToolRegistry";
 import type { AgentToolName, CodeChange } from "../models/types";
+import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 
 
 import { flow } from "../utils/flowLog";
@@ -186,8 +187,7 @@ export class Agent {
   private readonly investigationEngine:
     InvestigationEngine;
 
-  private readonly workspaceTools =
-    new WorkspaceToolRegistry();
+  private readonly workspaceTools: WorkspaceToolRegistry;
 
 
   constructor(
@@ -207,9 +207,14 @@ export class Agent {
       ProjectMemory,
 
     private readonly logger:
-      Logger
+      Logger,
+
+    changeApplier = new CodeChangeApplier()
   ) {
     flow("Agent.constructor", 1, "enter");
+
+    this.workspaceTools =
+      new WorkspaceToolRegistry(changeApplier);
 
     this.investigationEngine =
       new InvestigationEngine(
@@ -1650,9 +1655,7 @@ export class Agent {
             onEvent({
               profile: (initialRequest.agent?.profile || "agent") as AgentEvent["profile"],
               type: "progress",
-              message: body.includes("diff")
-                ? "Updated `" + (tool.path || "file") + "`\n\n" + body
-                : body,
+              message: "Updated `" + (tool.path || "file") + "`",
               timestamp: Date.now()
             });
           }

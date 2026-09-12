@@ -139,32 +139,25 @@ export class WorkspaceToolRegistry {
     filePath: string | undefined,
     content: string
   ): Promise<ToolResult> {
-    assertWorkspaceTrusted(vscode.workspace.isTrusted);
-    const uri = this.resolvePath(filePath);
-    const parent = vscode.Uri.joinPath(uri, "..");
-    await vscode.workspace.fs.createDirectory(parent);
-    const edit = new vscode.WorkspaceEdit();
-    edit.createFile(uri, { ignoreIfExists: true, overwrite: true });
-    edit.insert(uri, new vscode.Position(0, 0), content);
-    if (!await vscode.workspace.applyEdit(edit)) {
-      throw new Error(`Could not create ${filePath}.`);
-    }
-    const document = await vscode.workspace.openTextDocument(uri);
-    await document.save();
-    return this.result("create_file", true, `Created ${filePath}.`);
+    const applied = await this.changeApplier.offer([{
+      path: validateWorkspaceRelativePath(filePath ?? ""),
+      original: "",
+      updated: content
+    }]);
+    const diff = applied[0]?.diff ?? "";
+    return this.result(
+      "create_file",
+      true,
+      [`Created ${filePath}.`, diff].filter(Boolean).join("\n\n")
+    );
   }
 
   private async deleteFile(
     filePath: string | undefined
   ): Promise<ToolResult> {
-    assertWorkspaceTrusted(vscode.workspace.isTrusted);
-    const uri = this.resolvePath(filePath);
-    await vscode.workspace.openTextDocument(uri);
-    const edit = new vscode.WorkspaceEdit();
-    edit.deleteFile(uri, { ignoreIfNotExists: false });
-    if (!await vscode.workspace.applyEdit(edit)) {
-      throw new Error(`Could not delete ${filePath}.`);
-    }
+    await this.changeApplier.deleteAndRecord(
+      validateWorkspaceRelativePath(filePath ?? "")
+    );
     return this.result("delete_file", true, `Deleted ${filePath}.`);
   }
 
@@ -172,15 +165,10 @@ export class WorkspaceToolRegistry {
     filePath: string | undefined,
     targetPath: string | undefined
   ): Promise<ToolResult> {
-    assertWorkspaceTrusted(vscode.workspace.isTrusted);
-    const source = this.resolvePath(filePath);
-    const target = this.resolvePath(targetPath);
-    await vscode.workspace.openTextDocument(source);
-    const edit = new vscode.WorkspaceEdit();
-    edit.renameFile(source, target, { overwrite: false });
-    if (!await vscode.workspace.applyEdit(edit)) {
-      throw new Error(`Could not move ${filePath}.`);
-    }
+    await this.changeApplier.moveAndRecord(
+      validateWorkspaceRelativePath(filePath ?? ""),
+      validateWorkspaceRelativePath(targetPath ?? "")
+    );
     return this.result("move_file", true, `Moved ${filePath} to ${targetPath}.`);
   }
 

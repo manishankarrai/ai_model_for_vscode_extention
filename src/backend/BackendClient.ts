@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
 import { flow } from "../utils/flowLog";
+import { formatConnectError, formatUserFacingError } from "./userFacingError";
 
 import {
   AIRequest,
@@ -193,7 +194,10 @@ export class BackendClient {
     );
 
     if (!response.ok || !response.body) {
-      throw new Error(`Unable to open agent event stream: ${response.status}`);
+      throw this.toBackendError(
+        response.status,
+        `Unable to open agent event stream (${response.status}).`
+      );
     }
 
     const reader = response.body.getReader();
@@ -256,30 +260,17 @@ export class BackendClient {
       );
 
     } catch (error) {
-
-      throw new Error(
-        `Unable to connect to M3 AI: ${
-          error instanceof Error
-            ? error.message
-            : String(error)
-        }`
-      );
+      throw formatConnectError(error);
     }
 
     const data =
       await this.parseResponse<T>(response);
 
     if (!response.ok) {
-
-      const errorData =
-        data as BackendErrorResponse;
-
-      throw new Error(
-        response.status === 401
-          ? "Authentication expired (401). Reset the M3 access token."
-          : errorData.error ??
-            errorData.message ??
-            `Backend error: ${response.status}`
+      throw this.toBackendError(
+        response.status,
+        (data as BackendErrorResponse).error ??
+          (data as BackendErrorResponse).message
       );
     }
 
@@ -312,34 +303,33 @@ export class BackendClient {
       );
 
     } catch (error) {
-
-      throw new Error(
-        `Unable to connect to M3 AI: ${
-          error instanceof Error
-            ? error.message
-            : String(error)
-        }`
-      );
+      throw formatConnectError(error);
     }
 
     const data =
       await this.parseResponse<T>(response);
 
     if (!response.ok) {
-
-      const errorData =
-        data as BackendErrorResponse;
-
-      throw new Error(
-        response.status === 401
-          ? "Authentication expired (401). Reset the M3 access token."
-          : errorData.error ??
-            errorData.message ??
-            `Backend error: ${response.status}`
+      throw this.toBackendError(
+        response.status,
+        (data as BackendErrorResponse).error ??
+          (data as BackendErrorResponse).message
       );
     }
 
     return data;
+  }
+
+  private toBackendError(status: number, detail?: string): Error {
+    if (status === 401 || status === 403) {
+      return new Error(formatUserFacingError("auth"));
+    }
+    return new Error(
+      formatUserFacingError(
+        "api",
+        detail?.trim() || `The M3 API returned an error (${status}).`
+      )
+    );
   }
 
   private async parseResponse<T>(

@@ -67,7 +67,8 @@
       },
       {
         "command": "m3.resetAccessToken",
-        "title": "M3: Reset Access Token"
+        "title": "M3: Reset Access Token",
+        "icon": "$(key)"
       }
     ],
     "configuration": {
