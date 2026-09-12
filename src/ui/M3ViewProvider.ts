@@ -334,7 +334,10 @@ export class M3ViewProvider
               type: "agent_event",
               event: {
                 ...event,
-                message: this.sanitizeUserError(event.message)
+                message:
+                  event.type === "failed"
+                    ? this.sanitizeUserError(event.message)
+                    : event.message
               }
             });
           }
@@ -1589,7 +1592,8 @@ textarea:disabled {
       id="empty"
       class="empty"
     >
-      Ask about your project
+Describe the task, bug, or issue you want M3 to investigate or fix.
+
     </div>
 
   </div>
