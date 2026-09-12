@@ -21,17 +21,17 @@ import { BackendClient } from "../backend/BackendClient";
 import {
   classifyErrorMessage,
   formatUserFacingError,
-  M3_CRM_URL,
-  M3_SUPPORT_EMAIL,
+  MM3_CRM_URL,
+  MM3_SUPPORT_EMAIL,
   userFacingErrorHelp,
   type UserFacingErrorHelp
 } from "../backend/userFacingError";
 import type { BillingAgent, CreditPlan, WalletSummary } from "../models/types";
 
-export class M3ViewProvider
+export class MM3ViewProvider
   implements vscode.WebviewViewProvider
 {
-  public static readonly viewType = "m3.chat";
+  public static readonly viewType = "mm3.chat";
 
   private view?: vscode.WebviewView;
 
@@ -60,13 +60,13 @@ export class M3ViewProvider
     private readonly resetAccessToken: () => Promise<string>,
     private readonly codeChangeApplier = new CodeChangeApplier()
   ) {
-    flow("M3ViewProvider.constructor", 1, "enter");
+    flow("MM3ViewProvider.constructor", 1, "enter");
   }
 
   resolveWebviewView(
     webviewView: vscode.WebviewView
   ): void {
-    flow("M3ViewProvider.resolveWebviewView", 1, "enter");
+    flow("MM3ViewProvider.resolveWebviewView", 1, "enter");
     this.view = webviewView;
 
     webviewView.webview.options = {
@@ -107,18 +107,18 @@ export class M3ViewProvider
   }
 
   show(): void {
-    flow("M3ViewProvider.show", 1, "enter");
+    flow("MM3ViewProvider.show", 1, "enter");
     this.view?.show?.(true);
   }
 
   async rollbackLastChanges(): Promise<void> {
-    flow("M3ViewProvider.rollbackLastChanges", 1, "enter");
+    flow("MM3ViewProvider.rollbackLastChanges", 1, "enter");
     await this.codeChangeApplier.rollbackLast();
     this.clearFileReviews();
   }
 
   private async refreshBilling(silent = false): Promise<void> {
-    flow("M3ViewProvider.refreshBilling", 1, "enter", { silent });
+    flow("MM3ViewProvider.refreshBilling", 1, "enter", { silent });
     try {
       const accessToken = await this.getAccessToken();
       if (!accessToken) {
@@ -147,7 +147,7 @@ export class M3ViewProvider
   private async handleMessage(
     message: WebviewMessage
   ): Promise<void> {
-    flow("M3ViewProvider.handleMessage", 1, "enter", { type: message.type });
+    flow("MM3ViewProvider.handleMessage", 1, "enter", { type: message.type });
     switch (message.type) {
       case "send_message":
         await this.handleQuestion(
@@ -209,7 +209,7 @@ export class M3ViewProvider
       case "reset_token":
         await this.resetAccessToken();
         await this.refreshBilling();
-        vscode.window.showInformationMessage("M3 access token updated.");
+        vscode.window.showInformationMessage("MM3 access token updated.");
         break;
 
       case "clear":
@@ -280,7 +280,7 @@ export class M3ViewProvider
     agentProfile: AgentProfile,
     agentCount: number
   ): Promise<void> {
-    flow("M3ViewProvider.handleQuestion", 1, "enter", { mode, agentProfile, agentCount });
+    flow("MM3ViewProvider.handleQuestion", 1, "enter", { mode, agentProfile, agentCount });
     const trimmedQuestion =
       question.trim();
 
@@ -289,7 +289,7 @@ export class M3ViewProvider
     }
 
     if (this.isProcessing) {
-      this.postError("M3 is already processing another request.");
+      this.postError("MM3 is already processing another request.");
       return;
     }
 
@@ -315,7 +315,7 @@ export class M3ViewProvider
         throw new AuthenticationError(
           formatUserFacingError(
             "auth",
-            "M3 authentication is required."
+            "MM3 authentication is required."
           )
         );
       }
@@ -366,7 +366,7 @@ export class M3ViewProvider
             response.implementation_plan.changes
           );
         } catch (applyError) {
-          this.logger.error("M3 failed to apply planned file changes", applyError);
+          this.logger.error("MM3 failed to apply planned file changes", applyError);
           this.postError(applyError);
         }
       }
@@ -384,7 +384,7 @@ export class M3ViewProvider
 
       this.postError(error);
       this.logger.error(
-        "M3 request failed",
+        "MM3 request failed",
         error
       );
 
@@ -402,7 +402,7 @@ export class M3ViewProvider
   private async retryAgent(
     profile: AgentProfile
   ): Promise<void> {
-    flow("M3ViewProvider.retryAgent", 1, "enter", { profile });
+    flow("MM3ViewProvider.retryAgent", 1, "enter", { profile });
     if (this.isProcessing) {
       return;
     }
@@ -410,7 +410,7 @@ export class M3ViewProvider
     const accessToken = await this.getAccessToken();
     if (!accessToken) {
       throw new AuthenticationError(
-        formatUserFacingError("auth", "M3 authentication is required.")
+        formatUserFacingError("auth", "MM3 authentication is required.")
       );
     }
 
@@ -442,14 +442,14 @@ export class M3ViewProvider
   }
 
   private async getRequestContext(): Promise<ContextPart[]> {
-    flow("M3ViewProvider.getRequestContext", 1, "enter");
+    flow("MM3ViewProvider.getRequestContext", 1, "enter");
     return this.selectedContext.filter(
       (part) => !this.dismissedContextKeys.has(contextPartKey(part))
     );
   }
 
   private async attachFiles(): Promise<void> {
-    flow("M3ViewProvider.attachFiles", 1, "enter");
+    flow("MM3ViewProvider.attachFiles", 1, "enter");
     const files = await vscode.window.showOpenDialog({
       canSelectMany: true,
       canSelectFolders: false,
@@ -492,16 +492,16 @@ export class M3ViewProvider
   }
 
   async attachCurrentSelection(): Promise<void> {
-    flow("M3ViewProvider.attachCurrentSelection", 1, "enter");
+    flow("MM3ViewProvider.attachCurrentSelection", 1, "enter");
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.selection.isEmpty) {
-      vscode.window.showInformationMessage("Select code first, then add it to M3 chat.");
+      vscode.window.showInformationMessage("Select code first, then add it to MM3 chat.");
       return;
     }
 
     const relativePath = vscode.workspace.asRelativePath(editor.document.uri, false);
     if (!isSafeContextPath(relativePath)) {
-      vscode.window.showWarningMessage("That file cannot be attached to M3 chat.");
+      vscode.window.showWarningMessage("That file cannot be attached to MM3 chat.");
       return;
     }
 
@@ -528,12 +528,12 @@ export class M3ViewProvider
     this.postContextParts();
     await this.focusChat();
     vscode.window.showInformationMessage(
-      `Added ${relativePath}:${startLine}-${endLine} to M3 chat`
+      `Added ${relativePath}:${startLine}-${endLine} to MM3 chat`
     );
   }
 
   async focusChat(): Promise<void> {
-    flow("M3ViewProvider.focusChat", 1, "enter");
+    flow("MM3ViewProvider.focusChat", 1, "enter");
     try {
       await vscode.commands.executeCommand("workbench.view.extension.m3");
     } catch {
@@ -541,7 +541,7 @@ export class M3ViewProvider
     }
     this.show();
     try {
-      await vscode.commands.executeCommand(`${M3ViewProvider.viewType}.focus`);
+      await vscode.commands.executeCommand(`${MM3ViewProvider.viewType}.focus`);
     } catch {
       // View focus command is unavailable until the webview has resolved.
     }
@@ -550,7 +550,7 @@ export class M3ViewProvider
   private postContextParts(
     parts: ContextPart[] = this.selectedContext
   ): void {
-    flow("M3ViewProvider.postContextParts", 1, "enter", { count: parts.length });
+    flow("MM3ViewProvider.postContextParts", 1, "enter", { count: parts.length });
     this.post({
       type: "context",
       parts: parts.map((part) => ({
@@ -570,7 +570,7 @@ export class M3ViewProvider
     startLine?: number,
     endLine?: number
   ): Promise<void> {
-    flow("M3ViewProvider.openCitation", 1, "enter", { filePath, startLine, endLine });
+    flow("MM3ViewProvider.openCitation", 1, "enter", { filePath, startLine, endLine });
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace || !isSafeContextPath(filePath)) {
       return;
@@ -596,7 +596,7 @@ export class M3ViewProvider
   private getErrorMessage(
     error: unknown
   ): string {
-    flow("M3ViewProvider.getErrorMessage", 1, "enter");
+    flow("MM3ViewProvider.getErrorMessage", 1, "enter");
 
     if (typeof error === "string" && error.trim()) {
       return this.sanitizeUserError(error);
@@ -622,10 +622,10 @@ export class M3ViewProvider
     if (!text) {
       return formatUserFacingError("unexpected");
     }
-    if (text.includes(M3_CRM_URL) || text.includes(M3_SUPPORT_EMAIL)) {
+    if (text.includes(MM3_CRM_URL) || text.includes(MM3_SUPPORT_EMAIL)) {
       return text;
     }
-    if (text === "M3 is already processing another request.") {
+    if (text === "MM3 is already processing another request.") {
       return text;
     }
     if (
@@ -635,7 +635,7 @@ export class M3ViewProvider
     ) {
       return formatUserFacingError(
         "api",
-        "The M3 service did not respond in time. Please try again."
+        "The MM3 service did not respond in time. Please try again."
       );
     }
     return formatUserFacingError(classifyErrorMessage(text), text);
@@ -684,14 +684,14 @@ export class M3ViewProvider
   private formatAnswer(
     response: AIResponse
   ): string {
-    flow("M3ViewProvider.formatAnswer", 1, "enter");
+    flow("MM3ViewProvider.formatAnswer", 1, "enter");
     return response.answer;
   }
 
   private post(
     message: WebviewResponse
   ): void {
-    flow("M3ViewProvider.post", 1, "enter", { type: message.type });
+    flow("MM3ViewProvider.post", 1, "enter", { type: message.type });
 
     if (!this.view) {
       return;
@@ -705,7 +705,7 @@ export class M3ViewProvider
   private getHtml(
     webview: vscode.Webview
   ): string {
-    flow("M3ViewProvider.getHtml", 1, "enter");
+    flow("MM3ViewProvider.getHtml", 1, "enter");
 
     const nonce =
       this.getNonce();
@@ -736,7 +736,7 @@ export class M3ViewProvider
   content="width=device-width, initial-scale=1.0"
 >
 
-<title>M3 AI Agent</title>
+<title>MM3 AI Agent</title>
 
 <style>
 
@@ -1571,7 +1571,7 @@ textarea:disabled {
 
     <div class="header-title">
 
-      <span>M3 AI Agent</span>
+      <span>MM3 AI Agent</span>
       <span id="wallet-balance" class="credits">0 credits</span>
       <span id="model" class="model"></span>
 
@@ -1592,7 +1592,7 @@ textarea:disabled {
       id="empty"
       class="empty"
     >
-Describe the task, bug, or issue you want M3 to investigate or fix.
+Describe the task, bug, or issue you want MM3 to investigate or fix.
 
     </div>
 
@@ -1610,8 +1610,8 @@ Describe the task, bug, or issue you want M3 to investigate or fix.
       <textarea
         id="input"
         rows="1"
-        placeholder="Ask M3"
-        aria-label="Ask M3"
+        placeholder="Ask MM3"
+        aria-label="Ask MM3"
       ></textarea>
       <div class="composer-toolbar">
         <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
@@ -1781,7 +1781,7 @@ function renderInlineMarkdown(text) {
         );
 
         return (
-          "___M3_INLINE_CODE_" +
+          "___MM3_INLINE_CODE_" +
           index +
           "___"
         );
@@ -1802,7 +1802,7 @@ function renderInlineMarkdown(text) {
 
   value =
     value.replace(
-      /___M3_INLINE_CODE_(\\d+)___/g,
+      /___MM3_INLINE_CODE_(\\d+)___/g,
       (_, index) =>
         inlineCodes[
           Number(index)
@@ -1842,7 +1842,7 @@ function renderMarkdown(markdown) {
         });
 
         return (
-          "\\n___M3_CODE_BLOCK_" +
+          "\\n___MM3_CODE_BLOCK_" +
           index +
           "___\\n"
         );
@@ -1923,7 +1923,7 @@ function renderMarkdown(markdown) {
 
     const codeMatch =
       trimmed.match(
-        /^___M3_CODE_BLOCK_(\\d+)___$/
+        /^___MM3_CODE_BLOCK_(\\d+)___$/
       );
 
     if (codeMatch) {
@@ -3151,7 +3151,7 @@ window.addEventListener(
           "empty";
 
         newEmpty.textContent =
-          "Ask M3 about your project.";
+          "Ask MM3 about your project.";
 
         messages.appendChild(
           newEmpty
@@ -3183,7 +3183,7 @@ input.focus();
   }
 
   private getNonce(): string {
-    flow("M3ViewProvider.getNonce", 1, "enter");
+    flow("MM3ViewProvider.getNonce", 1, "enter");
 
     const chars =
       "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";

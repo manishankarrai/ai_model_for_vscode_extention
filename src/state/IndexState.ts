@@ -9,7 +9,7 @@ import {
 export class IndexState {
 
   private readonly key =
-    "m3.index.metadata";
+    "mm3.index.metadata";
 
   constructor(
     private readonly storage:

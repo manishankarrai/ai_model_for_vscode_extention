@@ -1,9 +1,9 @@
 {
-  "name": "m3-ai-agent",
-  "displayName": "M3 AI Agent",
+  "name": "mm3-ai-agent",
+  "displayName": "MM3 AI Agent",
   "description": "Read-only local-first AI coding agent for VS Code",
   "version": "0.0.1",
-  "publisher": "m3-ai",
+  "publisher": "mm3-ai",
   "license": "MIT",
   "engines": {
     "vscode": "^1.90.0"
@@ -14,82 +14,82 @@
   ],
   "activationEvents": [
     "onStartupFinished",
-    "onView:m3.chat"
+    "onView:mm3.chat"
   ],
   "main": "./dist/extension.js",
   "contributes": {
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "m3",
-          "title": "M3",
-          "icon": "media/m3.svg"
+          "id": "mm3",
+          "title": "MM3",
+          "icon": "media/mm3.svg"
         }
       ]
     },
     "views": {
-      "m3": [
+      "mm3": [
         {
-          "id": "m3.chat",
-          "name": "M3 AI Agent",
+          "id": "mm3.chat",
+          "name": "MM3 AI Agent",
           "type": "webview"
         }
       ]
     },
     "commands": [
       {
-        "command": "m3.openChat",
-        "title": "M3: Open Chat"
+        "command": "mm3.openChat",
+        "title": "MM3: Open Chat"
       },
       {
-        "command": "m3.scanProject",
-        "title": "M3: Scan Project"
+        "command": "mm3.scanProject",
+        "title": "MM3: Scan Project"
       },
       {
-        "command": "m3.rebuildIndex",
-        "title": "M3: Rebuild Index"
+        "command": "mm3.rebuildIndex",
+        "title": "MM3: Rebuild Index"
       },
       {
-        "command": "m3.clearConversation",
-        "title": "M3: Clear Conversation"
+        "command": "mm3.clearConversation",
+        "title": "MM3: Clear Conversation"
       },
       {
-        "command": "m3.rollbackLastChanges",
-        "title": "M3: Roll Back Last Approved Changes"
+        "command": "mm3.rollbackLastChanges",
+        "title": "MM3: Roll Back Last Approved Changes"
       },
       {
-        "command": "m3.inspectProject",
-        "title": "M3: Inspect Project"
+        "command": "mm3.inspectProject",
+        "title": "MM3: Inspect Project"
       },
       {
-        "command": "m3.addSelectionToChat",
-        "title": "M3: Add Selection to Chat"
+        "command": "mm3.addSelectionToChat",
+        "title": "MM3: Add Selection to Chat"
       },
       {
-        "command": "m3.resetAccessToken",
-        "title": "M3: Reset Access Token",
+        "command": "mm3.resetAccessToken",
+        "title": "MM3: Reset Access Token",
         "icon": "$(key)"
       }
     ],
     "configuration": {
-      "title": "M3 AI Agent",
+      "title": "MM3 AI Agent",
       "properties": {
-        "m3.backendUrl": {
+        "mm3.backendUrl": {
           "type": "string",
           "default": "http://localhost:8080",
-          "description": "M3 backend URL"
+          "description": "MM3 backend URL"
         },
-        "m3.maxContextChars": {
+        "mm3.maxContextChars": {
           "type": "number",
           "default": 5000000,
           "description": "Maximum source context sent to the backend"
         },
-        "m3.maxFilesInContext": {
+        "mm3.maxFilesInContext": {
           "type": "number",
           "default": 1000,
           "description": "Maximum files selected for AI context"
         },
-        "m3.enableAutoIndex": {
+        "mm3.enableAutoIndex": {
           "type": "boolean",
           "default": true,
           "description": "Automatically index the workspace"
@@ -99,18 +99,18 @@
     "menus": {
       "editor/context": [
         {
-          "command": "m3.openChat",
+          "command": "mm3.openChat",
           "when": "editorTextFocus"
         },
         {
-          "command": "m3.addSelectionToChat",
+          "command": "mm3.addSelectionToChat",
           "when": "editorHasSelection",
           "group": "navigation@9"
         }
       ],
       "editor/title/context": [
         {
-          "command": "m3.addSelectionToChat",
+          "command": "mm3.addSelectionToChat",
           "when": "editorHasSelection",
           "group": "1_modification"
         }

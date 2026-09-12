@@ -112,14 +112,14 @@ export class CodeChangeApplier {
     }
 
     if (changes.length > MAX_CHANGES) {
-      throw new Error("M3 proposed too many file changes.");
+      throw new Error("MM3 proposed too many file changes.");
     }
 
     assertWorkspaceTrusted(vscode.workspace.isTrusted);
 
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
-      throw new Error("M3 cannot apply changes without an open workspace.");
+      throw new Error("MM3 cannot apply changes without an open workspace.");
     }
 
     const changeSet = createNamedChangeSet(changes, changeSetName);
@@ -283,7 +283,7 @@ export class CodeChangeApplier {
       : (changeSet?.appliedSnapshot ?? []).map((item) => {
           const workspace = vscode.workspace.workspaceFolders?.[0];
           if (!workspace) {
-            throw new Error("M3 cannot roll back without an open workspace.");
+            throw new Error("MM3 cannot roll back without an open workspace.");
           }
           return {
             uri: vscode.Uri.joinPath(workspace.uri, ...item.path.split("/")),
@@ -296,7 +296,7 @@ export class CodeChangeApplier {
         });
 
     if (targets.length === 0) {
-      vscode.window.showInformationMessage("M3 has no approved changes to roll back.");
+      vscode.window.showInformationMessage("MM3 has no approved changes to roll back.");
       return;
     }
 
@@ -336,7 +336,7 @@ export class CodeChangeApplier {
     }
 
     if (!await vscode.workspace.applyEdit(edit)) {
-      throw new Error("M3 could not roll back the approved changes.");
+      throw new Error("MM3 could not roll back the approved changes.");
     }
 
     for (const change of targets) {
@@ -361,8 +361,8 @@ export class CodeChangeApplier {
     this.dismissPending();
     vscode.window.showInformationMessage(
       changeSet
-        ? `M3 rolled back "${changeSet.name}".`
-        : "M3 rolled back the last approved changes."
+        ? `MM3 rolled back "${changeSet.name}".`
+        : "MM3 rolled back the last approved changes."
     );
   }
 
@@ -471,7 +471,7 @@ export class CodeChangeApplier {
       return;
     }
 
-    const tmpDir = path.join(os.tmpdir(), "m3-ai-diff");
+    const tmpDir = path.join(os.tmpdir(), "mm3-ai-diff");
     await vscode.workspace.fs.createDirectory(vscode.Uri.file(tmpDir));
     const safe = filePath.replace(/[^a-zA-Z0-9._-]+/g, "_");
     const leftUri = vscode.Uri.file(path.join(tmpDir, `${safe}.original`));
@@ -579,7 +579,7 @@ export class CodeChangeApplier {
   private resolveWorkspaceUri(relativePath: string): vscode.Uri {
     const workspace = vscode.workspace.workspaceFolders?.[0];
     if (!workspace) {
-      throw new Error("M3 cannot apply changes without an open workspace.");
+      throw new Error("MM3 cannot apply changes without an open workspace.");
     }
     const normalized = validateWorkspaceRelativePath(relativePath);
     assertNotSensitivePath(normalized);

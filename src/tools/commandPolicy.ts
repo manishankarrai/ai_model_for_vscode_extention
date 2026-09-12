@@ -61,7 +61,7 @@ export function parseSafeCommand(command: string): ParsedCommand {
   }
 
   if (/[|;&`$<>\n(){}]/.test(trimmed) || trimmed.includes("$(")) {
-    throw new Error("M3 rejected a command that uses shell metacharacters.");
+    throw new Error("MM3 rejected a command that uses shell metacharacters.");
   }
 
   const parts = trimmed.split(/\s+/).filter(Boolean);
@@ -70,14 +70,14 @@ export function parseSafeCommand(command: string): ParsedCommand {
 
   if (!ALLOWED_BINARIES.has(normalizedBinary)) {
     throw new Error(
-      `M3 blocked command binary '${binary}'. Use an allowlisted tool such as npm, go, pytest, or git.`
+      `MM3 blocked command binary '${binary}'. Use an allowlisted tool such as npm, go, pytest, or git.`
     );
   }
 
   if (normalizedBinary === "git") {
     const joined = parts.slice(1).join(" ").toLowerCase();
     if (BLOCKED_GIT_ARGS.some((item) => joined.includes(item))) {
-      throw new Error("M3 blocked a destructive git command.");
+      throw new Error("MM3 blocked a destructive git command.");
     }
   }
 

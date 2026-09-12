@@ -46,7 +46,7 @@ export class BackendClient {
     flow("BackendClient.constructor", 1, "enter");
     this.backendUrl =
       vscode.workspace
-        .getConfiguration("m3")
+        .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
           "http://localhost:8080"
@@ -327,7 +327,7 @@ export class BackendClient {
     return new Error(
       formatUserFacingError(
         "api",
-        detail?.trim() || `The M3 API returned an error (${status}).`
+        detail?.trim() || `The MM3 API returned an error (${status}).`
       )
     );
   }

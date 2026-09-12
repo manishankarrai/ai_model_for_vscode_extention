@@ -1,7 +1,7 @@
 import { flow } from "../utils/flowLog";
 
-export const M3_CRM_URL = "https://crm.mm3ai.com";
-export const M3_SUPPORT_EMAIL = "support@mm3ai.com";
+export const MM3_CRM_URL = "https://crm.mm3ai.com";
+export const MM3_SUPPORT_EMAIL = "support@mm3ai.com";
 
 export type UserFacingErrorKind = "auth" | "api" | "unexpected";
 
@@ -27,21 +27,21 @@ export function formatUserFacingError(
   if (kind === "auth") {
     return [
       detail?.trim() || "Sign-in failed or your access token expired.",
-      `Reset your token at ${M3_CRM_URL}, then paste it with the key button in M3.`,
-      `If something else is wrong, email ${M3_SUPPORT_EMAIL}.`
+      `Reset your token at ${MM3_CRM_URL}, then paste it with the key button in MM3.`,
+      `If something else is wrong, email ${MM3_SUPPORT_EMAIL}.`
     ].join("\n\n");
   }
 
   const headline =
     detail?.trim() ||
     (kind === "api"
-      ? "The M3 API could not complete this request."
+      ? "The MM3 API could not complete this request."
       : "Something unexpected went wrong.");
 
   return [
     headline,
-    `If your token expired, reset it at ${M3_CRM_URL}.`,
-    `For other unexpected errors, email ${M3_SUPPORT_EMAIL}.`
+    `If your token expired, reset it at ${MM3_CRM_URL}.`,
+    `For other unexpected errors, email ${MM3_SUPPORT_EMAIL}.`
   ].join("\n\n");
 }
 
@@ -65,7 +65,7 @@ export function formatConnectError(_error: unknown): Error {
   return new Error(
     formatUserFacingError(
       "api",
-      "Unable to reach M3 AI. Check your connection and try again."
+      "Unable to reach MM3 AI. Check your connection and try again."
     )
   );
 }
@@ -73,7 +73,7 @@ export function formatConnectError(_error: unknown): Error {
 export function userFacingErrorHelp(kind: UserFacingErrorKind): UserFacingErrorHelp {
   return {
     kind,
-    crmUrl: M3_CRM_URL,
-    supportEmail: M3_SUPPORT_EMAIL
+    crmUrl: MM3_CRM_URL,
+    supportEmail: MM3_SUPPORT_EMAIL
   };
 }

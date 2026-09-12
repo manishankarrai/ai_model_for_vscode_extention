@@ -237,7 +237,7 @@ export class WorkspaceToolRegistry {
       // no pytest.ini
     }
 
-    throw new Error("M3 could not detect a test command for this workspace.");
+    throw new Error("MM3 could not detect a test command for this workspace.");
   }
 
   private async runCommand(
@@ -312,13 +312,13 @@ export class WorkspaceToolRegistry {
     if (diffs.length === 0) {
       return [
         "Git is not available in this workspace.",
-        "M3 still shows file differences from before/after content when it edits files — no git repo is required for that.",
-        "Open the chat diffs after an edit, or ask M3 to apply changes so an in-memory diff can be shown here."
+        "MM3 still shows file differences from before/after content when it edits files — no git repo is required for that.",
+        "Open the chat diffs after an edit, or ask MM3 to apply changes so an in-memory diff can be shown here."
       ].join("\n");
     }
     const header = tool === "git_status"
-      ? "Git is not available. Files M3 changed this session:"
-      : "Git is not available. In-memory before/after diffs of files M3 changed:";
+      ? "Git is not available. Files MM3 changed this session:"
+      : "Git is not available. In-memory before/after diffs of files MM3 changed:";
     const body = diffs.map((item) => {
       if (tool === "git_status") {
         return `${item.original ? "M" : "A"} ${item.path}`;

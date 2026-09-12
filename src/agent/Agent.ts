@@ -305,7 +305,7 @@ export class Agent {
 
 
     this.logger.info(
-      "M3 task started",
+      "MM3 task started",
       {
         requestId,
         intent
@@ -635,7 +635,7 @@ export class Agent {
 
       const config =
         vscode.workspace
-          .getConfiguration("m3");
+          .getConfiguration("mm3");
 
 
       const maxFiles =
@@ -907,7 +907,7 @@ export class Agent {
 
 
       this.logger.info(
-        "M3 task completed",
+        "MM3 task completed",
         {
           requestId,
 
@@ -944,7 +944,7 @@ export class Agent {
 
 
       this.logger.error(
-        "M3 task failed",
+        "MM3 task failed",
         error
       );
 

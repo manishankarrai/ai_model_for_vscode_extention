@@ -1,4 +1,4 @@
-# M3 Development Roadmap
+# MM3 Development Roadmap
 
 ## Current Development Stage
 
@@ -6,7 +6,7 @@
 
 Status: WALLET CREDITS AND DYNAMIC AGENTS IMPLEMENTED in the extension and backend.
 
-The system now supports a local adaptive reasoning loop in which Gemini can request additional read-only evidence, M3 validates and executes the tool locally, and the loop continues until a final answer or a hard stop condition is reached.
+The system now supports a local adaptive reasoning loop in which Gemini can request additional read-only evidence, MM3 validates and executes the tool locally, and the loop continues until a final answer or a hard stop condition is reached.
 
 ### Current Pipeline
 
@@ -57,7 +57,7 @@ Backend / Gemini
 
 ### Important Principle
 
-M3 must **NOT** expose direct filesystem access to Gemini.
+MM3 must **NOT** expose direct filesystem access to Gemini.
 
 Instead:
 
@@ -68,7 +68,7 @@ Gemini
 Structured tool request
    │
    ▼
-M3 validation + safety checks
+MM3 validation + safety checks
    │
    ▼
 Local read-only tool execution
@@ -81,11 +81,11 @@ This preserves the local-first, privacy-safe architecture while enabling adaptiv
 
 ---
 
-# M3 Architecture
+# MM3 Architecture
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│                    M3 VS CODE EXTENSION                     │
+│                    MM3 VS CODE EXTENSION                     │
 │                  LOCAL-FIRST INVESTIGATION                  │
 │                                                             │
 │  ┌──────────────── PROJECT INTELLIGENCE ─────────────────┐  │
@@ -118,7 +118,7 @@ This preserves the local-first, privacy-safe architecture while enabling adaptiv
                                │ HTTPS
                                ▼
 ┌─────────────────────────────────────────────────────────────┐
-│                       M3 BACKEND                            │
+│                       MM3 BACKEND                            │
 │                   TRUSTED AI ORCHESTRATOR                  │
 │                                                             │
 │  ┌──────────────────── AI ENGINE ────────────────────────┐ │
@@ -133,7 +133,7 @@ This preserves the local-first, privacy-safe architecture while enabling adaptiv
 
 ---
 
-# M3 Development Stages
+# MM3 Development Stages
 
 ```text
 Stage 1
@@ -165,7 +165,7 @@ Safe Code Modification
    │
    ▼
 Stage 8
-Copilot-Level M3
+Copilot-Level MM3
 ```
 
 ---
@@ -233,10 +233,10 @@ Read-only safety verification
 
 ```text
 Gemini = reasoning engine
-M3 = authority over local access and stopping logic
+MM3 = authority over local access and stopping logic
 ```
 
-Gemini may request tools, but M3 validates, executes, and enforces the investigation guardrails.
+Gemini may request tools, but MM3 validates, executes, and enforces the investigation guardrails.
 
 ---
 
@@ -370,7 +370,7 @@ The next Stage 6 increment is richer code review and patch quality analysis.
 
 **Status: APPROVAL-GATED FOUNDATION IMPLEMENTED**
 
-M3 can now apply exact code changes only after explicit user approval. Gemini supplies complete original and updated file contents; the extension validates workspace-relative paths, rejects oversized or stale changes, applies the approved edits atomically, and saves the files. No automatic modification is permitted.
+MM3 can now apply exact code changes only after explicit user approval. Gemini supplies complete original and updated file contents; the extension validates workspace-relative paths, rejects oversized or stale changes, applies the approved edits atomically, and saves the files. No automatic modification is permitted.
 
 ### Included features
 
@@ -392,7 +392,7 @@ Richer review tooling and broader modification policies remain future Stage 7 wo
 
 **Status: FOUNDATION IMPLEMENTED**
 
-**Goal:** Let users control exactly what M3 sees.
+**Goal:** Let users control exactly what MM3 sees.
 
 Extension work:
 
@@ -420,7 +420,7 @@ Backend work:
 - Preserve source metadata so answers cite the exact file and selection.
 - Keep secrets and ignored files blocked server-side as a second safety boundary.
 
-Acceptance criteria: users can ask about only highlighted code or selected files, and M3 never silently expands that context.
+Acceptance criteria: users can ask about only highlighted code or selected files, and MM3 never silently expands that context.
 
 Remaining Stage 8 work: drag-and-drop files, durable per-conversation context history, and richer source citations.
 
@@ -451,7 +451,7 @@ Implemented foundation:
 
 ## Permission-Controlled Tool Foundation
 
-Before multi-agent orchestration, M3 now has a typed local tool registry shared by the Agent contract and backend policy model.
+Before multi-agent orchestration, MM3 now has a typed local tool registry shared by the Agent contract and backend policy model.
 
 Implemented tools:
 
@@ -577,7 +577,7 @@ Remaining Stage 11 work: richer retry history, event controls, and resumable ans
 
 **Status: QUALITY PRODUCTIZATION IMPLEMENTED**
 
-**Goal:** Make M3 feel fast and measurably intelligent.
+**Goal:** Make MM3 feel fast and measurably intelligent.
 
 Implemented foundation:
 
@@ -652,7 +652,7 @@ Command:
 
 Result:
   exit code 0
-  M3 build complete
+  MM3 build complete
 
 Backend verification:
    cd /home/rai/Documents/vscode/m3/m3backend && go test ./...

@@ -38,7 +38,7 @@ export function stage12EvaluationSet(): EvaluationCase[] {
       id: "selected-code",
       category: "selected_code",
       question: "What does the highlighted helper return?",
-      expectedPaths: ["src/ui/M3ViewProvider.ts"]
+      expectedPaths: ["src/ui/MM3ViewProvider.ts"]
     }
   ];
 }

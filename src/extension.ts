@@ -15,7 +15,7 @@ import { ProjectMemory } from "./state/ProjectMemory";
 
 import { Agent } from "./agent/Agent";
 
-import { M3ViewProvider } from "./ui/M3ViewProvider";
+import { MM3ViewProvider } from "./ui/MM3ViewProvider";
 import { CodeChangeApplier } from "./safety/CodeChangeApplier";
 import { ProjectUnderstanding } from "./project/project-understanding";
 
@@ -34,7 +34,7 @@ export function activate(
   );
 
   logger.info(
-    "M3 AI Agent activating..."
+    "MM3 AI Agent activating..."
   );
 
   // ----------------------------------------------------------
@@ -99,7 +99,7 @@ export function activate(
   // ----------------------------------------------------------
 
   const provider =
-    new M3ViewProvider(
+    new MM3ViewProvider(
       context.extensionUri,
 
       agent,
@@ -121,7 +121,7 @@ export function activate(
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
-      M3ViewProvider.viewType,
+      MM3ViewProvider.viewType,
       provider,
       {
         webviewOptions: {
@@ -134,7 +134,7 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.openChat",
+      "mm3.openChat",
       async () => {
         flow("command.openChat", 1, "enter");
         await provider.focusChat();
@@ -144,12 +144,12 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.resetAccessToken",
+      "mm3.resetAccessToken",
       async () => {
         flow("command.resetAccessToken", 1, "enter");
         const token = await resetAccessToken(context);
         if (token) {
-          vscode.window.showInformationMessage("M3 access token updated.");
+          vscode.window.showInformationMessage("MM3 access token updated.");
         }
       }
     )
@@ -157,7 +157,7 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.addSelectionToChat",
+      "mm3.addSelectionToChat",
       async () => {
         flow("command.addSelectionToChat", 1, "enter");
         await provider.attachCurrentSelection();
@@ -171,7 +171,7 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.scanProject",
+      "mm3.scanProject",
       async () => {
         flow("command.scanProject", 1, "enter");
 
@@ -192,7 +192,7 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.rebuildIndex",
+      "mm3.rebuildIndex",
       async () => {
         flow("command.rebuildIndex", 1, "enter");
 
@@ -214,14 +214,14 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.clearConversation",
+      "mm3.clearConversation",
       () => {
         flow("command.clearConversation", 1, "enter");
 
         agent.clearConversation();
 
         vscode.window.showInformationMessage(
-          "M3 conversation cleared."
+          "MM3 conversation cleared."
         );
       }
     )
@@ -229,7 +229,7 @@ export function activate(
 
   context.subscriptions.push(
     vscode.commands.registerCommand(
-      "m3.rollbackLastChanges",
+      "mm3.rollbackLastChanges",
       async () => {
         flow("command.rollbackLastChanges", 1, "enter");
         await provider.rollbackLastChanges();
@@ -242,7 +242,7 @@ export function activate(
 
 context.subscriptions.push(
   vscode.commands.registerCommand(
-    "m3.inspectProject",
+    "mm3.inspectProject",
     () => {
       flow("command.inspectProject", 1, "enter");
 
@@ -252,7 +252,7 @@ context.subscriptions.push(
       if (!model) {
 
         vscode.window.showWarningMessage(
-          "M3: Project understanding is not initialized."
+          "MM3: Project understanding is not initialized."
         );
 
         return;
@@ -316,7 +316,7 @@ context.subscriptions.push(
 
   const autoIndex =
     vscode.workspace
-      .getConfiguration("m3")
+      .getConfiguration("mm3")
       .get<boolean>(
         "enableAutoIndex",
         true
@@ -334,7 +334,7 @@ context.subscriptions.push(
   }
 
   logger.info(
-    "M3 AI Agent activated."
+    "MM3 AI Agent activated."
   );
 }
 
@@ -354,7 +354,7 @@ async function scanProject(
   if (!workspace) {
 
     vscode.window.showWarningMessage(
-      "M3: Please open a workspace first."
+      "MM3: Please open a workspace first."
     );
 
     return;
@@ -369,8 +369,8 @@ async function scanProject(
 
         title:
           force
-            ? "M3: Rebuilding project index..."
-            : "M3: Indexing project..."
+            ? "MM3: Rebuilding project index..."
+            : "MM3: Indexing project..."
       },
 
       async progress => {
@@ -469,7 +469,7 @@ async function scanProject(
     );
 
     vscode.window.showInformationMessage(
-      "M3 project index and project understanding are ready."
+      "MM3 project index and project understanding are ready."
     );
 
   } catch (error) {
@@ -480,7 +480,7 @@ async function scanProject(
     );
 
     vscode.window.showErrorMessage(
-      `M3 indexing failed: ${
+      `MM3 indexing failed: ${
         error instanceof Error
           ? error.message
           : String(error)
@@ -498,7 +498,7 @@ async function getAccessToken(
   if (!forcePrompt) {
     const token =
       await context.secrets.get(
-        "m3.accessToken"
+        "mm3.accessToken"
       );
 
     if (token) {
@@ -510,8 +510,8 @@ async function getAccessToken(
     await vscode.window.showInputBox({
       prompt:
         forcePrompt
-          ? "Enter a new M3 access token (replaces the stored token)"
-          : "Enter your M3 access token",
+          ? "Enter a new MM3 access token (replaces the stored token)"
+          : "Enter your MM3 access token",
 
       password: true,
 
@@ -523,7 +523,7 @@ async function getAccessToken(
   }
 
   await context.secrets.store(
-    "m3.accessToken",
+    "mm3.accessToken",
     entered.trim()
   );
 
@@ -534,7 +534,7 @@ async function resetAccessToken(
   context: vscode.ExtensionContext
 ): Promise<string> {
   flow("resetAccessToken", 1, "enter");
-  await context.secrets.delete("m3.accessToken");
+  await context.secrets.delete("mm3.accessToken");
   return getAccessToken(context, true);
 }
 

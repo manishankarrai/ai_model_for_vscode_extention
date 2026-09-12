@@ -31,7 +31,7 @@ export function validateWorkspaceRelativePath(filePath: string): string {
     relativePath.startsWith("/") ||
     relativePath.split("/").some((part) => part === "..")
   ) {
-    throw new Error(`M3 rejected unsafe change path: ${filePath}`);
+    throw new Error(`MM3 rejected unsafe change path: ${filePath}`);
   }
 
   return relativePath;
@@ -58,7 +58,7 @@ export function isSensitivePath(filePath: string): boolean {
 export function assertNotSensitivePath(filePath: string): void {
   flow("assertNotSensitivePath", 1, "enter");
   if (isSensitivePath(filePath)) {
-    throw new Error(`M3 rejected sensitive path: ${filePath}`);
+    throw new Error(`MM3 rejected sensitive path: ${filePath}`);
   }
 }
 
@@ -68,7 +68,7 @@ export function validateChangeSize(
   updated: string
 ): void {
   if (original.length > MAX_CHANGE_CHARS || updated.length > MAX_CHANGE_CHARS) {
-    throw new Error(`M3 rejected ${path}: proposed change is too large.`);
+    throw new Error(`MM3 rejected ${path}: proposed change is too large.`);
   }
 }
 
@@ -142,12 +142,12 @@ export function assertFileHashMatches(
 
   if (action === "rollback") {
     throw new Error(
-      `M3 rejected rollback: ${path} hash changed after the approved edit.`
+      `MM3 rejected rollback: ${path} hash changed after the approved edit.`
     );
   }
 
   throw new Error(
-    `M3 rejected ${path}: file hash changed since investigation.`
+    `MM3 rejected ${path}: file hash changed since investigation.`
   );
 }
 
@@ -166,12 +166,12 @@ export function assertFileNotStale(
 
   if (action === "rollback") {
     throw new Error(
-      `M3 rejected rollback: ${path} changed after the approved edit.`
+      `MM3 rejected rollback: ${path} changed after the approved edit.`
     );
   }
 
   throw new Error(
-    `M3 rejected ${path}: the file changed since investigation.`
+    `MM3 rejected ${path}: the file changed since investigation.`
   );
 }
 
@@ -179,7 +179,7 @@ export function assertWorkspaceTrusted(isTrusted: boolean): void {
   flow("assertWorkspaceTrusted", 1, "enter");
   if (!isTrusted) {
     throw new Error(
-      "M3 refused to write: workspace is not trusted. Enable workspace trust first."
+      "MM3 refused to write: workspace is not trusted. Enable workspace trust first."
     );
   }
 }

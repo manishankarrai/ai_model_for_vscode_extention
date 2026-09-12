@@ -7,7 +7,7 @@ export class Logger {
 
   constructor() {
     flow("Logger.constructor", 1, "create output channel");
-    this.output = vscode.window.createOutputChannel("M3 AI Agent");
+    this.output = vscode.window.createOutputChannel("MM3 AI Agent");
   }
 
   info(message: string, data?: unknown): void {

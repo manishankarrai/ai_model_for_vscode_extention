@@ -54,7 +54,7 @@ export class ReadOnlyGuard {
     ) {
 
       throw new Error(
-        `M3 Ask mode is read-only. Operation '${operation}' is blocked.`
+        `MM3 Ask mode is read-only. Operation '${operation}' is blocked.`
       );
     }
   }

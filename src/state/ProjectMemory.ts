@@ -55,7 +55,7 @@ interface ProjectMemoryData {
 }
 
 export class ProjectMemory {
-  private readonly key = "m3.project.memory.v1";
+  private readonly key = "mm3.project.memory.v1";
 
   private memory: ProjectMemoryData;
 

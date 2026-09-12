@@ -1,13 +1,13 @@
 import { flow } from "../utils/flowLog";
 
 import {
-  TaskState as M3TaskState
+  TaskState as MM3TaskState
 } from "../models/types";
 
 export class TaskState {
 
   private state:
-    M3TaskState = {
+    MM3TaskState = {
       requestId: "",
 
       question: "",
@@ -26,7 +26,7 @@ export class TaskState {
   start(
     requestId: string,
     question: string,
-    intent: M3TaskState["intent"]
+    intent: MM3TaskState["intent"]
   ): void {
 
     this.state = {
@@ -47,7 +47,7 @@ export class TaskState {
   }
 
   setStatus(
-    status: M3TaskState["status"]
+    status: MM3TaskState["status"]
   ): void {
 
     this.state.status =
@@ -90,7 +90,7 @@ export class TaskState {
       Date.now();
   }
 
-  get(): M3TaskState {
+  get(): MM3TaskState {
     flow("TaskState.get", 1, "enter");
     return {
       ...this.state,
