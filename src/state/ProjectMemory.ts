@@ -1,487 +1,335 @@
 import * as vscode from "vscode";
-
 import { ProjectModel } from "../project/project-model";
-import { flow } from "../utils/flowLog.ts";
-
-import {
-  formatConflictSummary,
-  MemoryConflict,
-  MemoryFact,
-  MemoryConflictResolution,
-  resolveMemoryConflicts
-} from "../safety/memoryConflict";
-
-export type ProjectMemoryEntryType =
-  | "architecture"
-  | "finding"
-  | "dependency"
-  | "convention"
-  | "decision";
-
+import { formatConflictSummary, MemoryConflict, MemoryFact, MemoryConflictResolution, resolveMemoryConflicts } from "../safety/memoryConflict";
+export type ProjectMemoryEntryType = "architecture" | "finding" | "dependency" | "convention" | "decision";
 export interface ProjectMemoryEntry {
-  id: string;
-  type: ProjectMemoryEntryType;
-  content: string;
-  source?: string;
-  createdAt: number;
+    id: string;
+    type: ProjectMemoryEntryType;
+    content: string;
+    source?: string;
+    createdAt: number;
 }
-
 export interface ProjectMemorySnapshot {
-  rootPath: string;
-  projectSummary: string;
-  languages: string[];
-  frameworks: string[];
-  files: string[];
-  findings: string[];
-  dependencies: string[];
-  conventions: string[];
-  architectureNotes: string[];
-  decisions: string[];
-  updatedAt: number;
+    rootPath: string;
+    projectSummary: string;
+    languages: string[];
+    frameworks: string[];
+    files: string[];
+    findings: string[];
+    dependencies: string[];
+    conventions: string[];
+    architectureNotes: string[];
+    decisions: string[];
+    updatedAt: number;
 }
-
 interface ProjectMemoryData {
-  rootPath: string;
-  projectSummary: string;
-  languages: string[];
-  frameworks: string[];
-  files: string[];
-  findings: string[];
-  dependencies: string[];
-  conventions: string[];
-  architectureNotes: string[];
-  decisions: string[];
-  updatedAt: number;
+    rootPath: string;
+    projectSummary: string;
+    languages: string[];
+    frameworks: string[];
+    files: string[];
+    findings: string[];
+    dependencies: string[];
+    conventions: string[];
+    architectureNotes: string[];
+    decisions: string[];
+    updatedAt: number;
 }
-
 export class ProjectMemory {
-  private readonly key = "mm3.project.memory.v1";
-
-  private memory: ProjectMemoryData;
-
-  constructor(
-    private readonly storage: vscode.Memento
-  ) {
-    const saved = this.storage.get<ProjectMemoryData>(this.key, {
-      rootPath: "",
-      projectSummary: "",
-      languages: [],
-      frameworks: [],
-      files: [],
-      findings: [],
-      dependencies: [],
-      conventions: [],
-      architectureNotes: [],
-      decisions: [],
-      updatedAt: Date.now()
-    });
-
-    this.memory = saved;
-  }
-
-  initializeFromProjectModel(
-    model: ProjectModel | undefined
-  ): void {
-    if (!model) {
-      return;
+    private readonly key = "mm3.project.memory.v1";
+    private memory: ProjectMemoryData;
+    constructor(private readonly storage: vscode.Memento) {
+        const saved = this.storage.get<ProjectMemoryData>(this.key, {
+            rootPath: "",
+            projectSummary: "",
+            languages: [],
+            frameworks: [],
+            files: [],
+            findings: [],
+            dependencies: [],
+            conventions: [],
+            architectureNotes: [],
+            decisions: [],
+            updatedAt: Date.now()
+        });
+        this.memory = saved;
     }
-
-    this.memory = {
-      rootPath: model.rootPath,
-      projectSummary: this.buildProjectSummary(model),
-      languages: [...new Set(model.languages)],
-      frameworks: [...new Set(model.frameworks)],
-      files: model.files.map((file) => file.path),
-      findings: [...this.memory.findings],
-      dependencies: [...this.memory.dependencies],
-      conventions: [...this.memory.conventions],
-      architectureNotes: this.memory.architectureNotes.length > 0
-        ? [...this.memory.architectureNotes]
-        : this.buildArchitectureNotes(model),
-      decisions: [...this.memory.decisions],
-      updatedAt: Date.now()
-    };
-  }
-
-  async save(): Promise<void> {
-    flow("ProjectMemory.save", 1, "enter");
-    await this.storage.update(this.key, this.memory);
-  }
-
-  recordFinding(
-    finding: string,
-    source?: string
-  ): void {
-    const next = this.normalizeEntry(finding);
-
-    if (!next) {
-      return;
+    initializeFromProjectModel(model: ProjectModel | undefined): void {
+        if (!model) {
+            return;
+        }
+        this.memory = {
+            rootPath: model.rootPath,
+            projectSummary: this.buildProjectSummary(model),
+            languages: [...new Set(model.languages)],
+            frameworks: [...new Set(model.frameworks)],
+            files: model.files.map((file) => file.path),
+            findings: [...this.memory.findings],
+            dependencies: [...this.memory.dependencies],
+            conventions: [...this.memory.conventions],
+            architectureNotes: this.memory.architectureNotes.length > 0
+                ? [...this.memory.architectureNotes]
+                : this.buildArchitectureNotes(model),
+            decisions: [...this.memory.decisions],
+            updatedAt: Date.now()
+        };
     }
-
-    this.memory.findings = this.addUniqueValue(
-      this.memory.findings,
-      next
-    );
-
-    if (source) {
-      this.memory.architectureNotes = this.addUniqueValue(
-        this.memory.architectureNotes,
-        `Source: ${source}`
-      );
+    async save(): Promise<void> {
+        await this.storage.update(this.key, this.memory);
     }
-
-    this.touch();
-  }
-
-  recordArchitectureNote(
-    note: string,
-    source?: string
-  ): void {
-    const next = this.normalizeEntry(note);
-
-    if (!next) {
-      return;
+    recordFinding(finding: string, source?: string): void {
+        const next = this.normalizeEntry(finding);
+        if (!next) {
+            return;
+        }
+        this.memory.findings = this.addUniqueValue(this.memory.findings, next);
+        if (source) {
+            this.memory.architectureNotes = this.addUniqueValue(this.memory.architectureNotes, `Source: ${source}`);
+        }
+        this.touch();
     }
-
-    this.memory.architectureNotes = this.addUniqueValue(
-      this.memory.architectureNotes,
-      source
-        ? `${source}: ${next}`
-        : next
-    );
-
-    this.touch();
-  }
-
-  recordDecision(
-    decision: string
-  ): void {
-    const next = this.normalizeEntry(decision);
-
-    if (!next) {
-      return;
+    recordArchitectureNote(note: string, source?: string): void {
+        const next = this.normalizeEntry(note);
+        if (!next) {
+            return;
+        }
+        this.memory.architectureNotes = this.addUniqueValue(this.memory.architectureNotes, source
+            ? `${source}: ${next}`
+            : next);
+        this.touch();
     }
-
-    this.memory.decisions = this.addUniqueValue(
-      this.memory.decisions,
-      next
-    );
-
-    this.touch();
-  }
-
-  addImportantDependency(
-    dependency: string
-  ): void {
-    const next = this.normalizeEntry(dependency);
-
-    if (!next) {
-      return;
+    recordDecision(decision: string): void {
+        const next = this.normalizeEntry(decision);
+        if (!next) {
+            return;
+        }
+        this.memory.decisions = this.addUniqueValue(this.memory.decisions, next);
+        this.touch();
     }
-
-    this.memory.dependencies = this.addUniqueValue(
-      this.memory.dependencies,
-      next
-    );
-
-    this.touch();
-  }
-
-  addProjectConvention(
-    convention: string
-  ): void {
-    const next = this.normalizeEntry(convention);
-
-    if (!next) {
-      return;
+    addImportantDependency(dependency: string): void {
+        const next = this.normalizeEntry(dependency);
+        if (!next) {
+            return;
+        }
+        this.memory.dependencies = this.addUniqueValue(this.memory.dependencies, next);
+        this.touch();
     }
-
-    this.memory.conventions = this.addUniqueValue(
-      this.memory.conventions,
-      next
-    );
-
-    this.touch();
-  }
-
-  addInvestigationArtifacts(
-    artifacts: {
-      findings?: string[];
-      dependencies?: string[];
-      conventions?: string[];
-      architectureNotes?: string[];
-      decisions?: string[];
+    addProjectConvention(convention: string): void {
+        const next = this.normalizeEntry(convention);
+        if (!next) {
+            return;
+        }
+        this.memory.conventions = this.addUniqueValue(this.memory.conventions, next);
+        this.touch();
     }
-  ): void {
-    for (const finding of artifacts.findings ?? []) {
-      this.recordFinding(finding);
+    addInvestigationArtifacts(artifacts: {
+        findings?: string[];
+        dependencies?: string[];
+        conventions?: string[];
+        architectureNotes?: string[];
+        decisions?: string[];
+    }): void {
+        for (const finding of artifacts.findings ?? []) {
+            this.recordFinding(finding);
+        }
+        for (const dependency of artifacts.dependencies ?? []) {
+            this.addImportantDependency(dependency);
+        }
+        for (const convention of artifacts.conventions ?? []) {
+            this.addProjectConvention(convention);
+        }
+        for (const note of artifacts.architectureNotes ?? []) {
+            this.recordArchitectureNote(note);
+        }
+        for (const decision of artifacts.decisions ?? []) {
+            this.recordDecision(decision);
+        }
     }
-
-    for (const dependency of artifacts.dependencies ?? []) {
-      this.addImportantDependency(dependency);
+    mergeBackendFacts(backend: {
+        findings?: string[];
+        dependencies?: string[];
+        conventions?: string[];
+        architectureNotes?: string[];
+        decisions?: string[];
+    }, preference: MemoryConflictResolution = "keep_both"): MemoryConflict[] {
+        const localFacts: MemoryFact[] = [
+            ...this.memory.findings.map((content) => ({
+                kind: "finding" as const,
+                content,
+                source: "local" as const
+            })),
+            ...this.memory.dependencies.map((content) => ({
+                kind: "dependency" as const,
+                content,
+                source: "local" as const
+            })),
+            ...this.memory.conventions.map((content) => ({
+                kind: "convention" as const,
+                content,
+                source: "local" as const
+            })),
+            ...this.memory.architectureNotes.map((content) => ({
+                kind: "architecture" as const,
+                content,
+                source: "local" as const
+            })),
+            ...this.memory.decisions.map((content) => ({
+                kind: "decision" as const,
+                content,
+                source: "local" as const
+            }))
+        ];
+        const backendFacts: MemoryFact[] = [
+            ...(backend.findings ?? []).map((content) => ({
+                kind: "finding" as const,
+                content,
+                source: "backend" as const
+            })),
+            ...(backend.dependencies ?? []).map((content) => ({
+                kind: "dependency" as const,
+                content,
+                source: "backend" as const
+            })),
+            ...(backend.conventions ?? []).map((content) => ({
+                kind: "convention" as const,
+                content,
+                source: "backend" as const
+            })),
+            ...(backend.architectureNotes ?? []).map((content) => ({
+                kind: "architecture" as const,
+                content,
+                source: "backend" as const
+            })),
+            ...(backend.decisions ?? []).map((content) => ({
+                kind: "decision" as const,
+                content,
+                source: "backend" as const
+            }))
+        ];
+        const { merged, conflicts } = resolveMemoryConflicts(localFacts, backendFacts, preference);
+        this.memory.findings = merged
+            .filter((fact) => fact.kind === "finding")
+            .map((fact) => fact.content)
+            .slice(-50);
+        this.memory.dependencies = merged
+            .filter((fact) => fact.kind === "dependency")
+            .map((fact) => fact.content)
+            .slice(-50);
+        this.memory.conventions = merged
+            .filter((fact) => fact.kind === "convention")
+            .map((fact) => fact.content)
+            .slice(-50);
+        this.memory.architectureNotes = merged
+            .filter((fact) => fact.kind === "architecture")
+            .map((fact) => fact.content)
+            .slice(-50);
+        this.memory.decisions = merged
+            .filter((fact) => fact.kind === "decision")
+            .map((fact) => fact.content)
+            .slice(-50);
+        if (conflicts.length > 0) {
+            this.memory.decisions = this.addUniqueValue(this.memory.decisions, `Memory conflict resolution (${preference}): ${formatConflictSummary(conflicts)}`);
+        }
+        this.touch();
+        return conflicts;
     }
-
-    for (const convention of artifacts.conventions ?? []) {
-      this.addProjectConvention(convention);
+    getSnapshot(): ProjectMemorySnapshot {
+        return {
+            rootPath: this.memory.rootPath,
+            projectSummary: this.memory.projectSummary,
+            languages: [...this.memory.languages],
+            frameworks: [...this.memory.frameworks],
+            files: [...this.memory.files],
+            findings: [...this.memory.findings],
+            dependencies: [...this.memory.dependencies],
+            conventions: [...this.memory.conventions],
+            architectureNotes: [...this.memory.architectureNotes],
+            decisions: [...this.memory.decisions],
+            updatedAt: this.memory.updatedAt
+        };
     }
-
-    for (const note of artifacts.architectureNotes ?? []) {
-      this.recordArchitectureNote(note);
+    getContextForAI(): string {
+        const snapshot = this.getSnapshot();
+        return [
+            snapshot.projectSummary,
+            snapshot.architectureNotes.length > 0
+                ? `Architecture notes: ${snapshot.architectureNotes.join("; ")}`
+                : "Architecture notes: none",
+            snapshot.findings.length > 0
+                ? `Findings: ${snapshot.findings.join("; ")}`
+                : "Findings: none",
+            snapshot.dependencies.length > 0
+                ? `Important dependencies: ${snapshot.dependencies.join(", ")}`
+                : "Important dependencies: none",
+            snapshot.conventions.length > 0
+                ? `Conventions: ${snapshot.conventions.join("; ")}`
+                : "Conventions: none"
+        ].join("\n");
     }
-
-    for (const decision of artifacts.decisions ?? []) {
-      this.recordDecision(decision);
+    async clear(): Promise<void> {
+        this.memory = {
+            rootPath: "",
+            projectSummary: "",
+            languages: [],
+            frameworks: [],
+            files: [],
+            findings: [],
+            dependencies: [],
+            conventions: [],
+            architectureNotes: [],
+            decisions: [],
+            updatedAt: Date.now()
+        };
+        await this.storage.update(this.key, undefined);
     }
-  }
-
-  /**
-   * Merge backend memory facts with local memory.
-   * Conflicts are resolved explicitly (default: keep both).
-   */
-  mergeBackendFacts(
-    backend: {
-      findings?: string[];
-      dependencies?: string[];
-      conventions?: string[];
-      architectureNotes?: string[];
-      decisions?: string[];
-    },
-    preference: MemoryConflictResolution = "keep_both"
-  ): MemoryConflict[] {
-    const localFacts: MemoryFact[] = [
-      ...this.memory.findings.map((content) => ({
-        kind: "finding" as const,
-        content,
-        source: "local" as const
-      })),
-      ...this.memory.dependencies.map((content) => ({
-        kind: "dependency" as const,
-        content,
-        source: "local" as const
-      })),
-      ...this.memory.conventions.map((content) => ({
-        kind: "convention" as const,
-        content,
-        source: "local" as const
-      })),
-      ...this.memory.architectureNotes.map((content) => ({
-        kind: "architecture" as const,
-        content,
-        source: "local" as const
-      })),
-      ...this.memory.decisions.map((content) => ({
-        kind: "decision" as const,
-        content,
-        source: "local" as const
-      }))
-    ];
-
-    const backendFacts: MemoryFact[] = [
-      ...(backend.findings ?? []).map((content) => ({
-        kind: "finding" as const,
-        content,
-        source: "backend" as const
-      })),
-      ...(backend.dependencies ?? []).map((content) => ({
-        kind: "dependency" as const,
-        content,
-        source: "backend" as const
-      })),
-      ...(backend.conventions ?? []).map((content) => ({
-        kind: "convention" as const,
-        content,
-        source: "backend" as const
-      })),
-      ...(backend.architectureNotes ?? []).map((content) => ({
-        kind: "architecture" as const,
-        content,
-        source: "backend" as const
-      })),
-      ...(backend.decisions ?? []).map((content) => ({
-        kind: "decision" as const,
-        content,
-        source: "backend" as const
-      }))
-    ];
-
-    const { merged, conflicts } = resolveMemoryConflicts(
-      localFacts,
-      backendFacts,
-      preference
-    );
-
-    this.memory.findings = merged
-      .filter((fact) => fact.kind === "finding")
-      .map((fact) => fact.content)
-      .slice(-50);
-    this.memory.dependencies = merged
-      .filter((fact) => fact.kind === "dependency")
-      .map((fact) => fact.content)
-      .slice(-50);
-    this.memory.conventions = merged
-      .filter((fact) => fact.kind === "convention")
-      .map((fact) => fact.content)
-      .slice(-50);
-    this.memory.architectureNotes = merged
-      .filter((fact) => fact.kind === "architecture")
-      .map((fact) => fact.content)
-      .slice(-50);
-    this.memory.decisions = merged
-      .filter((fact) => fact.kind === "decision")
-      .map((fact) => fact.content)
-      .slice(-50);
-
-    if (conflicts.length > 0) {
-      this.memory.decisions = this.addUniqueValue(
-        this.memory.decisions,
-        `Memory conflict resolution (${preference}): ${formatConflictSummary(conflicts)}`
-      );
+    private buildProjectSummary(model: ProjectModel): string {
+        const languageSummary = model.languages.length > 0
+            ? model.languages.join(", ")
+            : "Unknown";
+        const frameworkSummary = model.frameworks.length > 0
+            ? model.frameworks.join(", ")
+            : "None detected";
+        return [
+            `Project root: ${model.rootPath}`,
+            `Languages: ${languageSummary}`,
+            `Frameworks: ${frameworkSummary}`,
+            `Files: ${model.files.length}`,
+            `Entry points: ${model.entryPoints.length}`,
+            `Modules: ${model.modules.length}`,
+            `Tests: ${model.testFiles.length}`
+        ].join(" | ");
     }
-
-    this.touch();
-    return conflicts;
-  }
-
-  getSnapshot(): ProjectMemorySnapshot {
-    flow("ProjectMemory.getSnapshot", 1, "enter");
-    return {
-      rootPath: this.memory.rootPath,
-      projectSummary: this.memory.projectSummary,
-      languages: [...this.memory.languages],
-      frameworks: [...this.memory.frameworks],
-      files: [...this.memory.files],
-      findings: [...this.memory.findings],
-      dependencies: [...this.memory.dependencies],
-      conventions: [...this.memory.conventions],
-      architectureNotes: [...this.memory.architectureNotes],
-      decisions: [...this.memory.decisions],
-      updatedAt: this.memory.updatedAt
-    };
-  }
-
-  getContextForAI(): string {
-    flow("ProjectMemory.getContextForAI", 1, "enter");
-    const snapshot = this.getSnapshot();
-
-    return [
-      snapshot.projectSummary,
-      snapshot.architectureNotes.length > 0
-        ? `Architecture notes: ${snapshot.architectureNotes.join("; ")}`
-        : "Architecture notes: none",
-      snapshot.findings.length > 0
-        ? `Findings: ${snapshot.findings.join("; ")}`
-        : "Findings: none",
-      snapshot.dependencies.length > 0
-        ? `Important dependencies: ${snapshot.dependencies.join(", ")}`
-        : "Important dependencies: none",
-      snapshot.conventions.length > 0
-        ? `Conventions: ${snapshot.conventions.join("; ")}`
-        : "Conventions: none"
-    ].join("\n");
-  }
-
-  async clear(): Promise<void> {
-    flow("ProjectMemory.clear", 1, "enter");
-    this.memory = {
-      rootPath: "",
-      projectSummary: "",
-      languages: [],
-      frameworks: [],
-      files: [],
-      findings: [],
-      dependencies: [],
-      conventions: [],
-      architectureNotes: [],
-      decisions: [],
-      updatedAt: Date.now()
-    };
-
-    await this.storage.update(this.key, undefined);
-  }
-
-  private buildProjectSummary(
-    model: ProjectModel
-  ): string {
-    const languageSummary =
-      model.languages.length > 0
-        ? model.languages.join(", ")
-        : "Unknown";
-
-    const frameworkSummary =
-      model.frameworks.length > 0
-        ? model.frameworks.join(", ")
-        : "None detected";
-
-    return [
-      `Project root: ${model.rootPath}`,
-      `Languages: ${languageSummary}`,
-      `Frameworks: ${frameworkSummary}`,
-      `Files: ${model.files.length}`,
-      `Entry points: ${model.entryPoints.length}`,
-      `Modules: ${model.modules.length}`,
-      `Tests: ${model.testFiles.length}`
-    ].join(" | ");
-  }
-
-  private buildArchitectureNotes(
-    model: ProjectModel
-  ): string[] {
-    const notes: string[] = [];
-
-    if (model.frameworks.length > 0) {
-      notes.push(
-        `Detected frameworks: ${model.frameworks.join(", ")}`
-      );
+    private buildArchitectureNotes(model: ProjectModel): string[] {
+        const notes: string[] = [];
+        if (model.frameworks.length > 0) {
+            notes.push(`Detected frameworks: ${model.frameworks.join(", ")}`);
+        }
+        if (model.entryPoints.length > 0) {
+            notes.push(`Entry points: ${model.entryPoints.map((entry) => entry.filePath).join(", ")}`);
+        }
+        if (model.modules.length > 0) {
+            notes.push(`Modules: ${model.modules.map((module) => module.name).join(", ")}`);
+        }
+        if (model.configFiles.length > 0) {
+            notes.push(`Config files: ${model.configFiles.join(", ")}`);
+        }
+        return notes;
     }
-
-    if (model.entryPoints.length > 0) {
-      notes.push(
-        `Entry points: ${model.entryPoints.map((entry) => entry.filePath).join(", ")}`
-      );
+    private normalizeEntry(value: string): string | undefined {
+        const trimmed = value.trim();
+        if (!trimmed) {
+            return undefined;
+        }
+        return trimmed.slice(0, 500);
     }
-
-    if (model.modules.length > 0) {
-      notes.push(
-        `Modules: ${model.modules.map((module) => module.name).join(", ")}`
-      );
+    private addUniqueValue(list: string[], value: string): string[] {
+        const next = [...list];
+        if (!next.includes(value)) {
+            next.push(value);
+        }
+        return next.slice(-50);
     }
-
-    if (model.configFiles.length > 0) {
-      notes.push(
-        `Config files: ${model.configFiles.join(", ")}`
-      );
+    private touch(): void {
+        this.memory.updatedAt = Date.now();
     }
-
-    return notes;
-  }
-
-  private normalizeEntry(
-    value: string
-  ): string | undefined {
-    const trimmed = value.trim();
-
-    if (!trimmed) {
-      return undefined;
-    }
-
-    return trimmed.slice(0, 500);
-  }
-
-  private addUniqueValue(
-    list: string[],
-    value: string
-  ): string[] {
-    const next = [...list];
-
-    if (!next.includes(value)) {
-      next.push(value);
-    }
-
-    return next.slice(-50);
-  }
-
-  private touch(): void {
-    flow("ProjectMemory.touch", 1, "enter");
-    this.memory.updatedAt = Date.now();
-  }
 }

@@ -1,719 +1,469 @@
-
 import * as vscode from "vscode";
-
-import { flow } from "../utils/flowLog";
-
 import { Agent } from "../agent/Agent";
 import { Logger } from "../utils/Logger";
-import {
-  ContextPart,
-  AIResponse,
-  AIUsage,
-  AgentProfile,
-  AgentEvent,
-  AgentRun,
-  InteractionMode,
-} from "../models/types";
-
+import { ContextPart, AIResponse, AIUsage, AgentProfile, AgentEvent, AgentRun, InteractionMode, } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { isSafeContextPath } from "../intelligence/contextSelection";
 import { BackendClient } from "../backend/BackendClient";
-import {
-  classifyErrorMessage,
-  formatUserFacingError,
-  MM3_CRM_URL,
-  MM3_SUPPORT_EMAIL,
-  userFacingErrorHelp,
-  type UserFacingErrorHelp
-} from "../backend/userFacingError";
+import { classifyErrorMessage, formatUserFacingError, MM3_CRM_URL, MM3_SUPPORT_EMAIL, userFacingErrorHelp, type UserFacingErrorHelp } from "../backend/userFacingError";
 import type { BillingAgent, CreditPlan, WalletSummary } from "../models/types";
-
-export class MM3ViewProvider
-  implements vscode.WebviewViewProvider
-{
-  public static readonly viewType = "mm3.chat";
-
-  private view?: vscode.WebviewView;
-
-  private isProcessing = false;
-
-  private selectedContext: ContextPart[] = [];
-  private readonly dismissedContextKeys = new Set<string>();
-
-  private readonly billingClient =
-    new BackendClient();
-
-  private requestController?: AbortController;
-
-  private lastQuestion?: {
-    question: string;
-    mode: InteractionMode;
-    agentProfile: AgentProfile;
-    agentCount: number;
-  };
-
-  constructor(
-    private readonly extensionUri: vscode.Uri,
-    private readonly agent: Agent,
-    private readonly logger: Logger,
-    private readonly getAccessToken: () => Promise<string>,
-    private readonly resetAccessToken: () => Promise<string>,
-    private readonly codeChangeApplier = new CodeChangeApplier()
-  ) {
-    flow("MM3ViewProvider.constructor", 1, "enter");
-  }
-
-  resolveWebviewView(
-    webviewView: vscode.WebviewView
-  ): void {
-    flow("MM3ViewProvider.resolveWebviewView", 1, "enter");
-    this.view = webviewView;
-
-    webviewView.webview.options = {
-      enableScripts: true,
-
-      localResourceRoots: [
-        this.extensionUri,
-      ],
+export class MM3ViewProvider implements vscode.WebviewViewProvider {
+    public static readonly viewType = "mm3.chat";
+    private view?: vscode.WebviewView;
+    private isProcessing = false;
+    private selectedContext: ContextPart[] = [];
+    private readonly dismissedContextKeys = new Set<string>();
+    private readonly billingClient = new BackendClient();
+    private requestController?: AbortController;
+    private lastQuestion?: {
+        question: string;
+        mode: InteractionMode;
+        agentProfile: AgentProfile;
+        agentCount: number;
     };
-
-    webviewView.webview.html =
-      this.getHtml(webviewView.webview);
-
-    void this.refreshBilling();
-
-    webviewView.webview.onDidReceiveMessage(
-      async (message: WebviewMessage) => {
-        try {
-          await this.handleMessage(message);
-        } catch (error) {
-          this.logger.error(
-            "Webview message handling failed",
-            error
-          );
-
-          this.post({
-            type: "error",
-            error: formatUserFacingError(
-              "unexpected",
-              "Something went wrong while processing your request."
-            ),
-            help: userFacingErrorHelp("unexpected")
-          });
-        }
-      },
-      undefined
-    );
-  }
-
-  show(): void {
-    flow("MM3ViewProvider.show", 1, "enter");
-    this.view?.show?.(true);
-  }
-
-  async rollbackLastChanges(): Promise<void> {
-    flow("MM3ViewProvider.rollbackLastChanges", 1, "enter");
-    await this.codeChangeApplier.rollbackLast();
-    this.clearFileReviews();
-  }
-
-  private async refreshBilling(silent = false): Promise<void> {
-    flow("MM3ViewProvider.refreshBilling", 1, "enter", { silent });
-    try {
-      const accessToken = await this.getAccessToken();
-      if (!accessToken) {
-        return;
-      }
-      const [wallet, agents] = await Promise.all([
-        this.billingClient.getWallet(accessToken),
-        this.billingClient.getAgents(accessToken)
-      ]);
-      this.post({
-        type: "billing",
-        wallet,
-        agents: agents.agents ?? [],
-        plans: []
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Unable to load billing: ${error instanceof Error ? error.message : String(error)}`
-      );
-      if (!silent) {
-        this.postError(error);
-      }
+    constructor(private readonly extensionUri: vscode.Uri, private readonly agent: Agent, private readonly logger: Logger, private readonly getAccessToken: () => Promise<string>, private readonly resetAccessToken: () => Promise<string>, private readonly codeChangeApplier = new CodeChangeApplier()) {
     }
-  }
- // handle message
-  private async handleMessage(
-    message: WebviewMessage
-  ): Promise<void> {
-    flow("MM3ViewProvider.handleMessage", 1, "enter", { type: message.type });
-    switch (message.type) {
-      case "send_message":
-        await this.handleQuestion(
-          message.value,
-          message.mode,
-          message.agentProfile,
-          1
-        );
-        break;
-
-      case "cancel_request":
-        this.requestController?.abort();
-        break;
-
-      case "retry_agent":
-        await this.retryAgent(message.profile);
-        break;
-
-      case "retry_last":
-        if (this.lastQuestion) {
-          await this.handleQuestion(
-            this.lastQuestion.question,
-            this.lastQuestion.mode,
-            this.lastQuestion.agentProfile,
-            1
-          );
-        }
-        break;
-
-      case "attach_files":
-        await this.attachFiles();
-        break;
-
-      case "add_selection":
-        await this.attachCurrentSelection();
-        break;
-
-      case "remove_context":
-        this.dismissedContextKeys.add(contextPartKey({
-          path: message.path,
-          kind: message.kind,
-          startLine: message.startLine,
-          endLine: message.endLine
-        }));
-        this.selectedContext = this.selectedContext.filter((part) => {
-          if (message.kind || message.startLine) {
-            return contextPartKey(part) !== contextPartKey({
-              path: message.path,
-              kind: message.kind,
-              startLine: message.startLine,
-              endLine: message.endLine
-            });
-          }
-          return part.path !== message.path;
-        });
-        this.postContextParts();
-        break;
-
-      case "reset_token":
-        await this.resetAccessToken();
-        await this.refreshBilling();
-        vscode.window.showInformationMessage("MM3 access token updated.");
-        break;
-
-      case "clear":
-        this.agent.clearConversation();
-        this.selectedContext = [];
-        this.dismissedContextKeys.clear();
+    resolveWebviewView(webviewView: vscode.WebviewView): void {
+        this.view = webviewView;
+        webviewView.webview.options = {
+            enableScripts: true,
+            localResourceRoots: [
+                this.extensionUri,
+            ],
+        };
+        webviewView.webview.html =
+            this.getHtml(webviewView.webview);
+        void this.refreshBilling();
+        webviewView.webview.onDidReceiveMessage(async (message: WebviewMessage) => {
+            try {
+                await this.handleMessage(message);
+            }
+            catch (error) {
+                this.post({
+                    type: "error",
+                    error: formatUserFacingError("unexpected", "Something went wrong while processing your request."),
+                    help: userFacingErrorHelp("unexpected")
+                });
+            }
+        }, undefined);
+    }
+    show(): void {
+        this.view?.show?.(true);
+    }
+    async rollbackLastChanges(): Promise<void> {
+        await this.codeChangeApplier.rollbackLast();
         this.clearFileReviews();
-
-        this.post({
-          type: "cleared",
-        });
-
-        this.postContextParts();
-
-        break;
-
-      case "open_output":
-        this.logger.show();
-        break;
-
-      case "open_citation":
-        await this.openCitation(
-          message.path,
-          message.startLine,
-          message.endLine
-        );
-        break;
-
-      case "load_billing":
-        await this.refreshBilling();
-        break;
-
-      case "open_external":
-        await vscode.env.openExternal(vscode.Uri.parse(message.url));
-        break;
-
-      case "review_accept":
-        this.codeChangeApplier.acceptFile(message.path);
-        this.postFileReviewRemoved(message.path);
-        break;
-
-      case "review_accept_all":
-        this.codeChangeApplier.acceptAll();
-        this.post({ type: "file_reviews_cleared" });
-        break;
-
-      case "review_reject":
+    }
+    private async refreshBilling(silent = false): Promise<void> {
         try {
-          await this.codeChangeApplier.rejectFile(message.path);
-          this.postFileReviewRemoved(message.path);
-        } catch (error) {
-          this.postError(error);
-        }
-        break;
-
-      case "review_open_diff":
-        await this.codeChangeApplier.showFileDiff(message.path);
-        break;
-
-      default:
-        break;
-    }
-  }
-  // handle questions
-  private async handleQuestion(
-    question: string,
-    mode: InteractionMode,
-    agentProfile: AgentProfile,
-    agentCount: number
-  ): Promise<void> {
-    flow("MM3ViewProvider.handleQuestion", 1, "enter", { mode, agentProfile, agentCount });
-    const trimmedQuestion =
-      question.trim();
-
-    if (!trimmedQuestion) {
-      return;
-    }
-
-    if (this.isProcessing) {
-      this.postError("MM3 is already processing another request.");
-      return;
-    }
-
-    this.clearFileReviews();
-    this.isProcessing = true;
-    this.requestController = new AbortController();
-    this.lastQuestion = {
-      question: trimmedQuestion,
-      mode,
-      agentProfile,
-      agentCount
-    };
-
-    this.post({
-      type: "thinking",
-    });
-
-    try {
-      const accessToken =
-        await this.getAccessToken();
-
-      if (!accessToken) {
-        throw new AuthenticationError(
-          formatUserFacingError(
-            "auth",
-            "MM3 authentication is required."
-          )
-        );
-      }
-
-      const response: AIResponse =
-        await this.agent.process(
-          trimmedQuestion,
-          accessToken,
-          await this.getRequestContext(),
-          mode,
-          agentProfile,
-          agentCount,
-          this.requestController.signal,
-          (event: AgentEvent) => {
+            const accessToken = await this.getAccessToken();
+            if (!accessToken) {
+                return;
+            }
+            const [wallet, agents] = await Promise.all([
+                this.billingClient.getWallet(accessToken),
+                this.billingClient.getAgents(accessToken)
+            ]);
             this.post({
-              type: "agent_event",
-              event: {
-                ...event,
-                message:
-                  event.type === "failed"
-                    ? this.sanitizeUserError(event.message)
-                    : event.message
-              }
+                type: "billing",
+                wallet,
+                agents: agents.agents ?? [],
+                plans: []
             });
-          }
-        );
-
-      this.post({
-        type: "answer",
-        answer: this.formatAnswer(response),
-        usage: response.usage,
-        requestId: response.request_id,
-        model: response.model,
-        agents: response.agents ?? [],
-        citations: response.citations ?? [],
-        quality: response.quality,
-        confidence: typeof response.decision === "object"
-          ? response.decision?.confidence
-          : undefined,
-        implementationPlan: response.implementation_plan
-      });
-
-      await this.refreshBilling(true);
-
-      if (response.implementation_plan?.changes?.length) {
-        try {
-          await this.codeChangeApplier.offer(
-            response.implementation_plan.changes
-          );
-        } catch (applyError) {
-          this.logger.error("MM3 failed to apply planned file changes", applyError);
-          this.postError(applyError);
         }
-      }
-
-      this.postPendingFileReviews();
-
-    } catch (error) {
-
-      if (error instanceof DOMException && error.name === "AbortError") {
+        catch (error) {
+            if (!silent) {
+                this.postError(error);
+            }
+        }
+    }
+    private async handleMessage(message: WebviewMessage): Promise<void> {
+        switch (message.type) {
+            case "send_message":
+                await this.handleQuestion(message.value, message.mode, message.agentProfile, 1);
+                break;
+            case "cancel_request":
+                this.requestController?.abort();
+                break;
+            case "retry_agent":
+                await this.retryAgent(message.profile);
+                break;
+            case "retry_last":
+                if (this.lastQuestion) {
+                    await this.handleQuestion(this.lastQuestion.question, this.lastQuestion.mode, this.lastQuestion.agentProfile, 1);
+                }
+                break;
+            case "attach_files":
+                await this.attachFiles();
+                break;
+            case "add_selection":
+                await this.attachCurrentSelection();
+                break;
+            case "remove_context":
+                this.dismissedContextKeys.add(contextPartKey({
+                    path: message.path,
+                    kind: message.kind,
+                    startLine: message.startLine,
+                    endLine: message.endLine
+                }));
+                this.selectedContext = this.selectedContext.filter((part) => {
+                    if (message.kind || message.startLine) {
+                        return contextPartKey(part) !== contextPartKey({
+                            path: message.path,
+                            kind: message.kind,
+                            startLine: message.startLine,
+                            endLine: message.endLine
+                        });
+                    }
+                    return part.path !== message.path;
+                });
+                this.postContextParts();
+                break;
+            case "reset_token":
+                await this.resetAccessToken();
+                await this.refreshBilling();
+                vscode.window.showInformationMessage("MM3 access token updated.");
+                break;
+            case "clear":
+                this.agent.clearConversation();
+                this.selectedContext = [];
+                this.dismissedContextKeys.clear();
+                this.clearFileReviews();
+                this.post({
+                    type: "cleared",
+                });
+                this.postContextParts();
+                break;
+            case "open_output":
+                break;
+            case "open_citation":
+                await this.openCitation(message.path, message.startLine, message.endLine);
+                break;
+            case "load_billing":
+                await this.refreshBilling();
+                break;
+            case "open_external":
+                await vscode.env.openExternal(vscode.Uri.parse(message.url));
+                break;
+            case "review_accept":
+                this.codeChangeApplier.acceptFile(message.path);
+                this.postFileReviewRemoved(message.path);
+                break;
+            case "review_accept_all":
+                this.codeChangeApplier.acceptAll();
+                this.post({ type: "file_reviews_cleared" });
+                break;
+            case "review_reject":
+                try {
+                    await this.codeChangeApplier.rejectFile(message.path);
+                    this.postFileReviewRemoved(message.path);
+                }
+                catch (error) {
+                    this.postError(error);
+                }
+                break;
+            case "review_open_diff":
+                await this.codeChangeApplier.showFileDiff(message.path);
+                break;
+            default:
+                break;
+        }
+    }
+    private async handleQuestion(question: string, mode: InteractionMode, agentProfile: AgentProfile, agentCount: number): Promise<void> {
+        const trimmedQuestion = question.trim();
+        if (!trimmedQuestion) {
+            return;
+        }
+        if (this.isProcessing) {
+            this.postError("MM3 is already processing another request.");
+            return;
+        }
+        this.clearFileReviews();
+        this.isProcessing = true;
+        this.requestController = new AbortController();
+        this.lastQuestion = {
+            question: trimmedQuestion,
+            mode,
+            agentProfile,
+            agentCount
+        };
         this.post({
-          type: "cancelled"
+            type: "thinking",
         });
-        return;
-      }
-
-      this.postError(error);
-      this.logger.error(
-        "MM3 request failed",
-        error
-      );
-
-    } finally {
-
-      this.isProcessing = false;
-      this.requestController = undefined;
-
-      this.post({
-        type: "ready",
-      });
+        try {
+            const accessToken = await this.getAccessToken();
+            if (!accessToken) {
+                throw new AuthenticationError(formatUserFacingError("auth", "MM3 authentication is required."));
+            }
+            const response: AIResponse = await this.agent.process(trimmedQuestion, accessToken, await this.getRequestContext(), mode, agentProfile, agentCount, this.requestController.signal, (event: AgentEvent) => {
+                this.post({
+                    type: "agent_event",
+                    event: {
+                        ...event,
+                        message: event.type === "failed"
+                            ? this.sanitizeUserError(event.message)
+                            : event.message
+                    }
+                });
+            });
+            this.post({
+                type: "answer",
+                answer: this.formatAnswer(response),
+                usage: response.usage,
+                requestId: response.request_id,
+                model: response.model,
+                agents: response.agents ?? [],
+                citations: response.citations ?? [],
+                quality: response.quality,
+                confidence: typeof response.decision === "object"
+                    ? response.decision?.confidence
+                    : undefined,
+                implementationPlan: response.implementation_plan
+            });
+            await this.refreshBilling(true);
+            if (response.implementation_plan?.changes?.length) {
+                try {
+                    await this.codeChangeApplier.offer(response.implementation_plan.changes);
+                }
+                catch (applyError) {
+                    this.postError(applyError);
+                }
+            }
+            this.postPendingFileReviews();
+        }
+        catch (error) {
+            if (error instanceof DOMException && error.name === "AbortError") {
+                this.post({
+                    type: "cancelled"
+                });
+                return;
+            }
+            this.postError(error);
+        }
+        finally {
+            this.isProcessing = false;
+            this.requestController = undefined;
+            this.post({
+                type: "ready",
+            });
+        }
     }
-  }
-
-  private async retryAgent(
-    profile: AgentProfile
-  ): Promise<void> {
-    flow("MM3ViewProvider.retryAgent", 1, "enter", { profile });
-    if (this.isProcessing) {
-      return;
+    private async retryAgent(profile: AgentProfile): Promise<void> {
+        if (this.isProcessing) {
+            return;
+        }
+        const accessToken = await this.getAccessToken();
+        if (!accessToken) {
+            throw new AuthenticationError(formatUserFacingError("auth", "MM3 authentication is required."));
+        }
+        this.isProcessing = true;
+        this.post({ type: "thinking" });
+        try {
+            const answer = await this.agent.retrySpecialist(profile, accessToken);
+            this.post({
+                type: "answer",
+                answer: "[Retry: " + profile + "]\n\n" + answer,
+                usage: {
+                    input_tokens: 0,
+                    output_tokens: 0,
+                    total_tokens: 0,
+                    ai_api_calls: 1,
+                    estimated_cost: 0
+                },
+                requestId: "retry",
+                model: "",
+                agents: []
+            });
+        }
+        finally {
+            this.isProcessing = false;
+            this.post({ type: "ready" });
+        }
     }
-
-    const accessToken = await this.getAccessToken();
-    if (!accessToken) {
-      throw new AuthenticationError(
-        formatUserFacingError("auth", "MM3 authentication is required.")
-      );
+    private async getRequestContext(): Promise<ContextPart[]> {
+        return this.selectedContext.filter((part) => !this.dismissedContextKeys.has(contextPartKey(part)));
     }
-
-    this.isProcessing = true;
-    this.post({ type: "thinking" });
-    try {
-      const answer = await this.agent.retrySpecialist(
-        profile,
-        accessToken
-      );
-      this.post({
-        type: "answer",
-        answer: "[Retry: " + profile + "]\n\n" + answer,
-        usage: {
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          ai_api_calls: 1,
-          estimated_cost: 0
-        },
-        requestId: "retry",
-        model: "",
-        agents: []
-      });
-    } finally {
-      this.isProcessing = false;
-      this.post({ type: "ready" });
+    private async attachFiles(): Promise<void> {
+        const files = await vscode.window.showOpenDialog({
+            canSelectMany: true,
+            canSelectFolders: false,
+            openLabel: "Attach Files"
+        });
+        if (!files) {
+            return;
+        }
+        for (const uri of files) {
+            const relativePath = vscode.workspace.asRelativePath(uri, false);
+            if (!isSafeContextPath(relativePath)) {
+                continue;
+            }
+            const document = await vscode.workspace.openTextDocument(uri);
+            if (document.getText().length > 200000) {
+                continue;
+            }
+            this.selectedContext = this.selectedContext.filter((part) => part.path !== relativePath);
+            this.dismissedContextKeys.delete(contextPartKey({
+                kind: "attachment",
+                path: relativePath
+            }));
+            this.selectedContext.push({
+                kind: "attachment",
+                path: relativePath,
+                content: document.getText(),
+                language: document.languageId
+            });
+        }
+        this.postContextParts();
     }
-  }
-
-  private async getRequestContext(): Promise<ContextPart[]> {
-    flow("MM3ViewProvider.getRequestContext", 1, "enter");
-    return this.selectedContext.filter(
-      (part) => !this.dismissedContextKeys.has(contextPartKey(part))
-    );
-  }
-
-  private async attachFiles(): Promise<void> {
-    flow("MM3ViewProvider.attachFiles", 1, "enter");
-    const files = await vscode.window.showOpenDialog({
-      canSelectMany: true,
-      canSelectFolders: false,
-      openLabel: "Attach Files"
-    });
-
-    if (!files) {
-      return;
+    async attachCurrentSelection(): Promise<void> {
+        const editor = vscode.window.activeTextEditor;
+        if (!editor || editor.selection.isEmpty) {
+            vscode.window.showInformationMessage("Select code first, then add it to MM3 chat.");
+            return;
+        }
+        const relativePath = vscode.workspace.asRelativePath(editor.document.uri, false);
+        if (!isSafeContextPath(relativePath)) {
+            vscode.window.showWarningMessage("That file cannot be attached to MM3 chat.");
+            return;
+        }
+        const startLine = editor.selection.start.line + 1;
+        const endLine = editor.selection.end.line + 1;
+        const selectedText = editor.document.getText(editor.selection);
+        if (!selectedText.trim()) {
+            return;
+        }
+        this.selectedContext = this.selectedContext.filter((part) => !(part.path === relativePath && part.kind === "selection" && part.startLine === startLine && part.endLine === endLine));
+        const nextPart: ContextPart = {
+            kind: "selection",
+            path: relativePath,
+            content: selectedText,
+            language: editor.document.languageId,
+            startLine,
+            endLine
+        };
+        this.dismissedContextKeys.delete(contextPartKey(nextPart));
+        this.selectedContext.unshift(nextPart);
+        this.postContextParts();
+        await this.focusChat();
+        vscode.window.showInformationMessage(`Added ${relativePath}:${startLine}-${endLine} to MM3 chat`);
     }
-
-    for (const uri of files) {
-      const relativePath = vscode.workspace.asRelativePath(uri, false);
-
-      if (!isSafeContextPath(relativePath)) {
-        continue;
-      }
-
-      const document = await vscode.workspace.openTextDocument(uri);
-
-      if (document.getText().length > 200_000) {
-        continue;
-      }
-
-      this.selectedContext = this.selectedContext.filter(
-        (part) => part.path !== relativePath
-      );
-      this.dismissedContextKeys.delete(contextPartKey({
-        kind: "attachment",
-        path: relativePath
-      }));
-      this.selectedContext.push({
-        kind: "attachment",
-        path: relativePath,
-        content: document.getText(),
-        language: document.languageId
-      });
+    async focusChat(): Promise<void> {
+        try {
+            await vscode.commands.executeCommand("workbench.view.extension.m3");
+        }
+        catch {
+        }
+        this.show();
+        try {
+            await vscode.commands.executeCommand(`${MM3ViewProvider.viewType}.focus`);
+        }
+        catch {
+        }
     }
-
-    this.postContextParts();
-  }
-
-  async attachCurrentSelection(): Promise<void> {
-    flow("MM3ViewProvider.attachCurrentSelection", 1, "enter");
-    const editor = vscode.window.activeTextEditor;
-    if (!editor || editor.selection.isEmpty) {
-      vscode.window.showInformationMessage("Select code first, then add it to MM3 chat.");
-      return;
+    private postContextParts(parts: ContextPart[] = this.selectedContext): void {
+        this.post({
+            type: "context",
+            parts: parts.map((part) => ({
+                path: part.path,
+                kind: part.kind,
+                language: part.language,
+                size: part.content.length,
+                tokens: Math.ceil(part.content.length / 4),
+                startLine: part.startLine,
+                endLine: part.endLine
+            }))
+        });
     }
-
-    const relativePath = vscode.workspace.asRelativePath(editor.document.uri, false);
-    if (!isSafeContextPath(relativePath)) {
-      vscode.window.showWarningMessage("That file cannot be attached to MM3 chat.");
-      return;
+    private async openCitation(filePath: string, startLine?: number, endLine?: number): Promise<void> {
+        const workspace = vscode.workspace.workspaceFolders?.[0];
+        if (!workspace || !isSafeContextPath(filePath)) {
+            return;
+        }
+        const uri = vscode.Uri.joinPath(workspace.uri, ...filePath.replace(/\\/g, "/").split("/"));
+        const document = await vscode.workspace.openTextDocument(uri);
+        const start = Math.max(0, (startLine ?? 1) - 1);
+        const end = Math.max(start, (endLine ?? startLine ?? 1) - 1);
+        await vscode.window.showTextDocument(document, {
+            selection: new vscode.Range(start, 0, end, document.lineAt(Math.min(end, document.lineCount - 1)).text.length)
+        });
     }
-
-    const startLine = editor.selection.start.line + 1;
-    const endLine = editor.selection.end.line + 1;
-    const selectedText = editor.document.getText(editor.selection);
-    if (!selectedText.trim()) {
-      return;
+    private getErrorMessage(error: unknown): string {
+        if (typeof error === "string" && error.trim()) {
+            return this.sanitizeUserError(error);
+        }
+        if (error instanceof AuthenticationError) {
+            return this.sanitizeUserError(error.message);
+        }
+        if (error instanceof Error) {
+            return this.sanitizeUserError(error.message);
+        }
+        return formatUserFacingError("unexpected");
     }
-
-    this.selectedContext = this.selectedContext.filter(
-      (part) => !(part.path === relativePath && part.kind === "selection" && part.startLine === startLine && part.endLine === endLine)
-    );
-    const nextPart: ContextPart = {
-      kind: "selection",
-      path: relativePath,
-      content: selectedText,
-      language: editor.document.languageId,
-      startLine,
-      endLine
-    };
-    this.dismissedContextKeys.delete(contextPartKey(nextPart));
-    this.selectedContext.unshift(nextPart);
-    this.postContextParts();
-    await this.focusChat();
-    vscode.window.showInformationMessage(
-      `Added ${relativePath}:${startLine}-${endLine} to MM3 chat`
-    );
-  }
-
-  async focusChat(): Promise<void> {
-    flow("MM3ViewProvider.focusChat", 1, "enter");
-    try {
-      await vscode.commands.executeCommand("workbench.view.extension.m3");
-    } catch {
-      // Sidebar may already be visible.
+    private sanitizeUserError(message: string | undefined): string {
+        const text = (message || "").trim();
+        if (!text) {
+            return formatUserFacingError("unexpected");
+        }
+        if (text.includes(MM3_CRM_URL) || text.includes(MM3_SUPPORT_EMAIL)) {
+            return text;
+        }
+        if (text === "MM3 is already processing another request.") {
+            return text;
+        }
+        if (/i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|unable to reach|unable to connect/i.test(text)) {
+            return formatUserFacingError("api", "The MM3 service did not respond in time. Please try again.");
+        }
+        return formatUserFacingError(classifyErrorMessage(text), text);
     }
-    this.show();
-    try {
-      await vscode.commands.executeCommand(`${MM3ViewProvider.viewType}.focus`);
-    } catch {
-      // View focus command is unavailable until the webview has resolved.
+    private postError(error: unknown): void {
+        const message = this.getErrorMessage(error);
+        this.post({
+            type: "error",
+            error: message,
+            help: userFacingErrorHelp(classifyErrorMessage(message))
+        });
     }
-  }
-
-  private postContextParts(
-    parts: ContextPart[] = this.selectedContext
-  ): void {
-    flow("MM3ViewProvider.postContextParts", 1, "enter", { count: parts.length });
-    this.post({
-      type: "context",
-      parts: parts.map((part) => ({
-        path: part.path,
-        kind: part.kind,
-        language: part.language,
-        size: part.content.length,
-        tokens: Math.ceil(part.content.length / 4),
-        startLine: part.startLine,
-        endLine: part.endLine
-      }))
-    });
-  }
-
-  private async openCitation(
-    filePath: string,
-    startLine?: number,
-    endLine?: number
-  ): Promise<void> {
-    flow("MM3ViewProvider.openCitation", 1, "enter", { filePath, startLine, endLine });
-    const workspace = vscode.workspace.workspaceFolders?.[0];
-    if (!workspace || !isSafeContextPath(filePath)) {
-      return;
+    private clearFileReviews(): void {
+        this.codeChangeApplier.dismissPending();
+        this.post({ type: "file_reviews_cleared" });
     }
-
-    const uri = vscode.Uri.joinPath(
-      workspace.uri,
-      ...filePath.replace(/\\/g, "/").split("/")
-    );
-    const document = await vscode.workspace.openTextDocument(uri);
-    const start = Math.max(0, (startLine ?? 1) - 1);
-    const end = Math.max(start, (endLine ?? startLine ?? 1) - 1);
-    await vscode.window.showTextDocument(document, {
-      selection: new vscode.Range(
-        start,
-        0,
-        end,
-        document.lineAt(Math.min(end, document.lineCount - 1)).text.length
-      )
-    });
-  }
-
-  private getErrorMessage(
-    error: unknown
-  ): string {
-    flow("MM3ViewProvider.getErrorMessage", 1, "enter");
-
-    if (typeof error === "string" && error.trim()) {
-      return this.sanitizeUserError(error);
+    private postPendingFileReviews(): void {
+        const files = this.codeChangeApplier.getPendingReviews().map((item) => ({
+            path: item.path,
+            created: item.created,
+            deleted: item.deleted
+        }));
+        if (files.length === 0) {
+            return;
+        }
+        this.post({
+            type: "file_reviews",
+            files
+        });
     }
-
-    if (
-      error instanceof AuthenticationError
-    ) {
-      return this.sanitizeUserError(error.message);
+    private postFileReviewRemoved(filePath: string): void {
+        if (this.codeChangeApplier.getPendingReviews().length === 0) {
+            this.post({ type: "file_reviews_cleared" });
+            return;
+        }
+        this.post({
+            type: "file_review_removed",
+            path: filePath
+        });
     }
-
-    if (
-      error instanceof Error
-    ) {
-      return this.sanitizeUserError(error.message);
+    private formatAnswer(response: AIResponse): string {
+        return response.answer;
     }
-
-    return formatUserFacingError("unexpected");
-  }
-
-  private sanitizeUserError(message: string | undefined): string {
-    const text = (message || "").trim();
-    if (!text) {
-      return formatUserFacingError("unexpected");
+    private post(message: WebviewResponse): void {
+        if (!this.view) {
+            return;
+        }
+        void this.view.webview.postMessage(message);
     }
-    if (text.includes(MM3_CRM_URL) || text.includes(MM3_SUPPORT_EMAIL)) {
-      return text;
-    }
-    if (text === "MM3 is already processing another request.") {
-      return text;
-    }
-    if (
-      /i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|unable to reach|unable to connect/i.test(
-        text
-      )
-    ) {
-      return formatUserFacingError(
-        "api",
-        "The MM3 service did not respond in time. Please try again."
-      );
-    }
-    return formatUserFacingError(classifyErrorMessage(text), text);
-  }
-
-  private postError(error: unknown): void {
-    const message = this.getErrorMessage(error);
-    this.post({
-      type: "error",
-      error: message,
-      help: userFacingErrorHelp(classifyErrorMessage(message))
-    });
-  }
-
-  private clearFileReviews(): void {
-    this.codeChangeApplier.dismissPending();
-    this.post({ type: "file_reviews_cleared" });
-  }
-
-  private postPendingFileReviews(): void {
-    const files = this.codeChangeApplier.getPendingReviews().map((item) => ({
-      path: item.path,
-      created: item.created,
-      deleted: item.deleted
-    }));
-    if (files.length === 0) {
-      return;
-    }
-    this.post({
-      type: "file_reviews",
-      files
-    });
-  }
-
-  private postFileReviewRemoved(filePath: string): void {
-    if (this.codeChangeApplier.getPendingReviews().length === 0) {
-      this.post({ type: "file_reviews_cleared" });
-      return;
-    }
-    this.post({
-      type: "file_review_removed",
-      path: filePath
-    });
-  }
-
-  private formatAnswer(
-    response: AIResponse
-  ): string {
-    flow("MM3ViewProvider.formatAnswer", 1, "enter");
-    return response.answer;
-  }
-
-  private post(
-    message: WebviewResponse
-  ): void {
-    flow("MM3ViewProvider.post", 1, "enter", { type: message.type });
-
-    if (!this.view) {
-      return;
-    }
-
-    void this.view.webview.postMessage(
-      message
-    );
-  }
-
-  private getHtml(
-    webview: vscode.Webview
-  ): string {
-    flow("MM3ViewProvider.getHtml", 1, "enter");
-
-    const nonce =
-      this.getNonce();
-
-    const cspSource =
-      webview.cspSource;
-
-    return `
+    private getHtml(webview: vscode.Webview): string {
+        const nonce = this.getNonce();
+        const cspSource = webview.cspSource;
+        return `
 <!DOCTYPE html>
 
 <html lang="en">
@@ -777,10 +527,6 @@ body {
   height: 100vh;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Header                                                                     */
-/* -------------------------------------------------------------------------- */
-
 .header {
   display: flex;
   align-items: center;
@@ -815,10 +561,6 @@ body {
 .model {
   display: none;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Messages                                                                   */
-/* -------------------------------------------------------------------------- */
 
 .messages {
   flex: 1;
@@ -1024,10 +766,6 @@ body {
   }
 }
 
-/* -------------------------------------------------------------------------- */
-/* Markdown                                                                   */
-/* -------------------------------------------------------------------------- */
-
 .markdown {
   width: 100%;
 }
@@ -1117,10 +855,6 @@ body {
   margin:
     14px 0;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Code blocks                                                                */
-/* -------------------------------------------------------------------------- */
 
 .code-block {
   margin:
@@ -1226,10 +960,6 @@ body {
   font-family:
     inherit;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Usage                                                                      */
-/* -------------------------------------------------------------------------- */
 
 .usage {
   margin-top: -6px;
@@ -1403,17 +1133,9 @@ body {
   padding-left: 18px;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Status                                                                     */
-/* -------------------------------------------------------------------------- */
-
 .status {
   display: none;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Composer                                                                   */
-/* -------------------------------------------------------------------------- */
 
 .composer {
   padding: 8px 10px 10px;
@@ -1538,10 +1260,6 @@ textarea:disabled {
   color: inherit;
   cursor: pointer;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Empty state                                                                */
-/* -------------------------------------------------------------------------- */
 
 .empty {
   display: flex;
@@ -1741,10 +1459,6 @@ resetToken.addEventListener("click", () => {
   vscode.postMessage({ type: "reset_token" });
 });
 
-/* -------------------------------------------------------------------------- */
-/* HTML escaping                                                              */
-/* -------------------------------------------------------------------------- */
-
 function escapeHtml(value) {
 
   return String(value ?? "")
@@ -1754,10 +1468,6 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;")
     .replace(/'/g, "&#039;");
 }
-
-/* -------------------------------------------------------------------------- */
-/* Inline Markdown                                                            */
-/* -------------------------------------------------------------------------- */
 
 function renderInlineMarkdown(text) {
 
@@ -1811,10 +1521,6 @@ function renderInlineMarkdown(text) {
 
   return value;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Markdown renderer                                                          */
-/* -------------------------------------------------------------------------- */
 
 function renderMarkdown(markdown) {
 
@@ -2064,10 +1770,6 @@ function renderMarkdown(markdown) {
   return output.join("");
 }
 
-/* -------------------------------------------------------------------------- */
-/* Code block                                                                 */
-/* -------------------------------------------------------------------------- */
-
 function createCodeBlock(
   language,
   code
@@ -2176,10 +1878,6 @@ function createCodeBlock(
   return wrapper.outerHTML;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Copy code                                                                  */
-/* -------------------------------------------------------------------------- */
-
 async function copyText(text) {
 
   if (
@@ -2228,10 +1926,6 @@ async function copyText(text) {
     );
   }
 }
-
-/* -------------------------------------------------------------------------- */
-/* Add message                                                                */
-/* -------------------------------------------------------------------------- */
 
 function addMessage(
   text,
@@ -2477,10 +2171,6 @@ function addAgentRetryControls(agents) {
   messages.appendChild(element);
   messages.scrollTop = messages.scrollHeight;
 }
-
-/* -------------------------------------------------------------------------- */
-/* Usage                                                                      */
-/* -------------------------------------------------------------------------- */
 
 function addUsage(
   usage
@@ -2746,10 +2436,6 @@ function addExpandableList(title, items) {
   messages.scrollTop = messages.scrollHeight;
 }
 
-/* -------------------------------------------------------------------------- */
-/* Status                                                                     */
-/* -------------------------------------------------------------------------- */
-
 function setStatus(
   text
 ) {
@@ -2811,10 +2497,6 @@ function noteStreamActivity(label) {
   }, STREAM_PAUSE_MS);
 }
 
-/* -------------------------------------------------------------------------- */
-/* Processing                                                                 */
-/* -------------------------------------------------------------------------- */
-
 function setComposerState(next) {
   composerState = next;
   processing = next === "running";
@@ -2836,10 +2518,6 @@ function setComposerState(next) {
 function setProcessing(value) {
   setComposerState(value ? "running" : "idle");
 }
-
-/* -------------------------------------------------------------------------- */
-/* Send message                                                               */
-/* -------------------------------------------------------------------------- */
 
 function sendMessage() {
   if (processing) {
@@ -2867,17 +2545,12 @@ function sendMessage() {
   });
 }
 
-/* -------------------------------------------------------------------------- */
-/* Events                                                                     */
-/* -------------------------------------------------------------------------- */
-
 action.addEventListener("click", () => {
   if (composerState === "running") {
     vscode.postMessage({ type: "cancel_request" });
     return;
   }
   if (composerState === "failed") {
-    // Prefer a fresh send when the user typed a new question.
     if (input.value.trim()) {
       sendMessage();
       return;
@@ -3180,127 +2853,85 @@ input.focus();
 
 </html>
 `;
-  }
-
-  private getNonce(): string {
-    flow("MM3ViewProvider.getNonce", 1, "enter");
-
-    const chars =
-      "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-
-    let result =
-      "";
-
-    for (
-      let i = 0;
-      i < 32;
-      i++
-    ) {
-
-      result +=
-        chars.charAt(
-          Math.floor(
-            Math.random() * chars.length
-          )
-        );
     }
-
-    return result;
-  }
+    private getNonce(): string {
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+        let result = "";
+        for (let i = 0; i < 32; i++) {
+            result +=
+                chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+    }
 }
-
-/* -------------------------------------------------------------------------- */
-/* Webview message types                                                      */
-/* -------------------------------------------------------------------------- */
-
-type WebviewMessage =
-  | {
-      type: "send_message";
-      value: string;
-      mode: "ask" | "agent";
-      agentProfile: AgentProfile;
-      agentCount: number;
-    }
-  | {
-      type: "cancel_request";
-    }
-  | {
-      type: "retry_last";
-    }
-  | {
-      type: "retry_agent";
-      profile: AgentProfile;
-    }
-  | {
-      type: "attach_files";
-    }
-  | {
-      type: "add_selection";
-    }
-  | {
-      type: "remove_context";
-      path: string;
-      kind?: string;
-      startLine?: number;
-      endLine?: number;
-    }
-  | {
-      type: "reset_token";
-    }
-  | {
-      type: "clear";
-    }
-  | {
-      type: "open_output";
-    }
-  | {
-      type: "open_citation";
-      path: string;
-      startLine?: number;
-      endLine?: number;
-    }
-  | {
-      type: "load_billing";
-    }
-  | {
-      type: "open_external";
-      url: string;
-    }
-  | {
-      type: "review_accept";
-      path: string;
-    }
-  | {
-      type: "review_accept_all";
-    }
-  | {
-      type: "review_reject";
-      path: string;
-    }
-  | {
-      type: "review_open_diff";
-      path: string;
-    };
-
-type WebviewResponse =
-  | {
-      type: "thinking";
-    }
-  | {
-      type: "answer";
-      answer: string;
-      usage?: AIUsage;
-      requestId: string;
-      model: string;
-      agents: AgentRun[];
-      citations?: Array<{
+type WebviewMessage = {
+    type: "send_message";
+    value: string;
+    mode: "ask" | "agent";
+    agentProfile: AgentProfile;
+    agentCount: number;
+} | {
+    type: "cancel_request";
+} | {
+    type: "retry_last";
+} | {
+    type: "retry_agent";
+    profile: AgentProfile;
+} | {
+    type: "attach_files";
+} | {
+    type: "add_selection";
+} | {
+    type: "remove_context";
+    path: string;
+    kind?: string;
+    startLine?: number;
+    endLine?: number;
+} | {
+    type: "reset_token";
+} | {
+    type: "clear";
+} | {
+    type: "open_output";
+} | {
+    type: "open_citation";
+    path: string;
+    startLine?: number;
+    endLine?: number;
+} | {
+    type: "load_billing";
+} | {
+    type: "open_external";
+    url: string;
+} | {
+    type: "review_accept";
+    path: string;
+} | {
+    type: "review_accept_all";
+} | {
+    type: "review_reject";
+    path: string;
+} | {
+    type: "review_open_diff";
+    path: string;
+};
+type WebviewResponse = {
+    type: "thinking";
+} | {
+    type: "answer";
+    answer: string;
+    usage?: AIUsage;
+    requestId: string;
+    model: string;
+    agents: AgentRun[];
+    citations?: Array<{
         path: string;
         quote?: string;
         reason?: string;
         start_line?: number;
         end_line?: number;
-      }>;
-      quality?: {
+    }>;
+    quality?: {
         groundedness: number;
         file_selection: number;
         tool_efficiency: number;
@@ -3311,93 +2942,76 @@ type WebviewResponse =
         cited_files: number;
         context_files: number;
         recovery_score?: number;
-      };
-      confidence?: number;
-      implementationPlan?: {
+    };
+    confidence?: number;
+    implementationPlan?: {
         files?: string[];
         steps?: string[];
         validation?: string[];
         risks?: string[];
         changes?: Array<{
-          path: string;
-          original: string;
-          updated: string;
+            path: string;
+            original: string;
+            updated: string;
         }>;
-      };
-    }
-  | {
-      type: "context";
-      parts: Array<{
+    };
+} | {
+    type: "context";
+    parts: Array<{
         path: string;
         kind: string;
         language: string;
         size: number;
         tokens: number;
-      }>;
-    }
-  | {
-      type: "cancelled";
-    }
-  | {
-      type: "agent_event";
-      event: AgentEvent;
-    }
-  | {
-      type: "error";
-      error: string;
-      help?: UserFacingErrorHelp;
-    }
-  | {
-      type: "file_reviews";
-      files: Array<{
+    }>;
+} | {
+    type: "cancelled";
+} | {
+    type: "agent_event";
+    event: AgentEvent;
+} | {
+    type: "error";
+    error: string;
+    help?: UserFacingErrorHelp;
+} | {
+    type: "file_reviews";
+    files: Array<{
         path: string;
         created: boolean;
         deleted: boolean;
-      }>;
-    }
-  | {
-      type: "file_review_removed";
-      path: string;
-    }
-  | {
-      type: "file_reviews_cleared";
-    }
-  | {
-      type: "ready";
-    }
-  | {
-      type: "billing";
-      wallet: WalletSummary;
-      agents: BillingAgent[];
-      plans: CreditPlan[];
-    }
-  | {
-      type: "cleared";
-    };
-
+    }>;
+} | {
+    type: "file_review_removed";
+    path: string;
+} | {
+    type: "file_reviews_cleared";
+} | {
+    type: "ready";
+} | {
+    type: "billing";
+    wallet: WalletSummary;
+    agents: BillingAgent[];
+    plans: CreditPlan[];
+} | {
+    type: "cleared";
+};
 class AuthenticationError extends Error {
-
-  constructor(
-    message: string
-  ) {
-
-    super(message);
-    this.name =
-      "AuthenticationError";
-  }
+    constructor(message: string) {
+        super(message);
+        this.name =
+            "AuthenticationError";
+    }
 }
-
 function contextPartKey(part: {
-  path: string;
-  kind?: string;
-  startLine?: number;
-  endLine?: number;
+    path: string;
+    kind?: string;
+    startLine?: number;
+    endLine?: number;
 }): string {
-  return [
-    part.path,
-    part.kind ?? "",
-    String(part.startLine ?? ""),
-    String(part.endLine ?? "")
-  ].join("|");
+    return [
+        part.path,
+        part.kind ?? "",
+        String(part.startLine ?? ""),
+        String(part.endLine ?? "")
+    ].join("|");
 }
-

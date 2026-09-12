@@ -2,6 +2,8 @@ const esbuild = require("esbuild");
 
 const watch = process.argv.includes("--watch");
 
+const production = process.env.NODE_ENV === "production";
+
 const options = {
   entryPoints: ["src/extension.ts"],
   bundle: true,
@@ -10,8 +12,9 @@ const options = {
   platform: "node",
   target: "node20",
   outfile: "dist/extension.js",
-  sourcemap: true,
-  minify: false
+  sourcemap: !production,
+  minify: production,
+  drop: production ? ["console"] : []
 };
 
 async function build() {
