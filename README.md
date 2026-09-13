@@ -47,7 +47,6 @@ Open **Settings** and search for `MM3`.
 
 | Setting | Description | Default |
 | --- | --- | --- |
-| `mm3.backendUrl` | MM3 backend API endpoint | `https://api.mm3ai.com` |
 | `mm3.maxContextChars` | Maximum source context sent to the backend | `5000000` |
 | `mm3.maxFilesInContext` | Maximum files included in a request | `1000` |
 | `mm3.enableAutoIndex` | Build the workspace index automatically | `true` |
