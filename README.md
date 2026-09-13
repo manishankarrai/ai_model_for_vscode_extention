@@ -15,7 +15,8 @@ The VS Code extension builds local project intelligence and enforces safety. The
 - Review, accept, reject, or roll back approved file changes.
 - Choose specialist agents for exploration, bugs, reviews, architecture, implementation, testing, or project memory.
 - Use AI models from supported providers such as OpenAI, Claude, Gemini, Grok, and DeepSeek.
-
+## Preview
+![MM3 AI Agent](media/mm3info.png)
 ## Safety And Privacy
 
 - The backend does not receive direct filesystem or terminal access.
