@@ -5,6 +5,14 @@
   "version": "0.0.1",
   "publisher": "mm3-ai",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manishankarrai/m3.git"
+  },
+  "homepage": "https://www.mm3ai.com",
+  "bugs": {
+    "email": "support@mm3ai.com"
+  },
   "engines": {
     "vscode": "^1.90.0"
   },

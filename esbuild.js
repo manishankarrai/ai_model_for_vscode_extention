@@ -19,14 +19,10 @@ async function build() {
     const context = await esbuild.context(options);
 
     await context.watch();
-
-    console.log("MM3 esbuild watch started");
     return;
   }
 
   await esbuild.build(options);
-
-  console.log("MM3 build complete");
 }
 
 build().catch(() => process.exit(1));

@@ -226,10 +226,6 @@ export class MM3ViewProvider
 
         break;
 
-      case "open_output":
-        this.logger.show();
-        break;
-
       case "open_citation":
         await this.openCitation(
           message.path,
@@ -2310,8 +2306,8 @@ function addErrorContent(element, text, help) {
   const helpBox = document.createElement("div");
   helpBox.className = "error-help";
   const crm = document.createElement("a");
-  crm.href = (help && help.crmUrl) || "https://crm.mm3ai.com";
-  crm.textContent = "Reset token at crm.mm3ai.com";
+  crm.href = (help && help.crmUrl) || "https://www.mm3ai.com";
+  crm.textContent = "Reset token at www.mm3ai.com";
   const support = document.createElement("a");
   support.href = "mailto:" + ((help && help.supportEmail) || "support@mm3ai.com");
   support.textContent = "Unexpected issue? Email support@mm3ai.com";
@@ -3249,9 +3245,6 @@ type WebviewMessage =
     }
   | {
       type: "clear";
-    }
-  | {
-      type: "open_output";
     }
   | {
       type: "open_citation";

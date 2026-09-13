@@ -1,6 +1,6 @@
 import { flow } from "../utils/flowLog";
 
-export const MM3_CRM_URL = "https://crm.mm3ai.com";
+export const MM3_CRM_URL = "https://www.mm3ai.com";
 export const MM3_SUPPORT_EMAIL = "support@mm3ai.com";
 
 export type UserFacingErrorKind = "auth" | "api" | "unexpected";
