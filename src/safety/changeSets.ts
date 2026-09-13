@@ -148,13 +148,29 @@ export function applyHunkApprovals(
     return updated;
   }
 
-  // Partial hunk approval: keep full-file update only when every hunk is approved.
   const approved = new Set(hunkIds);
   if (allHunks.every((hunk) => approved.has(hunk.id))) {
     return updated;
   }
 
-  return original;
+  const lines = original.split("\n");
+  const selected = allHunks
+    .filter((hunk) => approved.has(hunk.id))
+    .sort((left, right) => right.startLine - left.startLine);
+
+  for (const hunk of selected) {
+    const start = Math.max(0, hunk.startLine - 1);
+    const consumed = hunk.lines.filter(
+      (line) => line.type === "removed" || line.type === "context"
+    ).length;
+    const replacement = hunk.lines
+      .filter((line) => line.type === "added" || line.type === "context")
+      .map((line) => line.text);
+
+    lines.splice(start, consumed, ...replacement);
+  }
+
+  return lines.join("\n");
 }
 
 export class ChangeSetStore {

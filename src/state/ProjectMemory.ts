@@ -1,15 +1,17 @@
-import * as vscode from "vscode";
+import type * as vscode from "vscode";
 
-import { ProjectModel } from "../project/project-model";
+import type { ProjectModel } from "../project/project-model.ts";
 import { flow } from "../utils/flowLog.ts";
 
 import {
   formatConflictSummary,
+  resolveMemoryConflicts
+} from "../safety/memoryConflict.ts";
+import type {
   MemoryConflict,
   MemoryFact,
-  MemoryConflictResolution,
-  resolveMemoryConflicts
-} from "../safety/memoryConflict";
+  MemoryConflictResolution
+} from "../safety/memoryConflict.ts";
 
 export type ProjectMemoryEntryType =
   | "architecture"
@@ -58,11 +60,11 @@ export class ProjectMemory {
   private readonly key = "mm3.project.memory.v1";
 
   private memory: ProjectMemoryData;
+  private readonly storage: vscode.Memento;
 
-  constructor(
-    private readonly storage: vscode.Memento
-  ) {
-    const saved = this.storage.get<ProjectMemoryData>(this.key, {
+  constructor(storage: vscode.Memento) {
+    this.storage = storage;
+    const saved = this.storage.get<ProjectMemoryData>(this.key) ?? {
       rootPath: "",
       projectSummary: "",
       languages: [],
@@ -74,7 +76,7 @@ export class ProjectMemory {
       architectureNotes: [],
       decisions: [],
       updatedAt: Date.now()
-    });
+    };
 
     this.memory = saved;
   }

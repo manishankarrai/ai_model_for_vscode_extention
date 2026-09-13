@@ -16,7 +16,6 @@ export type AgentProfile = string;
 
 export interface AgentSelection {
   profile: AgentProfile;
-  count: number;
 }
 
 export type AgentToolName =
@@ -153,6 +152,41 @@ export interface AIContext {
 
 }
 
+export type DependencyEditPolicy =
+  | "selected-only"
+  | "selected-plus-required-dependencies";
+
+export type SelectionScope =
+  | "workspace"
+  | "selection"
+  | "full-file";
+
+export interface TaskContract {
+  requestId: string;
+  intent: Intent;
+  selectedPaths: string[];
+  selectedRanges: Array<{
+    path: string;
+    startLine?: number;
+    endLine?: number;
+  }>;
+  selectionScope: SelectionScope;
+  requiredDependencyPaths: string[];
+  dependencyEvidence: DependencyEvidence[];
+  allowedEditPaths: string[];
+  dependencyEditPolicy: DependencyEditPolicy;
+  acceptanceCriteria: string[];
+  validationCommands: string[];
+}
+
+export interface DependencyEvidence {
+  sourcePath: string;
+  sourceSymbols: string[];
+  targetPath: string;
+  targetSymbols: string[];
+  reason: string;
+}
+
 export type ContextPartKind =
   | "file"
   | "selection"
@@ -201,13 +235,16 @@ export interface TaskState {
   requestId: string;
   question: string;
   intent: Intent;
+  mode: InteractionMode;
+  agentProfile: AgentProfile;
   status:
     | "idle"
     | "planning"
     | "investigating"
     | "sending"
     | "completed"
-    | "failed";
+    | "failed"
+    | "cancelled";
 
   startedAt: number;
   completedAt?: number;
@@ -215,6 +252,28 @@ export interface TaskState {
   filesUsed: string[];
 
   aiCalls: number;
+
+  lastStep?: number;
+
+  checkpointContext?: ContextFile[];
+
+  checkpoints?: InvestigationCheckpoint[];
+
+  contract?: TaskContract;
+
+  validation: string[];
+
+  lastError?: string;
+}
+
+export interface InvestigationCheckpoint {
+  step: number;
+  kind: "decision" | "tool" | "validation";
+  action?: string;
+  tool?: string;
+  path?: string;
+  success?: boolean;
+  summary?: string;
 }
 
 
@@ -278,6 +337,23 @@ export interface AgentTaskStatus {
   agents: AgentRun[];
   events: AgentEvent[];
   answer?: string;
+  feedback?: TaskFeedback[];
+  evaluation?: TaskEvaluation;
+}
+
+export interface TaskFeedback {
+  rating: number;
+  category?: string;
+  comment?: string;
+  created_at?: string;
+}
+
+export interface TaskEvaluation {
+  feedback_count: number;
+  average_rating: number;
+  positive_count: number;
+  positive_rate: number;
+  updated_at?: string;
 }
 
 export interface AgentRun {
@@ -357,9 +433,15 @@ export interface AIRequest {
 
   context: AIContext;
 
+  task_contract?: TaskContract;
+
   memory?: string;
 
   plan?: string[];
+
+  validation?: string[];
+
+  checkpoints?: InvestigationCheckpoint[];
   step?: number;
 }
 export interface InvestigationStep {

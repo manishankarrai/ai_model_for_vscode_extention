@@ -1,17 +1,67 @@
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
 import * as vscode from "vscode";
 
 import {
   ProjectIndex,
   SearchResult
-} from "../models/types";
+} from "../models/types.ts";
 
 import {
   readTextFile
-} from "../utils/FileUtils";
+} from "../utils/FileUtils.ts";
+
+const STOP_WORDS = new Set([
+  "a",
+  "an",
+  "the",
+  "is",
+  "are",
+  "was",
+  "were",
+  "where",
+  "what",
+  "which",
+  "who",
+  "how",
+  "why",
+  "when",
+  "does",
+  "do",
+  "did",
+  "this",
+  "that",
+  "these",
+  "those",
+  "in",
+  "on",
+  "at",
+  "to",
+  "of",
+  "for",
+  "from",
+  "with",
+  "and",
+  "or",
+  "my",
+  "me",
+  "it",
+  "be",
+  "code",
+  "file",
+  "files",
+  "work"
+]);
 
 export class SearchEngine {
+
+  private extractTerms(query: string): string[] {
+    return query
+      .toLowerCase()
+      .replace(/[^\w\s-]/g, " ")
+      .split(/\s+/)
+      .filter((term) => term.length >= 2 && !STOP_WORDS.has(term));
+  }
 
   async search(
     query: string,
@@ -27,10 +77,11 @@ export class SearchEngine {
       return [];
     }
 
-    const terms =
-      normalizedQuery
-        .split(/\s+/)
-        .filter(Boolean);
+    const terms = this.extractTerms(normalizedQuery);
+    if (terms.length === 0) {
+      // Fallback if query only contained stop words or symbols
+      terms.push(...normalizedQuery.split(/\s+/).filter(Boolean));
+    }
 
     const results: SearchResult[] = [];
 

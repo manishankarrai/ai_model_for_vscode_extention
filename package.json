@@ -69,6 +69,10 @@
         "command": "mm3.resetAccessToken",
         "title": "MM3: Reset Access Token",
         "icon": "$(key)"
+      },
+      {
+        "command": "mm3.moveToSecondarySidebar",
+        "title": "MM3: Move Chat to Secondary Side Bar (Copilot-style)"
       }
     ],
     "configuration": {
@@ -123,7 +127,7 @@
     "lint": "eslint src --ext ts",
     "watch": "npm run check-types && node esbuild.js --watch",
     "package": "npm run compile",
-    "test": "node --experimental-strip-types --test src/intelligence/contextSelection.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
+    "test": "node --experimental-strip-types --test src/intelligence/contextSelection.test.ts src/intelligence/dependencyReference.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts src/state/ProjectMemory.test.ts src/state/TaskState.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

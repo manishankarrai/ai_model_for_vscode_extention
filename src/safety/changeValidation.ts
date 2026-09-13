@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 
 import { flow } from "../utils/flowLog.ts";
+import type { CodeChange, TaskContract } from "../models/types.ts";
 
 const MAX_CHANGE_CHARS = 200_000;
 
@@ -182,5 +183,83 @@ export function assertWorkspaceTrusted(isTrusted: boolean): void {
       "MM3 refused to write: workspace is not trusted. Enable workspace trust first."
     );
   }
+}
+
+export function assertChangesWithinTaskScope(
+  changes: CodeChange[],
+  contract: TaskContract
+): void {
+  if (contract.selectedPaths.length === 0) {
+    return;
+  }
+
+  const allowedPaths = new Set(contract.allowedEditPaths.map(normalizePath));
+  const invalidPaths = changes
+    .map((change) => normalizePath(change.path))
+    .filter((path, index, paths) => !allowedPaths.has(path) && paths.indexOf(path) === index);
+
+  if (invalidPaths.length > 0) {
+    throw new Error(
+      `MM3 rejected out-of-scope changes: ${invalidPaths.join(", ")}`
+    );
+  }
+
+  for (const change of changes) {
+    const range = contract.selectedRanges.find(
+      (candidate) => normalizePath(candidate.path) === normalizePath(change.path)
+    );
+    if (range) {
+      assertChangeWithinRange(change.path, change.original, change.updated, range.startLine, range.endLine);
+    }
+  }
+}
+
+function assertChangeWithinRange(
+  path: string,
+  original: string,
+  updated: string,
+  startLine?: number,
+  endLine?: number
+): void {
+  if (!startLine || !endLine || startLine < 1 || endLine < startLine) {
+    return;
+  }
+
+  const originalLines = normalizeNewlines(original).split("\n");
+  const updatedLines = normalizeNewlines(updated).split("\n");
+  const prefix = originalLines.slice(0, startLine - 1).join("\n");
+  const suffix = originalLines.slice(endLine).join("\n");
+  const prefixMatches = prefix === "" || updatedLines.slice(0, startLine - 1).join("\n") === prefix;
+  const suffixMatches = suffix === "" || updatedLines.slice(-suffix.split("\n").length).join("\n") === suffix;
+
+  if (!prefixMatches || !suffixMatches) {
+    throw new Error(
+      `MM3 rejected out-of-range changes in ${path}; only lines ${startLine}-${endLine} may change.`
+    );
+  }
+}
+
+export function assertPathsWithinTaskScope(
+  paths: string[],
+  contract?: TaskContract
+): void {
+  if (!contract || contract.selectedPaths.length === 0) {
+    return;
+  }
+
+  const allowedPaths = new Set(contract.allowedEditPaths.map(normalizePath));
+  const invalidPaths = paths
+    .map(normalizePath)
+    .filter((path, index, normalizedPaths) => !allowedPaths.has(path) && normalizedPaths.indexOf(path) === index);
+
+  if (invalidPaths.length > 0) {
+    throw new Error(
+      `MM3 rejected out-of-scope changes: ${invalidPaths.join(", ")}`
+    );
+  }
+}
+
+function normalizePath(filePath: string): string {
+  return filePath.replace(/\\/g, "/").replace(/^\.\//, "");
 }
 

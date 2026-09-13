@@ -42,10 +42,10 @@ export function activate(
   // ----------------------------------------------------------
 
   const conversation =
-    new ConversationState();
+    new ConversationState(context.workspaceState);
 
   const taskState =
-    new TaskState();
+    new TaskState(context.workspaceState);
 
   const projectMemory =
     new ProjectMemory(
@@ -116,7 +116,8 @@ export function activate(
         flow("activate.resetAccessTokenCallback", 1, "enter");
         return resetAccessToken(context);
       },
-      changeApplier
+      changeApplier,
+      context.workspaceState
     );
 
   context.subscriptions.push(
@@ -141,6 +142,39 @@ export function activate(
       }
     )
   );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "mm3.moveToSecondarySidebar",
+      async () => {
+        flow("command.moveToSecondarySidebar", 1, "enter");
+        await provider.focusChat();
+        await vscode.commands.executeCommand("workbench.action.moveView");
+      }
+    )
+  );
+
+  // ----------------------------------------------------------
+  // One-time nudge: MM3 works best docked in the Secondary Side Bar,
+  // similar to Copilot Chat. VS Code has no API to place it there by
+  // default, so offer a guided one-click move instead.
+  // ----------------------------------------------------------
+
+  const sidebarPromptKey = "mm3.secondarySidebarPromptShown";
+  if (!context.globalState.get<boolean>(sidebarPromptKey)) {
+    void context.globalState.update(sidebarPromptKey, true);
+    void vscode.window
+      .showInformationMessage(
+        "MM3 works best in the Secondary Side Bar, like Copilot Chat. Move it there now?",
+        "Move Chat",
+        "Later"
+      )
+      .then((choice) => {
+        if (choice === "Move Chat") {
+          void vscode.commands.executeCommand("mm3.moveToSecondarySidebar");
+        }
+      });
+  }
 
   context.subscriptions.push(
     vscode.commands.registerCommand(

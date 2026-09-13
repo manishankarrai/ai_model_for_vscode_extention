@@ -1,21 +1,28 @@
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
-import {
+import type {
   Intent,
   InvestigationPlan,
   AgentToolName
-} from "../models/types";
+} from "../models/types.ts";
 
 export class Planner {
 
   createPlan(
     intent: Intent,
-    question: string
+    question: string,
+    selectedPathCount = 0
   ): InvestigationPlan {
     flow("Planner.createPlan", 1, "enter", { intent });
 
     const normalizedQuestion =
       question.toLowerCase();
+
+    const limits = this.getLimits(
+      intent,
+      normalizedQuestion,
+      selectedPathCount
+    );
 
     /*
      * ------------------------------------------------------------
@@ -61,13 +68,13 @@ export class Planner {
             "run_tests"
           ],
 
-          maxSteps: 1000,
+          maxSteps: limits.maxSteps,
 
-          maxFiles: 1000,
+          maxFiles: limits.maxFiles,
 
-          maxChars: 5_000_000,
+          maxChars: limits.maxChars,
 
-          maxSearchResults: 1000,
+          maxSearchResults: limits.maxSearchResults,
 
           depth: "deep"
         };
@@ -94,13 +101,13 @@ export class Planner {
             "run_tests"
           ],
 
-          maxSteps: 1000,
+          maxSteps: limits.maxSteps,
 
-          maxFiles: 1000,
+          maxFiles: limits.maxFiles,
 
-          maxChars: 5_000_000,
+          maxChars: limits.maxChars,
 
-          maxSearchResults: 1000,
+          maxSearchResults: limits.maxSearchResults,
 
           depth: "deep"
         };
@@ -130,13 +137,13 @@ export class Planner {
             "search"
           ],
 
-          maxSteps: 1000,
+          maxSteps: limits.maxSteps,
 
-          maxFiles: 1000,
+          maxFiles: limits.maxFiles,
 
-          maxChars: 5_000_000,
+          maxChars: limits.maxChars,
 
-          maxSearchResults: 1000,
+          maxSearchResults: limits.maxSearchResults,
 
           depth: "deep"
         };
@@ -164,13 +171,13 @@ export class Planner {
             "read_file"
           ],
 
-          maxSteps: 1000,
+          maxSteps: limits.maxSteps,
 
-          maxFiles: 1000,
+          maxFiles: limits.maxFiles,
 
-          maxChars: 5_000_000,
+          maxChars: limits.maxChars,
 
-          maxSearchResults: 1000,
+          maxSearchResults: limits.maxSearchResults,
 
           depth: "medium"
         };
@@ -204,13 +211,13 @@ export class Planner {
             "read_file"
           ],
 
-          maxSteps: 1000,
+          maxSteps: limits.maxSteps,
 
-          maxFiles: 1000,
+          maxFiles: limits.maxFiles,
 
-          maxChars: 5_000_000,
+          maxChars: limits.maxChars,
 
-          maxSearchResults: 1000,
+          maxSearchResults: limits.maxSearchResults,
 
           depth:
             this.isSimpleQuestion(
@@ -250,5 +257,42 @@ export class Planner {
       pattern =>
         question.includes(pattern)
     );
+  }
+
+  private getLimits(
+    intent: Intent,
+    question: string,
+    selectedPathCount: number
+  ): Pick<InvestigationPlan, "maxSteps" | "maxFiles" | "maxChars" | "maxSearchResults"> {
+    if (intent === "chat" && this.isSimpleQuestion(question)) {
+      return {
+        maxSteps: 6,
+        maxFiles: 4,
+        maxChars: 80_000,
+        maxSearchResults: 12
+      };
+    }
+
+    if (selectedPathCount > 0) {
+      return {
+        maxSteps: intent === "bug_analysis" ? 12 : 8,
+        maxFiles: intent === "architecture" ? 16 : Math.max(8, selectedPathCount * 3),
+        maxChars: 600_000,
+        maxSearchResults: 40
+      };
+    }
+
+    switch (intent) {
+      case "implementation":
+        return { maxSteps: 16, maxFiles: 12, maxChars: 800_000, maxSearchResults: 50 };
+      case "bug_analysis":
+        return { maxSteps: 18, maxFiles: 14, maxChars: 900_000, maxSearchResults: 60 };
+      case "architecture":
+        return { maxSteps: 20, maxFiles: 24, maxChars: 1_200_000, maxSearchResults: 80 };
+      case "analyze":
+        return { maxSteps: 10, maxFiles: 10, maxChars: 500_000, maxSearchResults: 40 };
+      default:
+        return { maxSteps: 8, maxFiles: 6, maxChars: 200_000, maxSearchResults: 24 };
+    }
   }
 }

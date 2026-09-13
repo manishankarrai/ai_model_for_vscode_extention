@@ -2,20 +2,24 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as vscode from "vscode";
 
-import { CodeChange } from "../models/types";
+import { CodeChange, TaskContract } from "../models/types";
 import { flow } from "../utils/flowLog";
 
 import {
   ChangeSetStore,
   contentHash,
   createNamedChangeSet,
-  NamedChangeSet
+  NamedChangeSet,
+  applyHunkApprovals,
+  splitHunks,
+  DiffHunk
 } from "./changeSets";
 import {
   assertFileHashMatches,
   assertFileNotStale,
   assertNotSensitivePath,
   assertWorkspaceTrusted,
+  assertChangesWithinTaskScope,
   hashContent,
   resolveApplyContent,
   validateChangeSize,
@@ -40,6 +44,7 @@ export interface PendingFileReview {
   uri: vscode.Uri;
   previousPath?: string;
   previousUri?: vscode.Uri;
+  hunks?: DiffHunk[];
 }
 
 function buildUnifiedDiff(path: string, original: string, updated: string): string {
@@ -94,9 +99,10 @@ export class CodeChangeApplier {
 
   async offer(
     changes: CodeChange[],
-    changeSetName?: string
+    changeSetName?: string,
+    contract?: TaskContract
   ): Promise<AppliedChangeSummary[]> {
-    return this.applyAutomatically(changes, changeSetName);
+    return this.applyAutomatically(changes, changeSetName, contract, true);
   }
 
   /**
@@ -105,7 +111,9 @@ export class CodeChangeApplier {
    */
   async applyAutomatically(
     changes: CodeChange[],
-    changeSetName?: string
+    changeSetName?: string,
+    contract?: TaskContract,
+    reviewOnly = false
   ): Promise<AppliedChangeSummary[]> {
     if (changes.length === 0) {
       return [];
@@ -145,6 +153,30 @@ export class CodeChangeApplier {
       }
     };
 
+    if (contract) {
+      const scopedChanges: CodeChange[] = [];
+      for (const change of changes) {
+        const relativePath = validateWorkspaceRelativePath(change.path);
+        const uri = vscode.Uri.joinPath(
+          workspace.uri,
+          ...relativePath.split("/")
+        );
+        const exists = await fileExists(uri);
+        const current = exists
+          ? (await vscode.workspace.openTextDocument(uri)).getText()
+          : "";
+        const updated = exists
+          ? resolveApplyContent(current, change.original ?? "", change.updated ?? "")
+          : change.updated ?? "";
+        scopedChanges.push({
+          path: relativePath,
+          original: current,
+          updated
+        });
+      }
+      assertChangesWithinTaskScope(scopedChanges, contract);
+    }
+
     const errors: string[] = [];
 
     for (const change of changes) {
@@ -165,11 +197,13 @@ export class CodeChangeApplier {
 
         if (createNew) {
           const parent = vscode.Uri.joinPath(uri, "..");
-          await vscode.workspace.fs.createDirectory(parent);
-          await vscode.workspace.fs.writeFile(
-            uri,
-            new TextEncoder().encode(updatedText)
-          );
+          if (!reviewOnly) {
+            await vscode.workspace.fs.createDirectory(parent);
+            await vscode.workspace.fs.writeFile(
+              uri,
+              new TextEncoder().encode(updatedText)
+            );
+          }
         } else {
           const document = await vscode.workspace.openTextDocument(uri);
           const current = document.getText();
@@ -181,41 +215,50 @@ export class CodeChangeApplier {
           originalText = current;
           updatedText = next;
 
-          const edit = new vscode.WorkspaceEdit();
-          const fullRange = new vscode.Range(
-            document.positionAt(0),
-            document.positionAt(current.length)
-          );
-          edit.replace(document.uri, fullRange, next);
-          if (!await vscode.workspace.applyEdit(edit)) {
-            throw new Error(`Could not update ${relativePath}.`);
+          if (!reviewOnly) {
+            const edit = new vscode.WorkspaceEdit();
+            const fullRange = new vscode.Range(
+              document.positionAt(0),
+              document.positionAt(current.length)
+            );
+            edit.replace(document.uri, fullRange, next);
+            if (!await vscode.workspace.applyEdit(edit)) {
+              throw new Error(`Could not update ${relativePath}.`);
+            }
           }
         }
 
-        const saved = await vscode.workspace.openTextDocument(uri);
-        await saved.save();
+        if (!reviewOnly) {
+          const saved = await vscode.workspace.openTextDocument(uri);
+          await saved.save();
+        }
 
-        changeSet.approvedPaths.push(change.path);
-        changeSet.approvedHunkIds.push(
-          ...review.hunks.map((hunk) => hunk.id)
-        );
+        if (!reviewOnly) {
+          changeSet.approvedPaths.push(change.path);
+          changeSet.approvedHunkIds.push(
+            ...review.hunks.map((hunk) => hunk.id)
+          );
+        }
 
-        appliedItems.push({
-          uri,
-          path: change.path,
-          original: originalText,
-          updated: updatedText,
-          originalHash: hashContent(originalText),
-          updatedHash: contentHash(updatedText),
-          created: createNew
-        });
+        if (!reviewOnly) {
+          appliedItems.push({
+            uri,
+            path: change.path,
+            original: originalText,
+            updated: updatedText,
+            originalHash: hashContent(originalText),
+            updatedHash: contentHash(updatedText),
+            created: createNew
+          });
+        }
         this.upsertPending({
           path: change.path,
           original: originalText,
           updated: updatedText,
           created: createNew,
           deleted: false,
-          uri
+          uri,
+          hunks: splitHunks(change.path, originalText, updatedText)
         });
         summaries.push({
           path: change.path,
@@ -247,11 +290,13 @@ export class CodeChangeApplier {
       original: item.original,
       updated: item.updated
     }));
-    changeSet.status = summaries.length > 0 ? "applied" : "rejected";
+    changeSet.status = reviewOnly
+      ? (summaries.length > 0 ? "proposed" : "rejected")
+      : (summaries.length > 0 ? "applied" : "rejected");
     changeSet.audit.push({
       at: Date.now(),
       action: summaries.length > 0 ? "applied" : "rejected",
-      detail: `${summaries.length}/${changes.length} files (auto-applied)`
+      detail: `${summaries.length}/${changes.length} files (${reviewOnly ? "queued for review" : "auto-applied"})`
     });
     this.store.update(changeSet);
 
@@ -371,14 +416,85 @@ export class CodeChangeApplier {
     return [...this.pendingReviews.values()];
   }
 
-  acceptFile(filePath: string): void {
+  async applyApprovedHunks(
+    filePath: string,
+    hunkIds: string[]
+  ): Promise<void> {
+    flow("CodeChangeApplier.applyApprovedHunks", 1, "enter", { filePath });
+    const item = this.pendingReviews.get(filePath);
+    if (!item || item.deleted || item.created) {
+      throw new Error(`No editable hunks are available for ${filePath}.`);
+    }
+
+    assertWorkspaceTrusted(vscode.workspace.isTrusted);
+    const document = await vscode.workspace.openTextDocument(item.uri);
+    const current = document.getText();
+    if (current !== item.original && current !== item.updated) {
+      assertFileNotStale(filePath, current, item.updated, "apply");
+    }
+    const hunks = item.hunks ?? splitHunks(filePath, item.original, item.updated);
+    const merged = applyHunkApprovals(item.original, item.updated, hunkIds, hunks);
+    const edit = new vscode.WorkspaceEdit();
+    edit.replace(
+      item.uri,
+      new vscode.Range(
+        document.positionAt(0),
+        document.positionAt(document.getText().length)
+      ),
+      merged
+    );
+    if (!await vscode.workspace.applyEdit(edit)) {
+      throw new Error(`Could not apply selected hunks for ${filePath}.`);
+    }
+    const saved = await vscode.workspace.openTextDocument(item.uri);
+    await saved.save();
+    item.updated = merged;
+    item.hunks = splitHunks(filePath, item.original, merged);
+  }
+
+  async acceptFile(filePath: string): Promise<void> {
     flow("CodeChangeApplier.acceptFile", 1, "enter", { filePath });
+    const item = this.pendingReviews.get(filePath);
+    if (!item) {
+      return;
+    }
+    if (item.previousUri && item.previousPath) {
+      const edit = new vscode.WorkspaceEdit();
+      edit.renameFile(item.previousUri, item.uri, { overwrite: false });
+      if (!await vscode.workspace.applyEdit(edit)) {
+        throw new Error(`Could not move ${filePath}.`);
+      }
+    } else if (item.created) {
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(item.uri, ".."));
+      await vscode.workspace.fs.writeFile(item.uri, new TextEncoder().encode(item.updated));
+    } else if (item.deleted) {
+      await vscode.workspace.fs.delete(item.uri, { useTrash: false });
+    } else {
+      const document = await vscode.workspace.openTextDocument(item.uri);
+      const current = document.getText();
+      if (current !== item.original && current !== item.updated) {
+        throw new Error(`File changed while reviewing ${filePath}.`);
+      }
+      const edit = new vscode.WorkspaceEdit();
+      edit.replace(
+        item.uri,
+        new vscode.Range(document.positionAt(0), document.positionAt(current.length)),
+        item.updated
+      );
+      if (!await vscode.workspace.applyEdit(edit)) {
+        throw new Error(`Could not apply ${filePath}.`);
+      }
+      const saved = await vscode.workspace.openTextDocument(item.uri);
+      await saved.save();
+    }
     this.pendingReviews.delete(filePath);
   }
 
-  acceptAll(): void {
+  async acceptAll(): Promise<void> {
     flow("CodeChangeApplier.acceptAll", 1, "enter");
-    this.pendingReviews.clear();
+    for (const filePath of [...this.pendingReviews.keys()]) {
+      await this.acceptFile(filePath);
+    }
   }
 
   dismissPending(): void {
@@ -504,11 +620,6 @@ export class CodeChangeApplier {
     const uri = this.resolveWorkspaceUri(relativePath);
     const document = await vscode.workspace.openTextDocument(uri);
     const original = document.getText();
-    const edit = new vscode.WorkspaceEdit();
-    edit.deleteFile(uri, { ignoreIfNotExists: false });
-    if (!await vscode.workspace.applyEdit(edit)) {
-      throw new Error(`Could not delete ${relativePath}.`);
-    }
     this.upsertPending({
       path: relativePath,
       original,
@@ -535,12 +646,6 @@ export class CodeChangeApplier {
     const toUri = this.resolveWorkspaceUri(toPath);
     const document = await vscode.workspace.openTextDocument(fromUri);
     const original = document.getText();
-    const edit = new vscode.WorkspaceEdit();
-    edit.renameFile(fromUri, toUri, { overwrite: false });
-    if (!await vscode.workspace.applyEdit(edit)) {
-      throw new Error(`Could not move ${fromPath}.`);
-    }
-    this.pendingReviews.delete(fromPath);
     this.upsertPending({
       path: toPath,
       original,

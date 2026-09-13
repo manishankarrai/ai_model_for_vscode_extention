@@ -162,6 +162,23 @@ export class BackendClient {
     );
   }
 
+  async submitTaskFeedback(
+    requestId: string,
+    feedback: {
+      rating: number;
+      category?: string;
+      comment?: string;
+    },
+    accessToken: string
+  ): Promise<{ status: string }> {
+    flow("BackendClient.submitTaskFeedback", 1, "enter", { requestId });
+    return this.post<{ status: string }>(
+      `/api/v1/ai/tasks/${encodeURIComponent(requestId)}/feedback`,
+      feedback,
+      accessToken
+    );
+  }
+
   async retryAgent(
     request: AIRequest,
     requestId: string,

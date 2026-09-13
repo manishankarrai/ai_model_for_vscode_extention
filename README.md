@@ -422,7 +422,7 @@ Backend work:
 
 Acceptance criteria: users can ask about only highlighted code or selected files, and MM3 never silently expands that context.
 
-Remaining Stage 8 work: drag-and-drop files, durable per-conversation context history, and richer source citations.
+Completed Stage 8 follow-up: drag-and-drop files and durable workspace-backed conversation/context history.
 
 ## Stage 9 - Ask and Agent Modes
 
@@ -502,26 +502,24 @@ Coordinator        Selects, schedules, and merges specialist results
 
 Extension work:
 
-- Add an Agent mode selector and bounded agent-count control.
 - Let users choose named agents or use Coordinator selection.
 - Show each agent status, evidence, answer, confidence, and failures.
 - Support cancel, retry, and partial results.
 
 Backend work:
 
-- Add selected agent IDs and maximum agent count to the request contract.
 - Run independent investigations in parallel where safe, then merge through Coordinator.
-- Give every agent a role prompt, context budget, tool policy, timeout, and trace ID.
+- Give every agent a role prompt, internally managed context limit, tool policy, timeout, and trace ID.
 - Deduplicate overlapping searches and repeated tool requests.
 
 Acceptance criteria: users can choose one or several agents, the Coordinator returns one grounded answer, and a failed specialist does not erase successful results.
 
 Implemented foundation:
 
-- The composer provides specialist profile selection and a bounded count from 1 to 5.
+- The composer provides specialist profile selection; execution limits remain internal.
 - Ask mode is normalized to one Ask agent and cannot enable specialist tools.
-- Agent profile, count, and tool policy are sent through the typed client/backend contract.
-- The backend validates profile and count and adds role-aware instructions to Gemini prompts.
+- Agent profile and tool policy are sent through the typed client/backend contract.
+- The backend owns specialist execution and context limits and adds role-aware instructions to Gemini prompts.
 
 Implemented orchestration foundation:
 
@@ -530,7 +528,7 @@ Implemented orchestration foundation:
 - Failed specialists are logged and excluded when other specialists succeed.
 - Usage totals and project memory are recorded for the complete multi-agent request.
 
-Remaining Stage 10 work: richer per-agent selection UX, evidence deduplication, and specialist-specific context budgets.
+Completed Stage 10 follow-up: internally managed specialist execution and deduplicated specialist evidence.
 
 ## Stage 11 - Backend Agent Orchestration
 
@@ -571,7 +569,7 @@ Implemented control foundation:
 - The Agent reloads persisted task events when the live SSE stream is unavailable.
 - Replayed events use the same webview trace as live events.
 
-Remaining Stage 11 work: richer retry history, event controls, and resumable answer state.
+Completed Stage 11 follow-up: bounded retry history and persisted resumable answer state.
 
 ## Stage 12 - Streaming, Quality, and Evaluation
 

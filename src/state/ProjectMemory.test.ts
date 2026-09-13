@@ -2,7 +2,7 @@ import { flow } from "../utils/flowLog.ts";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { ProjectMemory } from "./ProjectMemory";
+import { ProjectMemory } from "./ProjectMemory.ts";
 
 describe("ProjectMemory", () => {
   it("stores project facts and returns a summary", () => {

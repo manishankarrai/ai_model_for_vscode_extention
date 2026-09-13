@@ -1,8 +1,8 @@
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
-import {
+import type {
   DependencyInfo
-} from "../models/types";
+} from "../models/types.ts";
 
 export class DependencyDetector {
 
@@ -15,11 +15,11 @@ export class DependencyDetector {
     const dependencies: DependencyInfo[] = [];
 
     // --------------------------------------------------------
-    // JavaScript / TypeScript imports
+    // JavaScript / TypeScript imports & exports
     // --------------------------------------------------------
 
     const importRegex =
-      /import\s+(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/g;
+      /(?:import|export)\s+(?:[\s\S]*?\s+from\s+)?["']([^"']+)["']/g;
 
     let match: RegExpExecArray | null;
 
@@ -32,6 +32,20 @@ export class DependencyDetector {
 
         target: match[1],
 
+        type: "import"
+      });
+    }
+
+    // Dynamic import('...')
+    const dynamicImportRegex =
+      /import\s*\(\s*["']([^"']+)["']\s*\)/g;
+
+    while (
+      (match = dynamicImportRegex.exec(content)) !== null
+    ) {
+      dependencies.push({
+        source: filePath,
+        target: match[1],
         type: "import"
       });
     }
@@ -60,36 +74,32 @@ export class DependencyDetector {
     // Go imports
     // --------------------------------------------------------
 
-    const goImportRegex =
-      /["']([^"']+)["']/g;
-
     if (filePath.endsWith(".go")) {
 
-      const importSection =
-        content.match(
-          /import\s*(?:\(([\s\S]*?)\)|["']([^"']+)["'])/
-        );
+      const goImportBlockRegex = /import\s*\(([\s\S]*?)\)/g;
+      const goSingleImportRegex = /import\s+(?:[a-zA-Z0-9_]+\s+)?["']([^"']+)["']/g;
+      const stringLiteralRegex = /["']([^"']+)["']/g;
 
-      if (importSection) {
-
-        const section =
-          importSection[1] ??
-          importSection[2] ??
-          "";
-
-        while (
-          (match =
-            goImportRegex.exec(section)) !== null
-        ) {
-
+      // Grouped imports: import ( "fmt" "os" )
+      while ((match = goImportBlockRegex.exec(content)) !== null) {
+        const blockContent = match[1];
+        let pathMatch: RegExpExecArray | null;
+        while ((pathMatch = stringLiteralRegex.exec(blockContent)) !== null) {
           dependencies.push({
             source: filePath,
-
-            target: match[1],
-
+            target: pathMatch[1],
             type: "package"
           });
         }
+      }
+
+      // Single line imports: import "fmt" or import alias "pkg"
+      while ((match = goSingleImportRegex.exec(content)) !== null) {
+        dependencies.push({
+          source: filePath,
+          target: match[1],
+          type: "package"
+        });
       }
     }
 

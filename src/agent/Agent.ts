@@ -13,6 +13,8 @@ import {
   InteractionMode,
   InvestigationResult,
   ImplementationPlan,
+  TaskContract,
+  SelectionScope,
 } from "../models/types";
 
 import { IntentDetector } from "./IntentDetector";
@@ -24,6 +26,7 @@ import { InvestigationState } from "../intelligence/InvestigationState";
 import { ProjectIndexer } from "../intelligence/ProjectIndexer";
 import { SearchEngine } from "../intelligence/SearchEngine";
 import { RelevanceRanker } from "../intelligence/RelevanceRanker";
+import { DependencyResolver } from "../intelligence/DependencyResolver";
 
 import {
   ContextBuilder,
@@ -168,6 +171,9 @@ export class Agent {
   private readonly ranker =
     new RelevanceRanker();
 
+  private readonly dependencyResolver =
+    new DependencyResolver();
+
 
   private readonly contextBuilder =
     new ContextBuilder();
@@ -177,6 +183,7 @@ export class Agent {
     new BackendClient();
 
   private lastRequest?: AdaptiveAIRequest;
+  private lastTaskContract?: TaskContract;
 
 
   private readonly tokenEstimator =
@@ -233,11 +240,11 @@ export class Agent {
     selectedContext: ContextPart[] = [],
     mode: InteractionMode = "agent",
     agentProfile: AgentProfile = mode === "ask" ? "ask" : "coordinator",
-    agentCount = 1,
     signal?: AbortSignal,
-    onEvent?: (event: AgentEvent) => void
+    onEvent?: (event: AgentEvent) => void,
+    resumeCheckpoint?: { step?: number; validation?: string[] }
   ): Promise<AIResponse> {
-    flow("Agent.process", 1, "enter", { mode, agentProfile, agentCount });
+    flow("Agent.process", 1, "enter", { mode, agentProfile });
 
     // --------------------------------------------------------
     // Workspace validation
@@ -277,6 +284,37 @@ export class Agent {
       this.createRequestId();
     flow("Agent.process", 2, "intent and request", { requestId, intent });
 
+    const selectedPaths = [
+      ...new Set(selectedContext.map((part) => part.path.replace(/\\/g, "/")))
+    ];
+    const selectedRanges = selectedContext
+      .filter((part) => part.kind === "selection")
+      .map((part) => ({
+        path: part.path,
+        startLine: part.startLine,
+        endLine: part.endLine
+      }));
+    const selectionScope: SelectionScope = selectedRanges.length > 0
+      ? "selection"
+      : selectedContext.length > 0
+        ? "full-file"
+        : "workspace";
+    const taskContract: TaskContract = {
+      requestId,
+      intent,
+      selectedPaths,
+      selectedRanges,
+      selectionScope,
+      requiredDependencyPaths: [],
+      dependencyEvidence: [],
+      allowedEditPaths: selectedPaths,
+      dependencyEditPolicy: "selected-only",
+      acceptanceCriteria: [question.trim()],
+      validationCommands: []
+    };
+    this.lastTaskContract = taskContract;
+    this.workspaceTools.setTaskContract(taskContract);
+
     if (onEvent && mode === "agent") {
       void this.backend.streamAgentEvents(
         requestId,
@@ -300,8 +338,17 @@ export class Agent {
     this.taskState.start(
       requestId,
       question,
-      intent
+      intent,
+      mode,
+      agentProfile
     );
+    if (resumeCheckpoint) {
+      this.taskState.restoreCheckpoint(
+        resumeCheckpoint.step,
+        resumeCheckpoint.validation
+      );
+    }
+    this.taskState.setContract(taskContract);
 
 
     this.logger.info(
@@ -347,6 +394,45 @@ export class Agent {
       }
       flow("Agent.process", 3, "index ready", { files: index.files.size });
 
+      const dependencyEvidence = selectionScope === "workspace"
+        ? []
+        : await this.dependencyResolver.resolveForFilesWithEvidence(
+            selectedPaths,
+            index,
+            taskContract.selectedRanges
+          );
+      const requiredDependencyPaths = [
+        ...new Set(dependencyEvidence.map((item) => item.targetPath))
+      ];
+      taskContract.dependencyEvidence = selectionScope === "workspace"
+        ? dependencyEvidence
+        : [];
+      taskContract.requiredDependencyPaths = selectionScope === "workspace"
+        ? requiredDependencyPaths
+        : [];
+      taskContract.allowedEditPaths = selectionScope === "workspace"
+        ? [...new Set([...selectedPaths, ...requiredDependencyPaths])]
+        : selectedPaths;
+      taskContract.dependencyEditPolicy = selectionScope === "workspace" && requiredDependencyPaths.length > 0
+        ? "selected-plus-required-dependencies"
+        : "selected-only";
+      this.taskState.setContract(taskContract);
+      this.workspaceTools.setTaskContract(taskContract);
+      if (selectedPaths.length > 0) {
+        onEvent?.({
+          profile: agentProfile,
+          type: "progress",
+          message: selectionScope === "workspace" && requiredDependencyPaths.length > 0
+            ? `Scope expanded with resolved dependencies: ${requiredDependencyPaths.join(", ")}.`
+            : selectionScope === "selection"
+              ? "Selected code is authoritative; dependency expansion is disabled."
+              : selectionScope === "full-file"
+                ? "Attached files are authoritative; dependency expansion is disabled."
+                : "No workspace dependencies resolved from the selected files.",
+          timestamp: Date.now()
+        });
+      }
+
 
       // ======================================================
       // Project model
@@ -368,7 +454,8 @@ export class Agent {
       const plan =
         this.planner.createPlan(
           intent,
-          question
+          question,
+          selectedContext.length
         );
 
 
@@ -390,6 +477,13 @@ export class Agent {
 
 
       flow("Agent.process", 4, "plan created", { intent, tools: selectedTools });
+
+      onEvent?.({
+        profile: agentProfile,
+        type: "progress",
+        message: `Plan ready: ${plan.steps.length} steps, up to ${plan.maxFiles} files, ${selectedContext.length > 0 ? `${selectedContext.length} selected context item(s)` : "workspace scope"}.`,
+        timestamp: Date.now()
+      });
 
       this.logger.info(
         "Local plan created",
@@ -435,7 +529,7 @@ export class Agent {
         : await this.searchEngine.search(
             question,
             index,
-            50
+            plan.maxSearchResults
           );
 
 
@@ -639,17 +733,17 @@ export class Agent {
 
 
       const maxFiles =
-        config.get<number>(
+        Math.min(plan.maxFiles, config.get<number>(
           "maxFilesInContext",
           1000
-        );
+        ));
 
 
       const maxChars =
-        config.get<number>(
+        Math.min(plan.maxChars, config.get<number>(
           "maxContextChars",
           5_000_000
-        );
+        ));
 
 
       // ------------------------------------------------------
@@ -733,10 +827,15 @@ export class Agent {
         context = resolveRequestContext({
           mode,
           selected: selectedContext,
-          investigated: [...selectedFiles, ...investigated.files],
-          evidence: investigated.evidence,
+          investigated: selectionScope === "workspace"
+            ? investigated.files
+            : selectedFiles,
+          evidence: selectionScope === "workspace"
+            ? investigated.evidence
+            : [],
           indexSummary: investigated.indexSummary,
-          maxFiles
+          maxFiles,
+          selectionScope
         });
       }
 
@@ -820,8 +919,7 @@ export class Agent {
         tool_policy: getToolPolicy(mode),
 
         agent: {
-          profile: agentProfile,
-          count: Math.max(1, Math.min(agentCount, mode === "ask" ? 1 : 5))
+          profile: agentProfile
         },
 
         project: {
@@ -839,6 +937,8 @@ export class Agent {
         },
 
         context,
+
+        task_contract: taskContract,
 
         memory:
           this.projectMemory.getContextForAI(),
@@ -879,7 +979,8 @@ export class Agent {
           plan,
           context,
           signal,
-          onEvent
+          onEvent,
+          resumeCheckpoint?.step
         );
 
 
@@ -940,7 +1041,11 @@ export class Agent {
     } catch (error) {
       flow("Agent.process", 7, "failed");
 
-      this.taskState.fail();
+      if (signal?.aborted || (error instanceof DOMException && error.name === "AbortError")) {
+        this.taskState.cancel();
+      } else {
+        this.taskState.fail(error);
+      }
 
 
       this.logger.error(
@@ -951,6 +1056,18 @@ export class Agent {
 
       throw error;
     }
+  }
+
+  getLastTaskContract(): TaskContract | undefined {
+    return this.lastTaskContract;
+  }
+
+  getPersistedTaskState() {
+    return this.taskState.get();
+  }
+
+  cancelCurrentTask(): void {
+    this.taskState.cancel();
   }
 
   async retrySpecialist(
@@ -966,8 +1083,7 @@ export class Agent {
     const request = {
       ...this.lastRequest,
       agent: {
-        profile,
-        count: 1
+        profile
       }
     };
     const result = await this.backend.retryAgent(
@@ -1053,7 +1169,9 @@ export class Agent {
 
     signal?: AbortSignal,
 
-    onEvent?: (event: AgentEvent) => void
+    onEvent?: (event: AgentEvent) => void,
+
+    resumeFromStep = 0
   ): Promise<AIResponse> {
     flow("Agent.runAdaptiveInvestigation", 1, "enter");
 
@@ -1073,6 +1191,7 @@ export class Agent {
 
     const state =
       new InvestigationState();
+    state.resumeFrom(resumeFromStep);
 
 
     this.logger.info(
@@ -1227,9 +1346,18 @@ export class Agent {
 
         context,
 
+        validation:
+          this.taskState.get().validation,
+
+        checkpoints:
+          this.taskState.get().checkpoints,
+
         step:
           currentStep
       };
+
+      this.taskState.setCheckpoint(currentStep);
+      this.taskState.setContextSnapshot(context.files);
 
 
       this.taskState.setStatus(
@@ -1283,6 +1411,16 @@ export class Agent {
 
       const response =
         rawResponse as AdaptiveAIResponse;
+
+      if (response.decision) {
+        this.taskState.addCheckpoint({
+          step: currentStep,
+          kind: "decision",
+          action: response.decision.action,
+          tool: response.decision.tool?.tool,
+          summary: response.decision.reason?.slice(0, 500)
+        });
+      }
 
 
       // ======================================================
@@ -1603,6 +1741,7 @@ export class Agent {
       // ======================================================
 
       let evidence: Array<{ path: string; content: string }>;
+      let toolSucceeded = true;
 
       try {
         evidence =
@@ -1661,6 +1800,7 @@ export class Agent {
           }
         }
       } catch (error) {
+        toolSucceeded = false;
         const message =
           error instanceof Error ? error.message : String(error);
         if (message.includes("not approved")) {
@@ -1671,6 +1811,115 @@ export class Agent {
           path: `m3-tools/${tool.tool}.txt`,
           content: `tool=${tool.tool}\nsuccess=false\n${message}`
         }];
+      }
+
+      this.taskState.addCheckpoint({
+        step: currentStep,
+        kind: "tool",
+        tool: tool.tool,
+        path: tool.path,
+        success: toolSucceeded,
+        summary: `${evidence.length} evidence item(s)`
+      });
+
+      const mutationTools = new Set([
+        "edit_file",
+        "write_file",
+        "create_file",
+        "delete_file",
+        "rename_file",
+        "move_file",
+        "apply_change_set",
+        "apply_patch"
+      ]);
+      const validationPath = tool.path?.trim() || tool.changes?.[0]?.path;
+      if (mutationTools.has(tool.tool) && validationPath) {
+        try {
+          const diagnostics = await this.executeAdaptiveTool(
+            {
+              tool: "get_diagnostics",
+              path: validationPath,
+              reason: "Automatically validate the changed file after mutation"
+            },
+            workspaceUri,
+            index
+          );
+          evidence.push(...diagnostics);
+          onEvent?.({
+            profile: (initialRequest.agent?.profile || "agent") as AgentEvent["profile"],
+            type: "progress",
+            message: `Diagnostics collected for ${validationPath}.`,
+            timestamp: Date.now()
+          });
+          this.taskState.addValidation(`Diagnostics collected for ${validationPath}`);
+          this.taskState.addCheckpoint({
+            step: currentStep,
+            kind: "validation",
+            tool: "get_diagnostics",
+            path: validationPath,
+            success: true,
+            summary: `${diagnostics.length} diagnostic evidence item(s)`
+          });
+        } catch (diagnosticError) {
+          this.logger.warn("Automatic diagnostics failed after mutation", diagnosticError);
+          evidence.push({
+            path: `m3-tools/diagnostics-${validationPath}.txt`,
+            content: `Automatic diagnostics failed: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}`
+          });
+          this.taskState.addCheckpoint({
+            step: currentStep,
+            kind: "validation",
+            tool: "get_diagnostics",
+            path: validationPath,
+            success: false,
+            summary: "automatic diagnostics failed"
+          });
+        }
+      }
+
+      if (
+        mutationTools.has(tool.tool) &&
+        (initialRequest.action === "implementation" || initialRequest.action === "bug_analysis")
+      ) {
+        try {
+          const testEvidence = await this.executeAdaptiveTool(
+            {
+              tool: "run_tests",
+              reason: "Validate the mutation and provide failure evidence for repair"
+            },
+            workspaceUri,
+            index
+          );
+          evidence.push(...testEvidence);
+          onEvent?.({
+            profile: (initialRequest.agent?.profile || "agent") as AgentEvent["profile"],
+            type: "progress",
+            message: "Validation tests completed after the change.",
+            timestamp: Date.now()
+          });
+          this.taskState.addValidation("Validation tests completed");
+          this.taskState.addCheckpoint({
+            step: currentStep,
+            kind: "validation",
+            tool: "run_tests",
+            success: true,
+            summary: `${testEvidence.length} test evidence item(s)`
+          });
+        } catch (testError) {
+          this.logger.warn("Automatic validation tests failed after mutation", testError);
+          evidence.push({
+            path: "m3-tools/automatic-tests.txt",
+            content: `Automatic validation tests failed: ${testError instanceof Error ? testError.message : String(testError)}`
+          });
+          this.taskState.addValidation(`Validation tests failed: ${testError instanceof Error ? testError.message : String(testError)}`);
+          this.taskState.addCheckpoint({
+            step: currentStep,
+            kind: "validation",
+            tool: "run_tests",
+            success: false,
+            summary: "automatic validation tests failed"
+          });
+        }
       }
 
 

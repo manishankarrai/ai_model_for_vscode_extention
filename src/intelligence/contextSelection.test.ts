@@ -34,7 +34,7 @@ describe("context selection", () => {
     assert.equal(context.parts?.[0].kind, "selection");
   });
 
-  it("uses full investigated file when the user selected a snippet", () => {
+  it("sends only the selected lines and excludes investigated dependencies", () => {
     const context = resolveRequestContext({
       mode: "agent",
       selected: [{
@@ -42,20 +42,48 @@ describe("context selection", () => {
         path: "api/handlers/shop.go",
         content: "func GetShop() {}",
         language: "go",
-        startLine: 10,
-        endLine: 12
+        startLine: 3,
+        endLine: 3
       }],
       investigated: [{
         path: "api/handlers/shop.go",
-        content: "package handlers\n\nfunc GetShop() {}\n"
+        content: "package handlers\n\nfunc GetShop() {}\n\nfunc CreateShop() {}\n"
+      }, {
+        path: "api/services/shop.go",
+        content: "func CreateShop() {}"
       }],
       evidence: [],
       indexSummary: "summary",
       maxFiles: 8
     });
 
-    assert.equal(context.files[0].content, "package handlers\n\nfunc GetShop() {}\n");
+    assert.match(context.files[0].content, /func GetShop\(\) \{\}/);
+    assert.doesNotMatch(context.files[0].content, /func CreateShop\(\) \{\}/);
+    assert.equal(context.files.length, 1);
     assert.equal(context.parts?.[0].kind, "selection");
+    assert.match(context.evidence[0].reason, /complete AI context/);
+  });
+
+  it("sends an attached full file verbatim without adding dependencies", () => {
+    const context = resolveRequestContext({
+      mode: "agent",
+      selected: [{
+        kind: "attachment",
+        path: "src/app.ts",
+        content: "const app = true;",
+        language: "typescript"
+      }],
+      investigated: [{ path: "src/dep.ts", content: "const dep = true;" }],
+      evidence: [],
+      indexSummary: "summary",
+      maxFiles: 8,
+      selectionScope: "full-file"
+    });
+
+    assert.deepEqual(context.files, [{
+      path: "src/app.ts",
+      content: "const app = true;"
+    }]);
   });
 
   it("caps and ranks agent investigation files", () => {

@@ -150,6 +150,10 @@ export class InvestigationState {
     return this._steps;
   }
 
+  resumeFrom(step: number): void {
+    this._steps = Math.max(0, Math.min(this.maxSteps - 1, Math.floor(step)));
+  }
+
 
   /**
    * Starts a new adaptive reasoning step.

@@ -1,13 +1,22 @@
 import { flow } from "../utils/flowLog";
 
-import {
-  ConversationMessage
-} from "../models/types";
+import type * as vscode from "vscode";
+import type { ConversationMessage } from "../models/types";
 
 export class ConversationState {
 
+  private readonly storageKey = "mm3.conversation.v1";
+
   private readonly messages:
     ConversationMessage[] = [];
+
+  private readonly storage?: vscode.Memento;
+
+  constructor(storage?: vscode.Memento) {
+    this.storage = storage;
+    const saved = storage?.get<ConversationMessage[]>(this.storageKey) ?? [];
+    this.messages.push(...saved.slice(-100));
+  }
 
   addUserMessage(
     content: string
@@ -20,6 +29,7 @@ export class ConversationState {
 
       timestamp: Date.now()
     });
+    void this.persist();
   }
 
   addAssistantMessage(
@@ -33,6 +43,7 @@ export class ConversationState {
 
       timestamp: Date.now()
     });
+    void this.persist();
   }
 
   getMessages(): ConversationMessage[] {
@@ -43,6 +54,7 @@ export class ConversationState {
   clear(): void {
     flow("ConversationState.clear", 1, "enter");
     this.messages.length = 0;
+    void this.persist();
   }
 
   getRecent(
@@ -52,5 +64,12 @@ export class ConversationState {
     return this.messages.slice(
       -count
     );
+  }
+
+  private async persist(): Promise<void> {
+    if (!this.storage) {
+      return;
+    }
+    await this.storage.update(this.storageKey, this.messages.slice(-100));
   }
 }

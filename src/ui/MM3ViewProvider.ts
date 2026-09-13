@@ -39,6 +39,7 @@ export class MM3ViewProvider
 
   private selectedContext: ContextPart[] = [];
   private readonly dismissedContextKeys = new Set<string>();
+  private readonly contextStorageKey = "mm3.context.parts.v1";
 
   private readonly billingClient =
     new BackendClient();
@@ -49,7 +50,6 @@ export class MM3ViewProvider
     question: string;
     mode: InteractionMode;
     agentProfile: AgentProfile;
-    agentCount: number;
   };
 
   constructor(
@@ -58,7 +58,8 @@ export class MM3ViewProvider
     private readonly logger: Logger,
     private readonly getAccessToken: () => Promise<string>,
     private readonly resetAccessToken: () => Promise<string>,
-    private readonly codeChangeApplier = new CodeChangeApplier()
+    private readonly codeChangeApplier = new CodeChangeApplier(),
+    private readonly storage?: vscode.Memento
   ) {
     flow("MM3ViewProvider.constructor", 1, "enter");
   }
@@ -68,6 +69,7 @@ export class MM3ViewProvider
   ): void {
     flow("MM3ViewProvider.resolveWebviewView", 1, "enter");
     this.view = webviewView;
+    this.selectedContext = this.loadPersistedContext();
 
     webviewView.webview.options = {
       enableScripts: true,
@@ -153,12 +155,12 @@ export class MM3ViewProvider
         await this.handleQuestion(
           message.value,
           message.mode,
-          message.agentProfile,
-          1
+          message.agentProfile
         );
         break;
 
       case "cancel_request":
+        this.agent.cancelCurrentTask();
         this.requestController?.abort();
         break;
 
@@ -167,18 +169,35 @@ export class MM3ViewProvider
         break;
 
       case "retry_last":
-        if (this.lastQuestion) {
+        {
+          const task = this.agent.getPersistedTaskState();
+          if (task.question && (task.status === "failed" || task.status === "cancelled")) {
+            await this.restoreTaskContext(task.contract, task.checkpointContext);
+            await this.handleQuestion(
+              task.question,
+              task.mode,
+              task.agentProfile,
+              {
+                step: task.lastStep,
+                validation: task.validation
+              }
+            );
+          } else if (this.lastQuestion) {
           await this.handleQuestion(
             this.lastQuestion.question,
             this.lastQuestion.mode,
-            this.lastQuestion.agentProfile,
-            1
+            this.lastQuestion.agentProfile
           );
+          }
         }
         break;
 
       case "attach_files":
         await this.attachFiles();
+        break;
+
+      case "attach_dropped_files":
+        await this.attachDroppedFiles(message.paths);
         break;
 
       case "add_selection":
@@ -203,6 +222,7 @@ export class MM3ViewProvider
           }
           return part.path !== message.path;
         });
+        await this.persistContext();
         this.postContextParts();
         break;
 
@@ -215,6 +235,7 @@ export class MM3ViewProvider
       case "clear":
         this.agent.clearConversation();
         this.selectedContext = [];
+        await this.persistContext();
         this.dismissedContextKeys.clear();
         this.clearFileReviews();
 
@@ -241,18 +262,24 @@ export class MM3ViewProvider
       case "load_billing":
         await this.refreshBilling();
         break;
+      case "task_feedback":
+        await this.submitTaskFeedback(
+          message.requestId,
+          message.rating
+        );
+        break;
 
       case "open_external":
         await vscode.env.openExternal(vscode.Uri.parse(message.url));
         break;
 
       case "review_accept":
-        this.codeChangeApplier.acceptFile(message.path);
+        await this.codeChangeApplier.acceptFile(message.path);
         this.postFileReviewRemoved(message.path);
         break;
 
       case "review_accept_all":
-        this.codeChangeApplier.acceptAll();
+        await this.codeChangeApplier.acceptAll();
         this.post({ type: "file_reviews_cleared" });
         break;
 
@@ -269,18 +296,47 @@ export class MM3ViewProvider
         await this.codeChangeApplier.showFileDiff(message.path);
         break;
 
+      case "review_apply_hunks":
+        await this.codeChangeApplier.applyApprovedHunks(
+          message.path,
+          message.hunkIds
+        );
+        this.postPendingFileReviews();
+        break;
+
       default:
         break;
     }
   }
+  private async submitTaskFeedback(
+    requestId: string,
+    rating: number
+  ): Promise<void> {
+    try {
+      const accessToken = await this.getAccessToken();
+      if (!accessToken || !requestId.trim()) {
+        return;
+      }
+      await this.billingClient.submitTaskFeedback(
+        requestId,
+        { rating },
+        accessToken
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Unable to record task feedback: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
   // handle questions
   private async handleQuestion(
     question: string,
     mode: InteractionMode,
     agentProfile: AgentProfile,
-    agentCount: number
+    resumeCheckpoint?: { step?: number; validation?: string[] }
   ): Promise<void> {
-    flow("MM3ViewProvider.handleQuestion", 1, "enter", { mode, agentProfile, agentCount });
+    flow("MM3ViewProvider.handleQuestion", 1, "enter", { mode, agentProfile });
     const trimmedQuestion =
       question.trim();
 
@@ -299,8 +355,7 @@ export class MM3ViewProvider
     this.lastQuestion = {
       question: trimmedQuestion,
       mode,
-      agentProfile,
-      agentCount
+      agentProfile
     };
 
     this.post({
@@ -327,7 +382,6 @@ export class MM3ViewProvider
           await this.getRequestContext(),
           mode,
           agentProfile,
-          agentCount,
           this.requestController.signal,
           (event: AgentEvent) => {
             this.post({
@@ -340,7 +394,8 @@ export class MM3ViewProvider
                     : event.message
               }
             });
-          }
+          },
+          resumeCheckpoint
         );
 
       this.post({
@@ -352,6 +407,7 @@ export class MM3ViewProvider
         agents: response.agents ?? [],
         citations: response.citations ?? [],
         quality: response.quality,
+        checkpoints: this.agent.getPersistedTaskState().checkpoints ?? [],
         confidence: typeof response.decision === "object"
           ? response.decision?.confidence
           : undefined,
@@ -363,7 +419,9 @@ export class MM3ViewProvider
       if (response.implementation_plan?.changes?.length) {
         try {
           await this.codeChangeApplier.offer(
-            response.implementation_plan.changes
+            response.implementation_plan.changes,
+            undefined,
+            this.agent.getLastTaskContract()
           );
         } catch (applyError) {
           this.logger.error("MM3 failed to apply planned file changes", applyError);
@@ -448,6 +506,94 @@ export class MM3ViewProvider
     );
   }
 
+  private loadPersistedContext(): ContextPart[] {
+    return (this.storage?.get<ContextPart[]>(this.contextStorageKey) ?? [])
+      .filter((part) => isSafeContextPath(part.path))
+      .slice(-20);
+  }
+
+  private async persistContext(): Promise<void> {
+    if (!this.storage) {
+      return;
+    }
+    await this.storage.update(
+      this.contextStorageKey,
+      this.selectedContext.slice(-20).map((part) => ({
+        ...part,
+        content: part.content.slice(0, 200_000)
+      }))
+    );
+  }
+
+  private async restoreTaskContext(
+    contract: ReturnType<Agent["getPersistedTaskState"]>["contract"],
+    checkpointContext: ReturnType<Agent["getPersistedTaskState"]>["checkpointContext"] = []
+  ): Promise<void> {
+    if (!contract && checkpointContext.length === 0) {
+      return;
+    }
+
+    const restored: ContextPart[] = [];
+    for (const path of contract?.selectedPaths ?? []) {
+      if (!isSafeContextPath(path)) {
+        continue;
+      }
+      try {
+        const workspace = vscode.workspace.workspaceFolders?.[0];
+        if (!workspace) {
+          return;
+        }
+        const document = await vscode.workspace.openTextDocument(
+          vscode.Uri.joinPath(workspace.uri, ...path.split("/"))
+        );
+        const range = contract?.selectedRanges.find((candidate) => candidate.path === path);
+        if (range?.startLine && range.endLine) {
+          const start = Math.max(0, range.startLine - 1);
+          const end = Math.min(document.lineCount - 1, range.endLine - 1);
+          const selection = new vscode.Range(
+            start,
+            0,
+            end,
+            document.lineAt(end).text.length
+          );
+          restored.push({
+            kind: "selection",
+            path,
+            content: document.getText(selection),
+            language: document.languageId,
+            startLine: range.startLine,
+            endLine: range.endLine
+          });
+        } else {
+          restored.push({
+            kind: "attachment",
+            path,
+            content: document.getText(),
+            language: document.languageId
+          });
+        }
+      } catch (error) {
+        this.logger.warn(`Unable to restore task context for ${path}: ${String(error)}`);
+      }
+    }
+    this.selectedContext = restored;
+    const restoredPaths = new Set(restored.map((part) => part.path));
+    for (const file of checkpointContext) {
+      if (!isSafeContextPath(file.path) || restoredPaths.has(file.path)) {
+        continue;
+      }
+      restored.push({
+        kind: "attachment",
+        path: file.path,
+        content: file.content,
+        language: ""
+      });
+      restoredPaths.add(file.path);
+    }
+    this.selectedContext = restored;
+    this.postContextParts();
+  }
+
   private async attachFiles(): Promise<void> {
     flow("MM3ViewProvider.attachFiles", 1, "enter");
     const files = await vscode.window.showOpenDialog({
@@ -488,6 +634,40 @@ export class MM3ViewProvider
       });
     }
 
+    await this.persistContext();
+    this.postContextParts();
+  }
+
+  private async attachDroppedFiles(paths: string[]): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      return;
+    }
+
+    for (const path of paths.slice(0, 20)) {
+      const relativePath = path.replace(/\\/g, "/").replace(/^\.?\//, "");
+      if (!isSafeContextPath(relativePath)) {
+        continue;
+      }
+      try {
+        const uri = vscode.Uri.joinPath(workspace.uri, ...relativePath.split("/"));
+        const document = await vscode.workspace.openTextDocument(uri);
+        if (document.getText().length > 200_000) {
+          continue;
+        }
+        this.selectedContext = this.selectedContext.filter((part) => part.path !== relativePath);
+        this.selectedContext.push({
+          kind: "attachment",
+          path: relativePath,
+          content: document.getText(),
+          language: document.languageId
+        });
+      } catch (error) {
+        this.logger.warn(`Unable to attach dropped file ${relativePath}: ${String(error)}`);
+      }
+    }
+
+    await this.persistContext();
     this.postContextParts();
   }
 
@@ -525,6 +705,7 @@ export class MM3ViewProvider
     };
     this.dismissedContextKeys.delete(contextPartKey(nextPart));
     this.selectedContext.unshift(nextPart);
+    await this.persistContext();
     this.postContextParts();
     await this.focusChat();
     vscode.window.showInformationMessage(
@@ -551,8 +732,15 @@ export class MM3ViewProvider
     parts: ContextPart[] = this.selectedContext
   ): void {
     flow("MM3ViewProvider.postContextParts", 1, "enter", { count: parts.length });
+    const hasSelection = parts.some((part) => part.kind === "selection");
+    const scope = hasSelection
+      ? "selection"
+      : parts.length > 0
+        ? "full-file"
+        : "workspace";
     this.post({
       type: "context",
+      scope,
       parts: parts.map((part) => ({
         path: part.path,
         kind: part.kind,
@@ -659,7 +847,12 @@ export class MM3ViewProvider
     const files = this.codeChangeApplier.getPendingReviews().map((item) => ({
       path: item.path,
       created: item.created,
-      deleted: item.deleted
+      deleted: item.deleted,
+      hunks: (item.hunks ?? []).map((hunk) => ({
+        id: hunk.id,
+        startLine: hunk.startLine,
+        lineCount: hunk.lines.length
+      }))
     }));
     if (files.length === 0) {
       return;
@@ -777,6 +970,17 @@ body {
   height: 100vh;
 }
 
+/* Center content and cap line length when MM3 is docked in a wide area,
+   such as the Secondary Side Bar, while still filling narrow widths. */
+.header,
+.messages,
+.composer {
+  width: 100%;
+  max-width: 980px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Header                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -785,9 +989,11 @@ body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 8px 10px 6px;
+  padding: 10px 14px;
   font-weight: 600;
   user-select: none;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  flex-shrink: 0;
 }
 
 .header-title {
@@ -797,6 +1003,20 @@ body {
   font-size: 13px;
   min-width: 0;
   flex: 1;
+}
+
+.brand-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 6px;
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
+  font-size: 10px;
+  font-weight: 700;
+  flex-shrink: 0;
 }
 
 .header-actions {
@@ -823,31 +1043,53 @@ body {
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 8px 10px 4px;
+  padding: 14px 14px 4px;
   scroll-behavior: smooth;
 }
 
 .message {
-  margin-bottom: 8px;
-  padding: 8px 10px;
-  border-radius: 10px;
+  margin-bottom: 12px;
+  padding: 10px 13px;
+  border-radius: 14px;
   word-break: break-word;
-  line-height: 1.45;
-  font-size: 12.5px;
+  line-height: 1.5;
+  font-size: 13px;
+  max-width: 92%;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
+  animation: m3-message-in 0.16s ease-out;
+}
+
+@keyframes m3-message-in {
+  from {
+    opacity: 0;
+    transform: translateY(4px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 
 .user {
+  margin-left: auto;
+  border-bottom-right-radius: 4px;
+
   background:
-    var(--vscode-textBlockQuote-background);
+    var(--vscode-button-background);
+
+  color:
+    var(--vscode-button-foreground);
 
   border:
-    1px solid
-    var(--vscode-textBlockQuote-border);
+    1px solid transparent;
 
   white-space: pre-wrap;
 }
 
 .assistant {
+  margin-right: auto;
+  border-bottom-left-radius: 4px;
+
   background:
     var(--vscode-editor-background);
 
@@ -969,6 +1211,20 @@ body {
   background: var(--vscode-button-background);
   color: var(--vscode-button-foreground);
   border-color: transparent;
+}
+
+.hunk-controls {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  flex-wrap: wrap;
+  padding: 6px 10px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.hunk-controls button.selected {
+  background: var(--vscode-button-background);
+  color: var(--vscode-button-foreground);
 }
 
 .thinking-indicator {
@@ -1265,6 +1521,27 @@ body {
   font-weight: 600;
 }
 
+.feedback-actions {
+  display: flex;
+  gap: 4px;
+  margin: -4px 0 10px;
+}
+
+.feedback-actions button {
+  width: 28px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 4px;
+  color: var(--vscode-foreground);
+  background: transparent;
+  cursor: pointer;
+}
+
+.feedback-actions button:hover {
+  background: var(--vscode-toolbar-hoverBackground);
+}
+
 .citation-list {
   margin: 0 0 12px;
   padding: 0;
@@ -1416,7 +1693,8 @@ body {
 /* -------------------------------------------------------------------------- */
 
 .composer {
-  padding: 8px 10px 10px;
+  padding: 8px 14px 14px;
+  flex-shrink: 0;
 }
 
 .composer-box {
@@ -1425,12 +1703,21 @@ body {
   gap: 6px;
   padding: 8px;
   border: 1px solid var(--vscode-input-border);
-  border-radius: 12px;
+  border-radius: 14px;
   background: var(--vscode-input-background);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  transition: border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .composer-box:focus-within {
   border-color: var(--vscode-focusBorder);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.18);
+}
+
+.composer.drop-target .composer-box {
+  border-color: var(--vscode-focusBorder);
+  border-style: dashed;
+  background: var(--vscode-list-dropBackground, var(--vscode-input-background));
 }
 
 textarea {
@@ -1486,6 +1773,7 @@ textarea:disabled {
   color: var(--vscode-foreground);
   background: transparent;
   cursor: pointer;
+  transition: background-color 0.1s ease, transform 0.1s ease;
 }
 
 .icon-btn.primary {
@@ -1495,6 +1783,7 @@ textarea:disabled {
 
 .icon-btn:hover:not(:disabled) {
   background: var(--vscode-toolbar-hoverBackground);
+  transform: scale(1.05);
 }
 
 .icon-btn.primary:hover:not(:disabled) {
@@ -1513,8 +1802,11 @@ textarea:disabled {
 .context-parts {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
-  padding: 0 12px 6px;
+  gap: 5px;
+  padding: 0 14px 6px;
+  max-width: 980px;
+  margin: 0 auto;
+  width: 100%;
   font-size: 11px;
 }
 
@@ -1522,10 +1814,16 @@ textarea:disabled {
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border-radius: 999px;
   background: var(--vscode-badge-background);
   color: var(--vscode-badge-foreground);
+  transition: background-color 0.1s ease;
+}
+
+.context-chip:hover {
+  background: var(--vscode-badge-background);
+  filter: brightness(1.1);
 }
 
 .context-chip button {
@@ -1546,17 +1844,38 @@ textarea:disabled {
 .empty {
   display: flex;
 
+  flex-direction: column;
+
   align-items: center;
 
   justify-content: center;
+
+  gap: 10px;
 
   height: 100%;
 
   text-align: center;
 
-  opacity: 0.5;
+  opacity: 0.7;
 
   padding: 20px;
+}
+
+.empty-icon {
+  font-size: 28px;
+  opacity: 0.8;
+}
+
+.empty-title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.empty-subtitle {
+  font-size: 12px;
+  max-width: 320px;
+  line-height: 1.5;
+  opacity: 0.85;
 }
 
 </style>
@@ -1571,6 +1890,7 @@ textarea:disabled {
 
     <div class="header-title">
 
+      <span class="brand-mark">M3</span>
       <span>MM3 AI Agent</span>
       <span id="wallet-balance" class="credits">0 credits</span>
       <span id="model" class="model"></span>
@@ -1592,8 +1912,9 @@ textarea:disabled {
       id="empty"
       class="empty"
     >
-Describe the task, bug, or issue you want MM3 to investigate or fix.
-
+      <div class="empty-icon">💬</div>
+      <div class="empty-title">Ask MM3 anything about this project</div>
+      <div class="empty-subtitle">Describe a task, bug, or question. Attach files or a selection for focused context.</div>
     </div>
 
   </div>
@@ -1678,6 +1999,7 @@ let streamPauseTimer = 0;
 const STREAM_PAUSE_MS = 180;
 
 const contextParts = [];
+let contextScope = "workspace";
 
 function renderContextParts() {
   let container = document.getElementById("context-parts");
@@ -1696,7 +2018,16 @@ function renderContextParts() {
   }
 
   const label = document.createElement("span");
-  label.textContent = "Context";
+  label.textContent = contextScope === "selection"
+    ? "Selected code only"
+    : contextScope === "full-file"
+      ? "Attached files only"
+      : "Workspace context";
+  label.title = contextScope === "selection"
+    ? "Only the selected code will be sent to the AI. Dependencies are not added automatically."
+    : contextScope === "full-file"
+      ? "Only the attached file contents will be sent to the AI. Dependencies are not added automatically."
+      : "The AI may investigate relevant workspace files.";
   container.appendChild(label);
 
   contextParts.forEach((part) => {
@@ -1731,6 +2062,25 @@ function renderContextParts() {
 
 attach.addEventListener("click", () => {
   vscode.postMessage({ type: "attach_files" });
+});
+
+const composer = document.querySelector(".composer");
+composer.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  composer.classList.add("drop-target");
+});
+composer.addEventListener("dragleave", () => {
+  composer.classList.remove("drop-target");
+});
+composer.addEventListener("drop", (event) => {
+  event.preventDefault();
+  composer.classList.remove("drop-target");
+  const paths = [...(event.dataTransfer?.files || [])]
+    .map((file) => file.path || file.name)
+    .filter(Boolean);
+  if (paths.length > 0) {
+    vscode.postMessage({ type: "attach_dropped_files", paths });
+  }
 });
 
 addSelection.addEventListener("click", () => {
@@ -2423,6 +2773,46 @@ function createFileReviewRow(file) {
   actions.appendChild(accept);
   actions.appendChild(reject);
 
+  if (Array.isArray(file.hunks) && file.hunks.length > 1) {
+    const selectedHunks = new Set();
+    const hunkControls = document.createElement("div");
+    hunkControls.className = "hunk-controls";
+
+    file.hunks.forEach((hunk, index) => {
+      const hunkButton = document.createElement("button");
+      hunkButton.type = "button";
+      hunkButton.textContent = "H" + (index + 1);
+      hunkButton.title = "Toggle hunk at line " + hunk.startLine;
+      hunkButton.addEventListener("click", () => {
+        if (selectedHunks.has(hunk.id)) {
+          selectedHunks.delete(hunk.id);
+          hunkButton.classList.remove("selected");
+        } else {
+          selectedHunks.add(hunk.id);
+          hunkButton.classList.add("selected");
+        }
+      });
+      hunkControls.appendChild(hunkButton);
+    });
+
+    const applyHunks = document.createElement("button");
+    applyHunks.type = "button";
+    applyHunks.textContent = "Apply selected";
+    applyHunks.addEventListener("click", () => {
+      if (selectedHunks.size === 0) {
+        return;
+      }
+      vscode.postMessage({
+        type: "review_apply_hunks",
+        path: file.path,
+        hunkIds: [...selectedHunks]
+      });
+      applyHunks.disabled = true;
+    });
+    hunkControls.appendChild(applyHunks);
+    row.appendChild(hunkControls);
+  }
+
   row.appendChild(name);
   row.appendChild(actions);
   return row;
@@ -2475,6 +2865,40 @@ function addAgentRetryControls(agents) {
   });
 
   messages.appendChild(element);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function addFeedbackControls(requestId) {
+  if (!requestId) {
+    return;
+  }
+
+  const actions = document.createElement("div");
+  actions.className = "feedback-actions";
+  actions.setAttribute("aria-label", "Rate this answer");
+
+  [
+    { rating: 5, label: "Helpful" , icon: "👍" },
+    { rating: 1, label: "Not helpful", icon: "👎" }
+  ].forEach((item) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = item.icon;
+    button.title = item.label;
+    button.addEventListener("click", () => {
+      vscode.postMessage({
+        type: "task_feedback",
+        requestId,
+        rating: item.rating
+      });
+      actions.querySelectorAll("button").forEach((candidate) => {
+        candidate.disabled = true;
+      });
+    });
+    actions.appendChild(button);
+  });
+
+  messages.appendChild(actions);
   messages.scrollTop = messages.scrollHeight;
 }
 
@@ -2746,6 +3170,36 @@ function addExpandableList(title, items) {
   messages.scrollTop = messages.scrollHeight;
 }
 
+function addCheckpointList(items) {
+  if (!items || items.length === 0) {
+    return;
+  }
+
+  const panel = document.createElement("div");
+  panel.className = "detail-panel";
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "Investigation checkpoints";
+  const body = document.createElement("div");
+  body.className = "detail-body";
+  const list = document.createElement("ul");
+  list.className = "validation-list";
+  items.forEach((item) => {
+    const entry = document.createElement("li");
+    entry.className = "validation-check";
+    const result = item.success === false ? "failed" : item.success === true ? "ok" : "recorded";
+    const target = item.path ? " " + item.path : "";
+    entry.textContent = "Step " + item.step + ": " + item.kind + " " + (item.tool || item.action || "") + target + " (" + result + ")";
+    list.appendChild(entry);
+  });
+  body.appendChild(list);
+  details.appendChild(summary);
+  details.appendChild(body);
+  panel.appendChild(details);
+  messages.appendChild(panel);
+  messages.scrollTop = messages.scrollHeight;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Status                                                                     */
 /* -------------------------------------------------------------------------- */
@@ -2862,8 +3316,7 @@ function sendMessage() {
     type: "send_message",
     value: value,
     mode: mode.value,
-    agentProfile: agentProfile.value,
-    agentCount: 1
+    agentProfile: agentProfile.value
   });
 }
 
@@ -2964,6 +3417,8 @@ window.addEventListener(
           "assistant"
         );
 
+        addFeedbackControls(message.requestId);
+
         addConfidence(
           message.confidence
         );
@@ -2971,6 +3426,8 @@ window.addEventListener(
         addQualitySummary(
           message.quality
         );
+
+        addCheckpointList(message.checkpoints || []);
 
         addCitationList(
           message.citations
@@ -3019,6 +3476,7 @@ window.addEventListener(
 
       case "context":
         contextParts.length = 0;
+        contextScope = message.scope;
         contextParts.push(...message.parts);
         renderContextParts();
         break;
@@ -3219,7 +3677,6 @@ type WebviewMessage =
       value: string;
       mode: "ask" | "agent";
       agentProfile: AgentProfile;
-      agentCount: number;
     }
   | {
       type: "cancel_request";
@@ -3233,6 +3690,10 @@ type WebviewMessage =
     }
   | {
       type: "attach_files";
+    }
+  | {
+      type: "attach_dropped_files";
+      paths: string[];
     }
   | {
       type: "add_selection";
@@ -3263,6 +3724,11 @@ type WebviewMessage =
       type: "load_billing";
     }
   | {
+      type: "task_feedback";
+      requestId: string;
+      rating: number;
+    }
+  | {
       type: "open_external";
       url: string;
     }
@@ -3280,6 +3746,11 @@ type WebviewMessage =
   | {
       type: "review_open_diff";
       path: string;
+    }
+  | {
+      type: "review_apply_hunks";
+      path: string;
+      hunkIds: string[];
     };
 
 type WebviewResponse =
@@ -3312,6 +3783,14 @@ type WebviewResponse =
         context_files: number;
         recovery_score?: number;
       };
+      checkpoints?: Array<{
+        step: number;
+        kind: string;
+        action?: string;
+        tool?: string;
+        path?: string;
+        success?: boolean;
+      }>;
       confidence?: number;
       implementationPlan?: {
         files?: string[];
@@ -3327,6 +3806,7 @@ type WebviewResponse =
     }
   | {
       type: "context";
+      scope: "workspace" | "selection" | "full-file";
       parts: Array<{
         path: string;
         kind: string;
@@ -3353,6 +3833,11 @@ type WebviewResponse =
         path: string;
         created: boolean;
         deleted: boolean;
+        hunks: Array<{
+          id: string;
+          startLine: number;
+          lineCount: number;
+        }>;
       }>;
     }
   | {

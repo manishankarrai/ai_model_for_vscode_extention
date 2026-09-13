@@ -4,6 +4,7 @@ import { describe, it } from "node:test";
 
 import {
   assertFileHashMatches,
+  assertChangesWithinTaskScope,
   assertNotSensitivePath,
   assertWorkspaceTrusted,
   hashContent,
@@ -15,7 +16,8 @@ import {
 import {
   buildFileReview,
   createNamedChangeSet,
-  splitHunks
+  splitHunks,
+  applyHunkApprovals
 } from "./changeSets.ts";
 import {
   formatConflictSummary,
@@ -42,6 +44,63 @@ describe("stale-file protection", () => {
     assert.throws(() => assertWorkspaceTrusted(false), /not trusted/i);
   });
 
+  it("rejects selected-file changes outside the selected line range", () => {
+    const contract = {
+      requestId: "request-range",
+      intent: "implementation" as const,
+      selectedPaths: ["src/app.ts"],
+      selectedRanges: [{ path: "src/app.ts", startLine: 2, endLine: 2 }],
+      requiredDependencyPaths: [],
+      dependencyEvidence: [],
+      allowedEditPaths: ["src/app.ts"],
+      dependencyEditPolicy: "selected-only" as const,
+      acceptanceCriteria: [],
+      validationCommands: []
+    };
+
+    assert.doesNotThrow(() => assertChangesWithinTaskScope([
+      {
+        path: "src/app.ts",
+        original: "before\nselected\nafter",
+        updated: "before\nchanged\nafter"
+      }
+    ], contract));
+    assert.throws(() => assertChangesWithinTaskScope([
+      {
+        path: "src/app.ts",
+        original: "before\nselected\nafter",
+        updated: "changed-before\nselected\nafter"
+      }
+    ], contract), /out-of-range/i);
+  });
+
+  it("checks selected snippets after resolving them into the full file", () => {
+    const contract = {
+      requestId: "request-snippet-range",
+      intent: "implementation" as const,
+      selectedPaths: ["api/services/smartphone.go"],
+      selectedRanges: [{ path: "api/services/smartphone.go", startLine: 62, endLine: 83 }],
+      requiredDependencyPaths: [],
+      dependencyEvidence: [],
+      allowedEditPaths: ["api/services/smartphone.go"],
+      dependencyEditPolicy: "selected-only" as const,
+      acceptanceCriteria: [],
+      validationCommands: []
+    };
+    const current = Array.from({ length: 90 }, (_, index) => `line ${index + 1}`).join("\n");
+    const original = Array.from({ length: 22 }, (_, index) => `line ${index + 62}`).join("\n");
+    const updatedSnippet = Array.from({ length: 22 }, (_, index) =>
+      index === 10 ? "changed line 72" : `line ${index + 62}`
+    ).join("\n");
+    const updated = resolveApplyContent(current, original, updatedSnippet);
+
+    assert.doesNotThrow(() => assertChangesWithinTaskScope([{
+      path: "api/services/smartphone.go",
+      original: current,
+      updated
+    }], contract));
+  });
+
   it("rejects apply when hash drifted", () => {
     assert.throws(
       () => assertFileHashMatches("src/a.ts", "new", hashContent("old"), "apply"),
@@ -52,6 +111,45 @@ describe("stale-file protection", () => {
   it("accepts an unchanged apply candidate", () => {
     validateChangeSize("src/a.ts", "old", "new");
     assertFileHashMatches("src/a.ts", "old", hashContent("old"), "apply");
+  });
+
+  it("rejects changes outside explicitly selected files", () => {
+    const contract = {
+      requestId: "request-1",
+      intent: "implementation" as const,
+      selectedPaths: ["handlers/user.go", "services/user.go"],
+      selectedRanges: [],
+      requiredDependencyPaths: [],
+      dependencyEvidence: [],
+      allowedEditPaths: ["handlers/user.go", "services/user.go"],
+      dependencyEditPolicy: "selected-only" as const,
+      acceptanceCriteria: ["change the timeout"],
+      validationCommands: []
+    };
+
+    assert.doesNotThrow(() => assertChangesWithinTaskScope([
+      { path: "./handlers\\user.go", original: "old", updated: "new" }
+    ], contract));
+    assert.throws(() => assertChangesWithinTaskScope([
+      { path: "models/user.go", original: "old", updated: "new" }
+    ], contract), /out-of-scope/i);
+  });
+
+  it("does not restrict requests without explicit file selection", () => {
+    assert.doesNotThrow(() => assertChangesWithinTaskScope([
+      { path: "src/any-file.ts", original: "old", updated: "new" }
+    ], {
+      requestId: "request-2",
+      intent: "implementation",
+      selectedPaths: [],
+      selectedRanges: [],
+      requiredDependencyPaths: [],
+      dependencyEvidence: [],
+      allowedEditPaths: [],
+      dependencyEditPolicy: "selected-only",
+      acceptanceCriteria: [],
+      validationCommands: []
+    }));
   });
 
   it("applies planned updates when original is a selection or has different newlines", () => {
@@ -84,6 +182,19 @@ describe("change sets", () => {
     assert.ok(splitHunks("src/a.ts", change.original, change.updated).length >= 1);
     assert.equal(buildFileReview(change).path, "src/a.ts");
     assert.equal(set.audit[0].action, "created");
+  });
+
+  it("applies only approved hunks", () => {
+    const original = "one\ntwo\nthree\nfour\nfive";
+    const updated = "ONE\ntwo\nthree\nfour\nFIVE";
+    const hunks = splitHunks("src/a.ts", original, updated);
+    const first = hunks.find((hunk) => hunk.startLine === 1);
+    assert.ok(first);
+
+    assert.equal(
+      applyHunkApprovals(original, updated, [first.id], hunks),
+      "ONE\ntwo\nthree\nfour\nfive"
+    );
   });
 });
 

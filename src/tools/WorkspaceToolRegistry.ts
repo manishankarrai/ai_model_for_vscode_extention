@@ -7,13 +7,14 @@ import {
   AgentToolName,
   InteractionMode,
   ToolRequest,
-  ToolResult
+  ToolResult,
+  TaskContract
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import {
   assertNotSensitivePath,
+  assertPathsWithinTaskScope,
   assertWorkspaceTrusted,
-  normalizeNewlines,
   validateWorkspaceRelativePath
 } from "../safety/changeValidation";
 import { availableTools, isToolAllowed, isReadOnlyTool } from "./toolPolicy";
@@ -24,9 +25,15 @@ import { flow } from "../utils/flowLog";
 const execFileAsync = promisify(execFile);
 
 export class WorkspaceToolRegistry {
+  private taskContract?: TaskContract;
+
   constructor(
     private readonly changeApplier = new CodeChangeApplier()
   ) {}
+
+  setTaskContract(contract: TaskContract): void {
+    this.taskContract = contract;
+  }
 
   getAvailableTools(
     mode: InteractionMode
@@ -96,13 +103,13 @@ export class WorkspaceToolRegistry {
     if (changes.length === 0) {
       throw new Error("apply_change_set requires changes.");
     }
-    const applied = await this.changeApplier.offer(changes);
-    const diffs = applied.map((item) => item.diff).join("\n\n");
+    const proposed = await this.changeApplier.offer(changes, undefined, this.taskContract);
+    const diffs = proposed.map((item) => item.diff).join("\n\n");
     return this.result(
       request.tool,
       true,
       [
-        `Applied ${applied.length} file change(s).`,
+        `Queued ${proposed.length} file change(s) for user approval.`,
         diffs
       ].filter(Boolean).join("\n\n")
     );
@@ -118,20 +125,17 @@ export class WorkspaceToolRegistry {
     if (updated === undefined) {
       throw new Error("edit_file requires updated content.");
     }
-    const applied = await this.changeApplier.offer([{
+    assertPathsWithinTaskScope([filePath ?? ""], this.taskContract);
+    const proposed = await this.changeApplier.offer([{
       path: validateWorkspaceRelativePath(filePath ?? ""),
       original,
       updated
-    }]);
-    const after = (await vscode.workspace.openTextDocument(uri)).getText();
-    const ok = normalizeNewlines(after) === normalizeNewlines(updated);
-    const diff = applied[0]?.diff ?? "";
+    }], undefined, this.taskContract);
+    const diff = proposed[0]?.diff ?? "";
     return this.result(
       "edit_file",
-      ok,
-      ok
-        ? [`Updated ${filePath}.`, diff].filter(Boolean).join("\n\n")
-        : `Edit for ${filePath} was not applied.`
+      true,
+      [`Queued ${filePath} for user approval.`, diff].filter(Boolean).join("\n\n")
     );
   }
 
@@ -139,6 +143,7 @@ export class WorkspaceToolRegistry {
     filePath: string | undefined,
     content: string
   ): Promise<ToolResult> {
+    assertPathsWithinTaskScope([filePath ?? ""], this.taskContract);
     const applied = await this.changeApplier.offer([{
       path: validateWorkspaceRelativePath(filePath ?? ""),
       original: "",
@@ -148,28 +153,30 @@ export class WorkspaceToolRegistry {
     return this.result(
       "create_file",
       true,
-      [`Created ${filePath}.`, diff].filter(Boolean).join("\n\n")
+      [`Queued ${filePath} for user approval.`, diff].filter(Boolean).join("\n\n")
     );
   }
 
   private async deleteFile(
     filePath: string | undefined
   ): Promise<ToolResult> {
+    assertPathsWithinTaskScope([filePath ?? ""], this.taskContract);
     await this.changeApplier.deleteAndRecord(
       validateWorkspaceRelativePath(filePath ?? "")
     );
-    return this.result("delete_file", true, `Deleted ${filePath}.`);
+    return this.result("delete_file", true, `Queued deletion of ${filePath} for user approval.`);
   }
 
   private async moveFile(
     filePath: string | undefined,
     targetPath: string | undefined
   ): Promise<ToolResult> {
+    assertPathsWithinTaskScope([filePath ?? "", targetPath ?? ""], this.taskContract);
     await this.changeApplier.moveAndRecord(
       validateWorkspaceRelativePath(filePath ?? ""),
       validateWorkspaceRelativePath(targetPath ?? "")
     );
-    return this.result("move_file", true, `Moved ${filePath} to ${targetPath}.`);
+    return this.result("move_file", true, `Queued move of ${filePath} to ${targetPath} for user approval.`);
   }
 
   private async getDiagnostics(
@@ -193,7 +200,6 @@ export class WorkspaceToolRegistry {
     if (!taskName || !/^[a-zA-Z0-9._:-]+$/.test(taskName)) {
       throw new Error("run_task requires an allowlisted task name.");
     }
-    await this.confirm(`Run task ${taskName}?`);
     const tasks = await vscode.tasks.fetchTasks();
     const task = tasks.find((item) => item.name === taskName);
     if (!task) {
@@ -247,7 +253,6 @@ export class WorkspaceToolRegistry {
     assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const parsed = parseSafeCommand(command ?? "");
     const workspace = this.requireWorkspace();
-    await this.confirm(`Run \`${parsed.binary} ${parsed.args.join(" ")}\` in the workspace?`);
 
     try {
       const result = await execFileAsync(parsed.binary, parsed.args, {
@@ -342,18 +347,6 @@ export class WorkspaceToolRegistry {
     const normalized = validateWorkspaceRelativePath(filePath ?? "");
     assertNotSensitivePath(normalized);
     return vscode.Uri.joinPath(workspace.uri, ...normalized.split("/"));
-  }
-
-  private async confirm(message: string): Promise<void> {
-    flow("WorkspaceToolRegistry.confirm", 1, "enter");
-    const choice = await vscode.window.showWarningMessage(
-      message,
-      { modal: true },
-      "Approve"
-    );
-    if (choice !== "Approve") {
-      throw new Error("Operation was not approved.");
-    }
   }
 
   private result(
