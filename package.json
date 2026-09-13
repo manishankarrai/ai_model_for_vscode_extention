@@ -3,8 +3,8 @@
   "displayName": "MM3 AI Agent",
   "description": "Read-only local-first AI coding agent for VS Code",
   "version": "0.0.1",
-  "publisher": "mm3-ai",
-  "license": "MIT",
+  "publisher": "mm3ai",
+  "license": "SEE LICENSE IN LICENSE",
   "repository": {
     "type": "git",
     "url": "https://github.com/manishankarrai/m3.git"
@@ -84,7 +84,7 @@
       "properties": {
         "mm3.backendUrl": {
           "type": "string",
-          "default": "http://localhost:8080",
+          "default": "https://api.mm3ai.com",
           "description": "MM3 backend URL"
         },
         "mm3.maxContextChars": {
