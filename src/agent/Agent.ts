@@ -5,6 +5,7 @@ import {
   AIRequest,
   AIResponse,
   AIContext,
+  Intent,
   AgentProfile,
   AgentEvent,
   AgentTaskStatus,
@@ -13,6 +14,8 @@ import {
   InteractionMode,
   InvestigationResult,
   ImplementationPlan,
+  MAX_CONVERSATION_HISTORY,
+  ProjectMemoryPayload,
 } from "../models/types";
 
 import { IntentDetector } from "./IntentDetector";
@@ -43,7 +46,10 @@ import { ProjectUnderstanding } from "../project/project-understanding";
 import { ProjectMemory } from "../state/ProjectMemory";
 import { resolveRequestContext } from "../intelligence/contextSelection";
 import { getToolPolicy, isToolAllowed } from "../tools/toolPolicy";
-import { WorkspaceToolRegistry } from "../tools/WorkspaceToolRegistry";
+import {
+  ToolApprovalHandler,
+  WorkspaceToolRegistry
+} from "../tools/WorkspaceToolRegistry";
 import type { AgentToolName, CodeChange } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 
@@ -73,6 +79,15 @@ interface AdaptiveToolRequest {
   reason?: string;
 }
 
+interface AdaptiveToolResult {
+  tool: AdaptiveToolName;
+  path?: string;
+  success: boolean;
+  reason?: string;
+  output: string;
+  error?: string;
+}
+
 
 interface AdaptiveDecision {
 
@@ -91,6 +106,9 @@ interface AdaptiveDecision {
 
   tool?:
     AdaptiveToolRequest;
+
+  tools?:
+    AdaptiveToolRequest[];
 }
 
 
@@ -118,6 +136,7 @@ type AdaptiveAIResponse =
 type AdaptiveAIRequest =
   AIRequest & {
     step?: number;
+    tool_results?: AdaptiveToolResult[];
   };
 
 
@@ -222,6 +241,10 @@ export class Agent {
       );
   }
 
+  setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
+    this.workspaceTools.setApprovalHandler(handler);
+  }
+
 
   // ==========================================================
   // MAIN PROCESS
@@ -267,15 +290,25 @@ export class Agent {
     // Intent
     // --------------------------------------------------------
 
-    const intent =
-      this.intentDetector.detect(
+    const intentResolution =
+      this.intentDetector.resolve(
         question
       );
+
+    const intent = intentResolution.intent;
 
 
     const requestId =
       this.createRequestId();
     flow("Agent.process", 2, "intent and request", { requestId, intent });
+
+    if (intentResolution.kind !== "task") {
+      const answer = intentResolution.kind === "greeting"
+        ? "Hello. Tell me what you want to inspect, change, or understand."
+        : "What would you like me to do? Include the relevant file, behavior, or expected result.";
+      this.conversation.addAssistantMessage(answer);
+      return this.createLocalResponse(requestId, intent, answer, intentResolution.reason);
+    }
 
     if (onEvent && mode === "agent") {
       void this.backend.streamAgentEvents(
@@ -317,6 +350,8 @@ export class Agent {
       question
     );
 
+    this.emitProgress(onEvent, agentProfile, "Starting local investigation.");
+
 
     try {
 
@@ -339,6 +374,8 @@ export class Agent {
           "No project index found. Building index."
         );
 
+        this.emitProgress(onEvent, agentProfile, "Building the project index.");
+
 
         index =
           await this.indexer.build(
@@ -346,6 +383,7 @@ export class Agent {
           );
       }
       flow("Agent.process", 3, "index ready", { files: index.files.size });
+      this.emitProgress(onEvent, agentProfile, "Project index ready.");
 
 
       // ======================================================
@@ -429,6 +467,8 @@ export class Agent {
         }
       );
 
+      this.emitProgress(onEvent, agentProfile, "Searching the project for relevant files.");
+
 
       const searchResults = mode === "ask"
         ? []
@@ -446,6 +486,7 @@ export class Agent {
             searchResults.length
         }
       );
+      this.emitProgress(onEvent, agentProfile, "Ranking the most relevant project files.");
 
 
       // ======================================================
@@ -508,6 +549,7 @@ export class Agent {
             plan.maxChars
         }
       );
+      this.emitProgress(onEvent, agentProfile, "Investigating the relevant code locally.");
 
 
       let investigation: InvestigationResult;
@@ -592,6 +634,7 @@ export class Agent {
             investigation.stoppedReason
         }
       );
+      this.emitProgress(onEvent, agentProfile, "Local investigation complete. Preparing AI reasoning.");
 
 
       this.logger.info(
@@ -687,6 +730,17 @@ export class Agent {
       this.logger.info(
         "Merging investigation evidence into context",
         {
+          selectedContext:
+            selectedContext.map(
+              part => ({
+                path: part.path,
+                kind: part.kind,
+                startLine: part.startLine,
+                endLine: part.endLine,
+                chars: part.content.length
+              })
+            ),
+
           evidenceFiles:
             investigationEvidence.length,
 
@@ -715,20 +769,25 @@ export class Agent {
           maxFiles
         });
       } else {
-        const investigated =
-          await this.contextBuilder.build(
-            index,
-            ranked,
-            projectModel,
-            {
-              maxFiles,
-              maxChars
-            },
-            investigationEvidence
-          );
-
         const selectedFiles =
           await this.readSelectedWorkspaceFiles(selectedContext);
+
+        const investigated = selectedContext.length > 0
+          ? {
+              files: [],
+              evidence: [],
+              indexSummary: ""
+            }
+          : await this.contextBuilder.build(
+              index,
+              ranked,
+              projectModel,
+              {
+                maxFiles,
+                maxChars
+              },
+              investigationEvidence
+            );
 
         context = resolveRequestContext({
           mode,
@@ -843,6 +902,12 @@ export class Agent {
         memory:
           this.projectMemory.getContextForAI(),
 
+        project_memory:
+          this.getProjectMemoryPayload(),
+
+        conversation_history:
+          this.conversation.getRecent(MAX_CONVERSATION_HISTORY),
+
         plan:
           plan.steps
       };
@@ -890,17 +955,6 @@ export class Agent {
       this.taskState.setAICalls(
         response.usage.ai_api_calls
       );
-
-
-      if (
-        response.answer &&
-        response.answer.trim()
-      ) {
-
-        this.conversation.addAssistantMessage(
-          response.answer
-        );
-      }
 
 
       this.taskState.complete();
@@ -997,6 +1051,13 @@ export class Agent {
         continue;
       }
       seen.add(relativePath);
+      if (part.kind === "selection" && part.content?.trim()) {
+        files.push({
+          path: relativePath,
+          content: part.content
+        });
+        continue;
+      }
       try {
         const uri = vscode.Uri.joinPath(
           workspace.uri,
@@ -1020,6 +1081,55 @@ export class Agent {
     return files;
   }
 
+
+  private recordAdaptiveResponse(response: AdaptiveAIResponse): void {
+    const decision = response.decision;
+    if (!decision) {
+      if (response.answer?.trim()) {
+        this.conversation.addAssistantMessage(response.answer.trim());
+      }
+      return;
+    }
+
+    if (decision.action === "FINAL_ANSWER") {
+      const answer = response.answer?.trim() || decision.answer?.trim();
+      if (answer) {
+        this.conversation.addAssistantMessage(answer);
+      }
+      return;
+    }
+
+    const requestedTools = [
+      ...(decision.tools ?? []).map((tool) => tool.tool),
+      ...(decision.tool ? [decision.tool.tool] : [])
+    ].join(", ");
+    const summary = [
+      "Adaptive assistant decision: CONTINUE_INVESTIGATION.",
+      decision.reason ? `Reason: ${decision.reason}` : "",
+      requestedTools ? `Requested tools: ${requestedTools}` : ""
+    ].filter(Boolean).join("\n");
+    this.conversation.addAssistantMessage(summary);
+  }
+
+  private emitProgress(
+    onEvent: ((event: AgentEvent) => void) | undefined,
+    profile: AgentProfile,
+    message: string
+  ): void {
+    onEvent?.({
+      profile,
+      type: "progress",
+      message,
+      timestamp: Date.now()
+    });
+  }
+
+  private getProjectMemoryPayload(): ProjectMemoryPayload {
+    return {
+      ...this.projectMemory.getSnapshot(),
+      conversationHistory: this.conversation.getRecent(MAX_CONVERSATION_HISTORY)
+    };
+  }
 
   // ==========================================================
   // STAGE 4
@@ -1227,6 +1337,12 @@ export class Agent {
 
         context,
 
+        project_memory:
+          this.getProjectMemoryPayload(),
+
+        conversation_history:
+          this.conversation.getRecent(MAX_CONVERSATION_HISTORY),
+
         step:
           currentStep
       };
@@ -1234,6 +1350,12 @@ export class Agent {
 
       this.taskState.setStatus(
         "sending"
+      );
+
+      this.emitProgress(
+        onEvent,
+        initialRequest.agent?.profile || "agent",
+        `Thinking with AI (step ${currentStep}).`
       );
 
 
@@ -1283,6 +1405,14 @@ export class Agent {
 
       const response =
         rawResponse as AdaptiveAIResponse;
+
+      this.emitProgress(
+        onEvent,
+        initialRequest.agent?.profile || "agent",
+        "AI response received. Evaluating the next step."
+      );
+
+      this.recordAdaptiveResponse(response);
 
 
       // ======================================================
@@ -1394,6 +1524,8 @@ export class Agent {
         "FINAL_ANSWER"
       ) {
 
+        this.emitProgress(onEvent, initialRequest.agent?.profile || "agent", "Preparing the final answer.");
+
         const answer =
           response.answer?.trim()
           ||
@@ -1491,11 +1623,13 @@ export class Agent {
       // TOOL REQUEST
       // ======================================================
 
-      const tool =
-        response.decision.tool;
+      const tools = [
+        ...(response.decision.tools ?? []),
+        ...(response.decision.tool ? [response.decision.tool] : [])
+      ];
 
 
-      if (!tool) {
+      if (tools.length === 0) {
 
         state.stop(
           "insufficient_evidence"
@@ -1508,170 +1642,27 @@ export class Agent {
       }
 
 
-      // ======================================================
-      // VALIDATE TOOL
-      // ======================================================
-
-      this.validateAdaptiveTool(
-        tool
-      );
-
-
-      // ======================================================
-      // TOOL REQUEST TRACKING (repeats are allowed)
-      // ======================================================
-
-      const toolKey =
-        this.createToolRequestKey(
-          tool
-        );
-
-      state.recordAIRequest(
-        toolKey
-      );
-
-
-      // ======================================================
-      // TOOL CALL LIMIT
-      // ======================================================
-
-      if (
-        !state.incrementToolCalls()
-      ) {
-
-        this.logger.info(
-          "Adaptive investigation stopped before tool execution",
-          {
-            requestId:
-              request.request_id,
-
-            step:
-              currentStep,
-
-            tool:
-              tool.tool,
-
-            stopReason:
-              state.stopReason
-          }
-        );
-
-
-        throw new Error(
-          `Adaptive investigation stopped: ${state.stopReason}`
-        );
-      }
-
-
       this.taskState.setStatus(
         "investigating"
       );
 
+      this.emitProgress(onEvent, initialRequest.agent?.profile || "agent", "Continuing local investigation.");
 
-      this.logger.info(
-        "Executing local adaptive tool",
-        {
-          requestId:
-            request.request_id,
-
-          step:
-            currentStep,
-
-          tool:
-            tool.tool,
-
-          path:
-            tool.path,
-
-          query:
-            tool.query,
-
-          reason:
-            tool.reason,
-
-          toolCalls:
-            state.toolCalls,
-
-          maxToolCalls:
-            state.maxToolCalls
-        }
-      );
-
-
-      // ======================================================
-      // EXECUTE TOOL LOCALLY
-      // ======================================================
-
-      let evidence: Array<{ path: string; content: string }>;
-
-      try {
-        evidence =
-          await this.executeAdaptiveTool(
-            tool,
-            workspaceUri,
-            index
-          );
-
-        // After file mutations or diagnostics, allow re-reading the same path.
-        const mutatingTools = new Set([
-          "edit_file",
-          "write_file",
-          "create_file",
-          "delete_file",
-          "rename_file",
-          "move_file",
-          "apply_change_set",
-          "apply_patch",
-          "get_diagnostics"
-        ]);
-        if (mutatingTools.has(tool.tool) && tool.path?.trim()) {
-          state.clearPathInspectionKeys(tool.path.trim());
-        }
-        const target = tool.targetPath ?? tool.target_path;
-        if (
-          (tool.tool === "rename_file" || tool.tool === "move_file") &&
-          target?.trim()
-        ) {
-          state.clearPathInspectionKeys(target.trim());
-        }
-
-        // Surface applied file diffs in chat during continuous agent edits.
-        const fileChangeTools = new Set([
-          "edit_file",
-          "write_file",
-          "create_file",
-          "delete_file",
-          "rename_file",
-          "move_file",
-          "apply_change_set",
-          "apply_patch"
-        ]);
-        if (onEvent && fileChangeTools.has(tool.tool)) {
-          const body = evidence
-            .map((item) => item.content)
-            .filter(Boolean)
-            .join("\n\n");
-          if (body.trim()) {
-            onEvent({
-              profile: (initialRequest.agent?.profile || "agent") as AgentEvent["profile"],
-              type: "progress",
-              message: "Updated `" + (tool.path || "file") + "`",
-              timestamp: Date.now()
-            });
-          }
-        }
-      } catch (error) {
-        const message =
-          error instanceof Error ? error.message : String(error);
-        if (message.includes("not approved")) {
-          throw error;
-        }
-        this.logger.warn("Adaptive tool failed", error);
-        evidence = [{
-          path: `m3-tools/${tool.tool}.txt`,
-          content: `tool=${tool.tool}\nsuccess=false\n${message}`
-        }];
+      for (const tool of tools) {
+        this.validateAdaptiveTool(tool);
       }
+
+      const { evidence, toolResults } =
+        await this.executeAdaptiveToolBatch(
+          tools,
+          request.request_id,
+          currentStep,
+          workspaceUri,
+          index,
+          state,
+          onEvent,
+          initialRequest.agent?.profile || "agent"
+        );
 
 
       // ======================================================
@@ -1691,8 +1682,10 @@ export class Agent {
             step:
               currentStep,
 
-            tool:
-              tool.tool
+            tools:
+              tools.map(
+                item => item.tool
+              )
           }
         );
 
@@ -1935,8 +1928,10 @@ export class Agent {
           step:
             currentStep,
 
-          tool:
-            tool.tool,
+          tools:
+            tools.map(
+              item => item.tool
+            ),
 
           evidenceItems:
             evidence.length,
@@ -2001,6 +1996,8 @@ export class Agent {
         ...request,
 
         context,
+
+        tool_results: toolResults,
 
         step:
           currentStep
@@ -2147,6 +2144,12 @@ export class Agent {
       throw new Error(`${tool.tool} requires file content.`);
     }
 
+    if (tool.tool === "edit_file" && tool.original === undefined) {
+      throw new Error(
+        "edit_file requires the exact original file or selected code content."
+      );
+    }
+
     if (
       (tool.tool === "delete_file") &&
       !tool.path?.trim()
@@ -2206,6 +2209,138 @@ export class Agent {
   // executes the read-only operation locally.
   //
   // ==========================================================
+
+  private async executeAdaptiveToolBatch(
+    tools: AdaptiveToolRequest[],
+    requestId: string,
+    step: number,
+    workspaceUri: vscode.Uri,
+    index: any,
+    state: InvestigationState,
+    onEvent?: (event: AgentEvent) => void,
+    profile: string = "agent"
+  ): Promise<{
+    evidence: Array<{ path: string; content: string }>;
+    toolResults: AdaptiveToolResult[];
+  }> {
+    const readOnlyTools = new Set<AdaptiveToolName>([
+      "read_file",
+      "search",
+      "list_files",
+      "get_diagnostics",
+      "git_status",
+      "git_diff"
+    ]);
+    const evidence: Array<{ path: string; content: string }> = [];
+    const toolResults: AdaptiveToolResult[] = [];
+
+    const executeOne = async (tool: AdaptiveToolRequest): Promise<void> => {
+      const toolKey = this.createToolRequestKey(tool);
+      if (!state.recordAIRequest(toolKey) || !state.incrementToolCalls()) {
+        throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
+      }
+      try {
+        this.emitProgress(
+          onEvent,
+          profile as AgentProfile,
+          this.describeToolAction(tool)
+        );
+        const result = await this.executeAdaptiveTool(tool, workspaceUri, index);
+        evidence.push(...result);
+        toolResults.push({
+          tool: tool.tool,
+          path: tool.path,
+          success: true,
+          reason: tool.reason,
+          output: result.map(item => item.content).filter(Boolean).join("\n\n")
+        });
+
+        const resets = new Set([
+          "edit_file", "write_file", "create_file", "delete_file",
+          "rename_file", "move_file", "apply_change_set", "apply_patch",
+          "get_diagnostics"
+        ]);
+        if (resets.has(tool.tool) && tool.path?.trim()) {
+          state.clearPathInspectionKeys(tool.path.trim());
+        }
+        const target = tool.targetPath ?? tool.target_path;
+        if ((tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
+          state.clearPathInspectionKeys(target.trim());
+        }
+        if (onEvent && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
+          onEvent({
+            profile: profile as AgentEvent["profile"],
+            type: "progress",
+            message: "Updated `" + (tool.path || "file") + "`",
+            timestamp: Date.now()
+          });
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (message.includes("not approved")) {
+          throw error;
+        }
+        toolResults.push({
+          tool: tool.tool,
+          path: tool.path,
+          success: false,
+          reason: tool.reason,
+          output: "",
+          error: message
+        });
+        evidence.push({
+          path: `m3-tools/${tool.tool}.txt`,
+          content: `tool=${tool.tool}\nsuccess=false\n${message}`
+        });
+        this.logger.warn("Adaptive tool failed", error);
+      }
+    };
+
+    const parallel = tools.filter(tool => readOnlyTools.has(tool.tool));
+    const ordered = tools.filter(tool => !readOnlyTools.has(tool.tool));
+    await Promise.all(parallel.map(tool => executeOne(tool)));
+    for (const tool of ordered) {
+      await executeOne(tool);
+    }
+    return { evidence, toolResults };
+  }
+
+  private describeToolAction(tool: AdaptiveToolRequest): string {
+    const target = tool.path || tool.targetPath || tool.target_path || "the workspace";
+    switch (tool.tool) {
+      case "read_file":
+        return `Reading ${target}.`;
+      case "search":
+        return `Searching for ${tool.query || "relevant code"}.`;
+      case "list_files":
+        return "Listing workspace files.";
+      case "edit_file":
+      case "write_file":
+      case "apply_patch":
+      case "apply_change_set":
+        return `Writing changes to ${target}.`;
+      case "create_file":
+        return `Creating ${target}.`;
+      case "delete_file":
+        return `Deleting ${target}.`;
+      case "move_file":
+      case "rename_file":
+        return `Moving ${target}.`;
+      case "run_command":
+      case "run_task":
+      case "run_tests":
+        return `Running ${tool.command || tool.taskName || tool.task_name || "the requested command"}.`;
+      case "get_diagnostics":
+        return `Checking diagnostics for ${target}.`;
+      case "git_diff":
+        return "Checking the current diff.";
+      case "git_status":
+        return "Checking workspace status.";
+      default:
+        return `Performing ${tool.tool}.`;
+    }
+  }
+
 
   private async executeAdaptiveTool(
     tool:
@@ -2896,6 +3031,33 @@ export class Agent {
   // ==========================================================
   // REQUEST ID
   // ==========================================================
+
+  private createLocalResponse(
+    requestId: string,
+    intent: Intent,
+    answer: string,
+    reason: string
+  ): AIResponse {
+    return {
+      request_id: requestId,
+      action: intent,
+      answer,
+      model: "local-intent-gate",
+      usage: {
+        input_tokens: 0,
+        output_tokens: 0,
+        total_tokens: 0,
+        ai_api_calls: 0,
+        estimated_cost: 0
+      },
+      decision: {
+        action: "FINAL_ANSWER",
+        answer,
+        confidence: 1,
+        reason
+      }
+    };
+  }
 
   private createRequestId(): string {
     flow("Agent.createRequestId", 1, "enter");

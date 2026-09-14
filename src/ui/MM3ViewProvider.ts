@@ -45,6 +45,8 @@ export class MM3ViewProvider
 
   private requestController?: AbortController;
 
+  private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
+
   private lastQuestion?: {
     question: string;
     mode: InteractionMode;
@@ -61,6 +63,7 @@ export class MM3ViewProvider
     private readonly codeChangeApplier = new CodeChangeApplier()
   ) {
     flow("MM3ViewProvider.constructor", 1, "enter");
+    this.agent.setApprovalHandler((message) => this.requestToolApproval(message));
   }
 
   resolveWebviewView(
@@ -159,7 +162,12 @@ export class MM3ViewProvider
         break;
 
       case "cancel_request":
+        this.resolvePendingApprovals(false);
         this.requestController?.abort();
+        break;
+
+      case "approval_response":
+        this.resolveApproval(message.approvalId, message.approved);
         break;
 
       case "retry_agent":
@@ -345,13 +353,6 @@ export class MM3ViewProvider
         usage: response.usage,
         requestId: response.request_id,
         model: response.model,
-        agents: response.agents ?? [],
-        citations: response.citations ?? [],
-        quality: response.quality,
-        confidence: typeof response.decision === "object"
-          ? response.decision?.confidence
-          : undefined,
-        implementationPlan: response.implementation_plan
       });
 
       await this.refreshBilling(true);
@@ -386,6 +387,7 @@ export class MM3ViewProvider
 
     } finally {
 
+      this.resolvePendingApprovals(false);
       this.isProcessing = false;
       this.requestController = undefined;
 
@@ -429,7 +431,6 @@ export class MM3ViewProvider
         },
         requestId: "retry",
         model: "",
-        agents: []
       });
     } finally {
       this.isProcessing = false;
@@ -675,6 +676,34 @@ export class MM3ViewProvider
       type: "file_review_removed",
       path: filePath
     });
+  }
+
+  private requestToolApproval(message: string): Promise<boolean> {
+    const approvalId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    this.post({
+      type: "approval_request",
+      approvalId,
+      message
+    });
+    return new Promise((resolve) => {
+      this.pendingApprovals.set(approvalId, resolve);
+    });
+  }
+
+  private resolveApproval(approvalId: string, approved: boolean): void {
+    const resolve = this.pendingApprovals.get(approvalId);
+    if (!resolve) {
+      return;
+    }
+    this.pendingApprovals.delete(approvalId);
+    resolve(approved);
+  }
+
+  private resolvePendingApprovals(approved: boolean): void {
+    for (const [approvalId, resolve] of this.pendingApprovals) {
+      this.pendingApprovals.delete(approvalId);
+      resolve(approved);
+    }
   }
 
   private formatAnswer(
@@ -982,6 +1011,93 @@ body {
 
 .thinking-indicator[hidden] {
   display: none;
+}
+
+.streaming-panel {
+  margin: 0 0 10px;
+  min-height: clamp(220px, 42vh, 480px);
+  display: flex;
+  flex-direction: column;
+  padding: 14px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 12px;
+  background: linear-gradient(145deg, var(--vscode-editor-background), var(--vscode-textCodeBlock-background));
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+  box-shadow: inset 0 1px 0 var(--vscode-widget-border, transparent);
+}
+
+.streaming-panel-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+  min-height: 24px;
+  color: var(--vscode-foreground);
+}
+
+.streaming-panel-status {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.streaming-panel-content {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  padding: 0;
+  opacity: 0.75;
+  white-space: pre-wrap;
+  line-height: 1.55;
+}
+
+.approval-card {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0 0 8px;
+  padding: 6px 8px;
+  border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
+  border-radius: 6px;
+  background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background));
+  font-size: 11px;
+}
+
+.approval-card-text {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.approval-card-actions {
+  display: flex;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+.approval-card button {
+  min-height: 22px;
+  padding: 2px 7px;
+  border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  cursor: pointer;
+  font-size: 10px;
+}
+
+.approval-card .approval-approve {
+  color: var(--vscode-button-foreground);
+  background: var(--vscode-button-background);
+  border-color: transparent;
+}
+
+.approval-card button:disabled {
+  opacity: 0.65;
+  cursor: default;
 }
 
 .thinking-dots {
@@ -1462,9 +1578,14 @@ textarea:disabled {
   padding: 0 6px;
   border: none;
   border-radius: 6px;
-  color: var(--vscode-foreground);
-  background: transparent;
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, transparent);
   font-size: 11px;
+}
+
+.composer-toolbar select option {
+  color: var(--vscode-dropdown-foreground, var(--vscode-foreground));
+  background: var(--vscode-dropdown-background, var(--vscode-editor-background));
 }
 
 .icon-btn {
@@ -1671,6 +1792,7 @@ const walletBalance =
 let processing = false;
 let composerState = "idle";
 let streamPauseTimer = 0;
+let streamingText = "";
 const STREAM_PAUSE_MS = 180;
 
 const contextParts = [];
@@ -2279,6 +2401,107 @@ function addMessage(
     messages.scrollHeight;
 }
 
+function removeStreamingPanel() {
+  streamingText = "";
+  const panel = document.getElementById("streaming-panel");
+  if (panel) {
+    panel.remove();
+  }
+}
+
+function addApprovalRequest(approvalId, text) {
+  if (empty) {
+    empty.remove();
+  }
+
+  const card = document.createElement("div");
+  card.className = "approval-card";
+  card.dataset.approvalId = approvalId;
+
+  const label = document.createElement("span");
+  label.className = "approval-card-text";
+  label.textContent = String(text || "Approval required");
+  label.title = label.textContent;
+
+  const actions = document.createElement("div");
+  actions.className = "approval-card-actions";
+  const approve = document.createElement("button");
+  approve.className = "approval-approve";
+  approve.type = "button";
+  approve.textContent = "Approve";
+  const reject = document.createElement("button");
+  reject.type = "button";
+  reject.textContent = "Reject";
+
+  const finish = (approved) => {
+    vscode.postMessage({
+      type: "approval_response",
+      approvalId,
+      approved
+    });
+    approve.disabled = true;
+    reject.disabled = true;
+    label.textContent = approved ? "Approved" : "Rejected";
+    label.title = label.textContent;
+  };
+
+  approve.addEventListener("click", () => finish(true));
+  reject.addEventListener("click", () => finish(false));
+  actions.appendChild(approve);
+  actions.appendChild(reject);
+  card.appendChild(label);
+  card.appendChild(actions);
+  messages.appendChild(card);
+  messages.scrollTop = messages.scrollHeight;
+}
+
+function updateStreamingPanel(statusText, delta) {
+  if (empty) {
+    empty.remove();
+  }
+
+  let panel = document.getElementById("streaming-panel");
+  if (!panel) {
+    panel = document.createElement("div");
+    panel.id = "streaming-panel";
+    panel.className = "streaming-panel";
+
+    const header = document.createElement("div");
+    header.className = "streaming-panel-header";
+    header.innerHTML =
+      '<span class="thinking-dots"><span></span><span></span><span></span></span>' +
+      '<span class="streaming-panel-status"></span>';
+
+    panel.appendChild(header);
+    messages.appendChild(panel);
+  }
+
+  const status = panel.querySelector(".streaming-panel-status");
+  if (status && statusText) {
+    status.textContent = String(statusText);
+  }
+
+  if (delta) {
+    streamingText += String(delta);
+    let content = panel.querySelector(".streaming-panel-content");
+    if (!content) {
+      content = document.createElement("div");
+      content.className = "streaming-panel-content";
+      panel.appendChild(content);
+    }
+    content.textContent = streamingText;
+  } else if (streamingText) {
+    streamingText = "";
+    const content = panel.querySelector(".streaming-panel-content");
+    if (content) {
+      content.remove();
+    }
+  }
+
+  messages.appendChild(panel);
+  messages.scrollTop = messages.scrollHeight;
+}
+
 function addErrorMessage(text, help) {
   if (empty) {
     empty.remove();
@@ -2783,7 +3006,12 @@ function showThinking(text) {
     label.textContent = thinkingLabel(text);
   }
   row.hidden = false;
-  messages.appendChild(row);
+  const streamingPanel = document.getElementById("streaming-panel");
+  if (streamingPanel) {
+    streamingPanel.appendChild(row);
+  } else {
+    messages.appendChild(row);
+  }
   messages.scrollTop = messages.scrollHeight;
 }
 
@@ -2795,6 +3023,9 @@ function hideThinking() {
   const row = document.getElementById("thinking-indicator");
   if (row) {
     row.hidden = true;
+    if (row.parentElement?.id === "streaming-panel") {
+      messages.appendChild(row);
+    }
   }
 }
 
@@ -2944,12 +3175,14 @@ window.addEventListener(
         );
 
         showThinking("Thinking");
+        updateStreamingPanel("Starting task.", "");
 
         break;
 
       case "answer":
 
         hideThinking();
+        removeStreamingPanel();
 
         setProcessing(
           false
@@ -2959,41 +3192,6 @@ window.addEventListener(
           message.answer,
           "assistant"
         );
-
-        addConfidence(
-          message.confidence
-        );
-
-        addQualitySummary(
-          message.quality
-        );
-
-        addCitationList(
-          message.citations
-        );
-
-        if (message.implementationPlan) {
-          addExpandableList(
-            "Files",
-            message.implementationPlan.files || []
-          );
-
-          addExpandableList(
-            "Implementation Steps",
-            message.implementationPlan.steps || []
-          );
-
-          addValidationChecks(
-            message.implementationPlan.validation || []
-          );
-
-          addExpandableList(
-            "Risks and Assumptions",
-            message.implementationPlan.risks || []
-          );
-        }
-
-        addAgentRetryControls(message.agents);
 
         addUsage(
           message.usage
@@ -3022,58 +3220,23 @@ window.addEventListener(
       case "agent_event":
         if (message.event.type === "token" && message.event.delta) {
           noteStreamActivity("Writing");
-          let assistantMessage = messages.querySelector(".message.assistant:last-child");
-          if (!assistantMessage || assistantMessage.dataset.stream !== "true") {
-            assistantMessage = document.createElement("div");
-            assistantMessage.className = "message assistant";
-            assistantMessage.dataset.stream = "true";
-            const markdown = document.createElement("div");
-            markdown.className = "markdown";
-            assistantMessage.appendChild(markdown);
-            messages.appendChild(assistantMessage);
-          }
-
-          const markdown = assistantMessage.querySelector(".markdown");
-          if (markdown) {
-            markdown.innerHTML = renderMarkdown((markdown.textContent || "") + message.event.delta);
-          }
-          const thinkingRow = document.getElementById("thinking-indicator");
-          if (thinkingRow && !thinkingRow.hidden) {
-            messages.appendChild(thinkingRow);
-          }
-          messages.scrollTop = messages.scrollHeight;
+          updateStreamingPanel("Writing", message.event.delta);
           break;
         }
 
-        showThinking(message.event.message || "Working");
-
-        if (message.event.type === "citation" && message.event.path) {
-          addCitationList([{
-            path: message.event.path,
-            quote: message.event.quote,
-            reason: message.event.message,
-            start_line: message.event.start_line,
-            end_line: message.event.end_line
-          }]);
-          break;
-        }
-
-        if (message.event.type === "quality") {
-          addMessage(
-            "[quality] groundedness=" + Number(message.event.confidence ?? 0).toFixed(3),
-            "assistant"
-          );
-          break;
-        }
-
-        addMessage(
-          "[" + message.event.profile + "] " + message.event.message,
-          "assistant"
+        updateStreamingPanel(
+          message.event.message || "Working",
+          ""
         );
+        break;
+
+      case "approval_request":
+        addApprovalRequest(message.approvalId, message.message);
         break;
 
       case "error":
         hideThinking();
+        removeStreamingPanel();
         setComposerState("failed");
         addErrorMessage(message.error, message.help);
         input.focus();
@@ -3120,11 +3283,13 @@ window.addEventListener(
 
       case "cancelled":
         hideThinking();
+        removeStreamingPanel();
         setComposerState("idle");
         break;
 
       case "ready":
         hideThinking();
+        removeStreamingPanel();
         if (composerState === "running") {
           setComposerState("idle");
         }
@@ -3221,6 +3386,11 @@ type WebviewMessage =
       type: "cancel_request";
     }
   | {
+      type: "approval_response";
+      approvalId: string;
+      approved: boolean;
+    }
+  | {
       type: "retry_last";
     }
   | {
@@ -3285,38 +3455,6 @@ type WebviewResponse =
       usage?: AIUsage;
       requestId: string;
       model: string;
-      agents: AgentRun[];
-      citations?: Array<{
-        path: string;
-        quote?: string;
-        reason?: string;
-        start_line?: number;
-        end_line?: number;
-      }>;
-      quality?: {
-        groundedness: number;
-        file_selection: number;
-        tool_efficiency: number;
-        answer_quality: number;
-        latency_ms: number;
-        fallback_used: boolean;
-        fallback_model?: string;
-        cited_files: number;
-        context_files: number;
-        recovery_score?: number;
-      };
-      confidence?: number;
-      implementationPlan?: {
-        files?: string[];
-        steps?: string[];
-        validation?: string[];
-        risks?: string[];
-        changes?: Array<{
-          path: string;
-          original: string;
-          updated: string;
-        }>;
-      };
     }
   | {
       type: "context";
@@ -3334,6 +3472,11 @@ type WebviewResponse =
   | {
       type: "agent_event";
       event: AgentEvent;
+    }
+  | {
+      type: "approval_request";
+      approvalId: string;
+      message: string;
     }
   | {
       type: "error";

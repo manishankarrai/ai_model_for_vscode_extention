@@ -6,14 +6,44 @@ import {
 
 export class IntentDetector {
 
+  resolve(question: string): IntentResolution {
+    flow("IntentDetector.resolve", 1, "enter");
+
+    const normalizedQuestion = question.toLowerCase().trim();
+
+    if (this.isGreeting(normalizedQuestion)) {
+      return {
+        intent: "chat",
+        kind: "greeting",
+        confidence: 1,
+        reason: "greeting"
+      };
+    }
+
+    if (this.isUnclear(normalizedQuestion)) {
+      return {
+        intent: "chat",
+        kind: "clarification",
+        confidence: 0,
+        reason: "insufficient task details"
+      };
+    }
+
+    return {
+      intent: this.detectIntent(normalizedQuestion),
+      kind: "task",
+      confidence: 0.75,
+      reason: "matched task language"
+    };
+  }
+
   detect(question: string): Intent {
     flow("IntentDetector.detect", 1, "enter");
 
-    const q =
-      question
-        .toLowerCase()
-        .trim();
+    return this.detectIntent(question.toLowerCase().trim());
+  }
 
+  private detectIntent(q: string): Intent {
     if (
       this.containsAny(
         q,
@@ -47,7 +77,6 @@ export class IntentDetector {
         ]
       )
     ) {
-
       return "bug_analysis";
     }
 
@@ -63,7 +92,6 @@ export class IntentDetector {
         ]
       )
     ) {
-
       return "architecture";
     }
 
@@ -80,11 +108,28 @@ export class IntentDetector {
         ]
       )
     ) {
-
       return "analyze";
     }
 
     return "chat";
+  }
+
+  private isGreeting(question: string): boolean {
+    return /^(hi|hello|hey|hiya|good morning|good afternoon|good evening)( there| everyone)?[.!?, ]*$/.test(question);
+  }
+
+  private isUnclear(question: string): boolean {
+    return [
+      "help",
+      "help me",
+      "can you help",
+      "please help",
+      "assist me",
+      "fix it",
+      "do it",
+      "make it better",
+      "what can you do"
+    ].includes(question);
   }
 
   private containsAny(
@@ -96,4 +141,11 @@ export class IntentDetector {
       term => value.includes(term)
     );
   }
+}
+
+export interface IntentResolution {
+  intent: Intent;
+  kind: "greeting" | "clarification" | "task";
+  confidence: number;
+  reason: string;
 }

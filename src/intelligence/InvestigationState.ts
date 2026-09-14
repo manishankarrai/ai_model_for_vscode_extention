@@ -12,8 +12,24 @@ export type InvestigationStopReason =
   | "insufficient_evidence"
   | "error";
 
+export interface InvestigationLimits {
+  maxSteps?: number;
+  maxFiles?: number;
+  maxChars?: number;
+  maxAICalls?: number;
+  maxToolCalls?: number;
+}
+
 
 export class InvestigationState {
+
+  constructor(limits: InvestigationLimits = {}) {
+    this.maxSteps = limits.maxSteps ?? 100;
+    this.maxFiles = limits.maxFiles ?? 1_000;
+    this.maxChars = limits.maxChars ?? 5_000_000;
+    this.maxAICalls = limits.maxAICalls ?? 100;
+    this.maxToolCalls = limits.maxToolCalls ?? 500;
+  }
 
   // ==========================================================
   // Stage 3 — File Investigation State
@@ -115,31 +131,31 @@ export class InvestigationState {
   /**
    * Maximum adaptive reasoning cycles.
    */
-  readonly maxSteps = 1000;
+  readonly maxSteps: number;
 
 
   /**
    * Maximum number of files investigated.
    */
-  readonly maxFiles = 1000;
+  readonly maxFiles: number;
 
 
   /**
    * Maximum evidence characters.
    */
-  readonly maxChars = 5_000_000;
+  readonly maxChars: number;
 
 
   /**
    * Maximum AI API calls.
    */
-  readonly maxAICalls = 1000;
+  readonly maxAICalls: number;
 
 
   /**
    * Maximum local tool calls (reads, edits, commands, etc.).
    */
-  readonly maxToolCalls = 1000;
+  readonly maxToolCalls: number;
 
 
   // ==========================================================
@@ -747,9 +763,9 @@ export class InvestigationState {
   /**
    * Records an AI investigation request for telemetry only.
    *
-   * Repeated tool keys (including re-reading the same file) are always
-   * allowed. Overall step / AI-call / tool-call budgets remain the
-   * safety limits — never stop solely because a tool was reused.
+  * Repeated tool keys are allowed when they are separated by progress, such
+  * as a mutation. An identical operation repeated back-to-back is stopped
+  * after a small number of attempts so a provider cannot spin forever.
    */
   recordAIRequest(
     requestKey: string
@@ -770,6 +786,11 @@ export class InvestigationState {
     } else {
       this.lastAIRequestKey = requestKey;
       this.consecutiveAIRequestCount = 1;
+    }
+
+    if (this.consecutiveAIRequestCount >= 3) {
+      this.stop("loop_detected");
+      return false;
     }
 
     return true;

@@ -101,6 +101,10 @@ export function resolveApplyContent(
   const originalN = normalizeNewlines(original ?? "");
   const updatedN = normalizeNewlines(updated ?? "");
 
+  if (!originalN) {
+    throw new Error("MM3 rejected the edit: exact original content is required.");
+  }
+
   if (!updatedN) {
     return current;
   }
@@ -109,15 +113,13 @@ export function resolveApplyContent(
     return restoreDocumentNewlines(updatedN, current);
   }
 
-  if (
-    originalN.length < currentN.length &&
-    currentN.includes(originalN) &&
-    updatedN.length < currentN.length &&
-    updatedN.length <= Math.max(originalN.length * 2, originalN.length + 800)
-  ) {
+  if (originalN.length < currentN.length && currentN.includes(originalN)) {
     const first = currentN.indexOf(originalN);
     const second = currentN.indexOf(originalN, first + 1);
     if (second === -1) {
+      if (updatedN.includes(currentN)) {
+        return restoreDocumentNewlines(updatedN, current);
+      }
       const merged =
         currentN.slice(0, first) +
         updatedN +
@@ -126,7 +128,9 @@ export function resolveApplyContent(
     }
   }
 
-  return restoreDocumentNewlines(updatedN, current);
+  throw new Error(
+    "MM3 rejected the edit: the supplied original content does not match the current file."
+  );
 }
 
 export function assertFileHashMatches(

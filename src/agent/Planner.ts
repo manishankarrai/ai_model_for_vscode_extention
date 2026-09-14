@@ -61,13 +61,17 @@ export class Planner {
             "run_tests"
           ],
 
-          maxSteps: 1000,
+          maxSteps: 12,
 
-          maxFiles: 1000,
+          maxFiles: 30,
 
-          maxChars: 5_000_000,
+          maxChars: 300_000,
 
-          maxSearchResults: 1000,
+          maxSearchResults: 50,
+
+          maxAICalls: 4,
+
+          maxToolCalls: 4,
 
           depth: "deep"
         };
@@ -94,13 +98,17 @@ export class Planner {
             "run_tests"
           ],
 
-          maxSteps: 1000,
+          maxSteps: 10,
 
-          maxFiles: 1000,
+          maxFiles: 20,
 
-          maxChars: 5_000_000,
+          maxChars: 250_000,
 
-          maxSearchResults: 1000,
+          maxSearchResults: 30,
+
+          maxAICalls: 4,
+
+          maxToolCalls: 4,
 
           depth: "deep"
         };
@@ -130,13 +138,17 @@ export class Planner {
             "search"
           ],
 
-          maxSteps: 1000,
+          maxSteps: 8,
 
-          maxFiles: 1000,
+          maxFiles: 20,
 
-          maxChars: 5_000_000,
+          maxChars: 200_000,
 
-          maxSearchResults: 1000,
+          maxSearchResults: 30,
+
+          maxAICalls: 3,
+
+          maxToolCalls: 3,
 
           depth: "deep"
         };
@@ -164,13 +176,17 @@ export class Planner {
             "read_file"
           ],
 
-          maxSteps: 1000,
+          maxSteps: 6,
 
-          maxFiles: 1000,
+          maxChars: 150_000,
 
-          maxChars: 5_000_000,
+          maxFiles: 12,
 
-          maxSearchResults: 1000,
+          maxSearchResults: 30,
+
+          maxAICalls: 3,
+
+          maxToolCalls: 2,
 
           depth: "medium"
         };
@@ -204,13 +220,17 @@ export class Planner {
             "read_file"
           ],
 
-          maxSteps: 1000,
+          maxSteps: 3,
 
-          maxFiles: 1000,
+          maxFiles: 8,
 
-          maxChars: 5_000_000,
+          maxChars: 100_000,
 
-          maxSearchResults: 1000,
+          maxSearchResults: 10,
+
+          maxAICalls: 2,
+
+          maxToolCalls: 1,
 
           depth:
             this.isSimpleQuestion(

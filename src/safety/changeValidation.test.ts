@@ -67,9 +67,28 @@ describe("stale-file protection", () => {
       ),
       "header\nfunc Update() { return nil }\nfooter\n"
     );
-    assert.equal(
-      resolveApplyContent("current-full-file\n", "stale-snippet", "new-full-file\n"),
-      "new-full-file\n"
+    assert.throws(
+      () => resolveApplyContent("current-full-file\n", "stale-snippet", "new-full-file\n"),
+      /does not match the current file/i
+    );
+  });
+
+  it("never replaces a file when a selected edit is stale or ambiguous", () => {
+    assert.throws(
+      () => resolveApplyContent(
+        "function A() {}\nfunction B() {}\n",
+        "function Missing() {}",
+        "function Missing() { return true; }"
+      ),
+      /does not match the current file/i
+    );
+    assert.throws(
+      () => resolveApplyContent(
+        "function A() {}\nfunction A() {}\n",
+        "function A() {}",
+        "function A() { return true; }"
+      ),
+      /does not match the current file/i
     );
   });
 });

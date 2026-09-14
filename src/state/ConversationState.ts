@@ -1,7 +1,8 @@
 import { flow } from "../utils/flowLog";
 
 import {
-  ConversationMessage
+  ConversationMessage,
+  MAX_CONVERSATION_HISTORY
 } from "../models/types";
 
 export class ConversationState {
@@ -46,11 +47,11 @@ export class ConversationState {
   }
 
   getRecent(
-    count = 10
+    count = MAX_CONVERSATION_HISTORY
   ): ConversationMessage[] {
 
     return this.messages.slice(
-      -count
+      -Math.min(count, MAX_CONVERSATION_HISTORY)
     );
   }
 }

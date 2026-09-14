@@ -56,6 +56,9 @@ export interface ToolResult {
   tool: AgentToolName;
   success: boolean;
   output: string;
+  path?: string;
+  reason?: string;
+  error?: string;
 }
 
 export interface ToolPolicy {
@@ -179,6 +182,23 @@ export interface ConversationMessage {
   timestamp: number;
 }
 
+export const MAX_CONVERSATION_HISTORY = 30;
+
+export interface ProjectMemoryPayload {
+  rootPath: string;
+  projectSummary: string;
+  languages: string[];
+  frameworks: string[];
+  files: string[];
+  findings: string[];
+  dependencies: string[];
+  conventions: string[];
+  architectureNotes: string[];
+  decisions: string[];
+  updatedAt: number;
+  conversationHistory: ConversationMessage[];
+}
+
 export interface InvestigationPlan {
   steps: string[];
 
@@ -191,6 +211,10 @@ export interface InvestigationPlan {
   maxChars: number;
 
   maxSearchResults: number;
+
+  maxAICalls: number;
+
+  maxToolCalls: number;
 
   depth:
     | "shallow"
@@ -250,6 +274,8 @@ export interface AIResponse {
     answer?: string;
     confidence: number;
     reason?: string;
+    tool?: ToolRequest;
+    tools?: ToolRequest[];
     citations?: Citation[];
   };
   implementation_plan?: ImplementationPlan;
@@ -359,8 +385,13 @@ export interface AIRequest {
 
   memory?: string;
 
+  project_memory?: ProjectMemoryPayload;
+
+  conversation_history?: ConversationMessage[];
+
   plan?: string[];
   step?: number;
+  tool_results?: ToolResult[];
 }
 export interface InvestigationStep {
   step: number;

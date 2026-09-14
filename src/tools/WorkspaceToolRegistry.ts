@@ -14,6 +14,7 @@ import {
   assertNotSensitivePath,
   assertWorkspaceTrusted,
   normalizeNewlines,
+  resolveApplyContent,
   validateWorkspaceRelativePath
 } from "../safety/changeValidation";
 import { availableTools, isToolAllowed, isReadOnlyTool } from "./toolPolicy";
@@ -21,12 +22,20 @@ import { parseSafeCommand } from "./commandPolicy";
 
 import { flow } from "../utils/flowLog";
 
+export type ToolApprovalHandler = (message: string) => Promise<boolean>;
+
 const execFileAsync = promisify(execFile);
 
 export class WorkspaceToolRegistry {
+  private approvalHandler?: ToolApprovalHandler;
+
   constructor(
     private readonly changeApplier = new CodeChangeApplier()
   ) {}
+
+  setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
+    this.approvalHandler = handler;
+  }
 
   getAvailableTools(
     mode: InteractionMode
@@ -113,18 +122,28 @@ export class WorkspaceToolRegistry {
     const filePath = request.path;
     const uri = this.resolvePath(filePath);
     const document = await vscode.workspace.openTextDocument(uri);
-    const original = request.original ?? document.getText();
+    const original = request.original;
     const updated = request.updated ?? request.content;
+    if (original === undefined) {
+      throw new Error(
+        "edit_file requires the exact original file or selected code content."
+      );
+    }
     if (updated === undefined) {
       throw new Error("edit_file requires updated content.");
     }
+    const expected = resolveApplyContent(
+      document.getText(),
+      original,
+      updated
+    );
     const applied = await this.changeApplier.offer([{
       path: validateWorkspaceRelativePath(filePath ?? ""),
       original,
       updated
     }]);
     const after = (await vscode.workspace.openTextDocument(uri)).getText();
-    const ok = normalizeNewlines(after) === normalizeNewlines(updated);
+    const ok = normalizeNewlines(after) === normalizeNewlines(expected);
     const diff = applied[0]?.diff ?? "";
     return this.result(
       "edit_file",
@@ -346,6 +365,13 @@ export class WorkspaceToolRegistry {
 
   private async confirm(message: string): Promise<void> {
     flow("WorkspaceToolRegistry.confirm", 1, "enter");
+    if (this.approvalHandler) {
+      if (await this.approvalHandler(message)) {
+        return;
+      }
+      throw new Error("Operation was not approved.");
+    }
+
     const choice = await vscode.window.showWarningMessage(
       message,
       { modal: true },
