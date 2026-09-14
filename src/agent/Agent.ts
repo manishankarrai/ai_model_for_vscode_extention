@@ -50,7 +50,11 @@ import {
   ToolApprovalHandler,
   WorkspaceToolRegistry
 } from "../tools/WorkspaceToolRegistry";
-import type { AgentToolName, CodeChange } from "../models/types";
+import type {
+  AgentToolName,
+  CodeChange,
+  ToolApprovalStatus
+} from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 
 
@@ -83,8 +87,17 @@ interface AdaptiveToolResult {
   tool: AdaptiveToolName;
   path?: string;
   success: boolean;
+  approval?: ToolApprovalStatus;
   reason?: string;
   output: string;
+  error?: string;
+}
+
+interface AdaptiveToolExecution {
+  evidence: Array<{ path: string; content: string }>;
+  success: boolean;
+  output: string;
+  approval?: ToolApprovalStatus;
   error?: string;
 }
 
@@ -228,12 +241,13 @@ export class Agent {
     private readonly logger:
       Logger,
 
-    changeApplier = new CodeChangeApplier()
+    changeApplier = new CodeChangeApplier(),
+    approvalState?: vscode.Memento
   ) {
     flow("Agent.constructor", 1, "enter");
 
     this.workspaceTools =
-      new WorkspaceToolRegistry(changeApplier);
+      new WorkspaceToolRegistry(changeApplier, approvalState);
 
     this.investigationEngine =
       new InvestigationEngine(
@@ -2246,13 +2260,15 @@ export class Agent {
           this.describeToolAction(tool)
         );
         const result = await this.executeAdaptiveTool(tool, workspaceUri, index);
-        evidence.push(...result);
+        evidence.push(...result.evidence);
         toolResults.push({
           tool: tool.tool,
           path: tool.path,
-          success: true,
+          success: result.success,
+          approval: result.approval,
           reason: tool.reason,
-          output: result.map(item => item.content).filter(Boolean).join("\n\n")
+          output: result.output,
+          error: result.error
         });
 
         const resets = new Set([
@@ -2260,14 +2276,14 @@ export class Agent {
           "rename_file", "move_file", "apply_change_set", "apply_patch",
           "get_diagnostics"
         ]);
-        if (resets.has(tool.tool) && tool.path?.trim()) {
+        if (result.success && resets.has(tool.tool) && tool.path?.trim()) {
           state.clearPathInspectionKeys(tool.path.trim());
         }
         const target = tool.targetPath ?? tool.target_path;
-        if ((tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
+        if (result.success && (tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
           state.clearPathInspectionKeys(target.trim());
         }
-        if (onEvent && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
+        if (onEvent && result.success && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
           onEvent({
             profile: profile as AgentEvent["profile"],
             type: "progress",
@@ -2351,10 +2367,7 @@ export class Agent {
 
     index:
       any
-  ): Promise<Array<{
-    path: string;
-    content: string;
-  }>> {
+  ): Promise<AdaptiveToolExecution> {
     flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
     if (
@@ -2362,10 +2375,15 @@ export class Agent {
       "read_file"
     ) {
 
-      return this.executeAdaptiveReadFile(
+      const evidence = await this.executeAdaptiveReadFile(
         tool.path!,
         workspaceUri
       );
+      return {
+        evidence,
+        success: true,
+        output: evidence.map(item => item.content).filter(Boolean).join("\n\n")
+      };
     }
 
     if (
@@ -2373,11 +2391,16 @@ export class Agent {
       "search"
     ) {
 
-      return this.executeAdaptiveSearch(
+      const evidence = await this.executeAdaptiveSearch(
         tool.query!,
         index,
         workspaceUri
       );
+      return {
+        evidence,
+        success: true,
+        output: evidence.map(item => item.content).filter(Boolean).join("\n\n")
+      };
     }
 
     if (
@@ -2385,9 +2408,14 @@ export class Agent {
       "list_files"
     ) {
 
-      return this.executeAdaptiveListFiles(
+      const evidence = await this.executeAdaptiveListFiles(
         workspaceUri
       );
+      return {
+        evidence,
+        success: true,
+        output: evidence.map(item => item.content).filter(Boolean).join("\n\n")
+      };
     }
 
     const result = await this.workspaceTools.execute(
@@ -2407,14 +2435,21 @@ export class Agent {
       "agent"
     );
 
-    return [{
-      path: `m3-tools/${tool.tool}.txt`,
-      content: [
-        `tool=${result.tool}`,
-        `success=${result.success}`,
-        result.output
-      ].join("\n")
-    }];
+    return {
+      evidence: [{
+        path: `m3-tools/${tool.tool}.txt`,
+        content: [
+          `tool=${result.tool}`,
+          `success=${result.success}`,
+          result.approval ? `approval=${result.approval}` : "",
+          result.output
+        ].filter(Boolean).join("\n")
+      }],
+      success: result.success,
+      output: result.output,
+      approval: result.approval,
+      error: result.success ? undefined : result.output
+    };
   }
 
 

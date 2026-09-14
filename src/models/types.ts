@@ -12,6 +12,15 @@ export type ToolName =
 
 export type InteractionMode = "ask" | "agent";
 
+export type ToolApprovalDecision =
+  | "approve"
+  | "always_approve"
+  | "skip";
+
+export type ToolApprovalStatus =
+  | ToolApprovalDecision
+  | "always_approved";
+
 export type AgentProfile = string;
 
 export interface AgentSelection {
@@ -56,6 +65,7 @@ export interface ToolResult {
   tool: AgentToolName;
   success: boolean;
   output: string;
+  approval?: ToolApprovalStatus;
   path?: string;
   reason?: string;
   error?: string;

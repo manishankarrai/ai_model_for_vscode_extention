@@ -7,7 +7,9 @@ import {
   AgentToolName,
   InteractionMode,
   ToolRequest,
-  ToolResult
+  ToolResult,
+  ToolApprovalDecision,
+  ToolApprovalStatus
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import {
@@ -22,7 +24,11 @@ import { parseSafeCommand } from "./commandPolicy";
 
 import { flow } from "../utils/flowLog";
 
-export type ToolApprovalHandler = (message: string) => Promise<boolean>;
+export type ToolApprovalHandler = (
+  message: string
+) => Promise<ToolApprovalDecision>;
+
+const ALWAYS_APPROVE_TERMINAL_KEY = "mm3.terminal.alwaysApprove";
 
 const execFileAsync = promisify(execFile);
 
@@ -30,7 +36,8 @@ export class WorkspaceToolRegistry {
   private approvalHandler?: ToolApprovalHandler;
 
   constructor(
-    private readonly changeApplier = new CodeChangeApplier()
+    private readonly changeApplier = new CodeChangeApplier(),
+    private readonly approvalState?: vscode.Memento
   ) {}
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
@@ -212,14 +219,22 @@ export class WorkspaceToolRegistry {
     if (!taskName || !/^[a-zA-Z0-9._:-]+$/.test(taskName)) {
       throw new Error("run_task requires an allowlisted task name.");
     }
-    await this.confirm(`Run task ${taskName}?`);
+    const approval = await this.confirm(`Run task ${taskName}?`);
+    if (approval === "skip") {
+      return this.result(
+        "run_task",
+        false,
+        `Skipped task ${taskName} because the user chose Skip.`,
+        "skip"
+      );
+    }
     const tasks = await vscode.tasks.fetchTasks();
     const task = tasks.find((item) => item.name === taskName);
     if (!task) {
       throw new Error(`Task '${taskName}' was not found.`);
     }
     await vscode.tasks.executeTask(task);
-    return this.result("run_task", true, `Started task ${taskName}.`);
+    return this.result("run_task", true, `Started task ${taskName}.`, approval);
   }
 
   private async runTests(): Promise<ToolResult> {
@@ -264,12 +279,31 @@ export class WorkspaceToolRegistry {
     tool: AgentToolName = "run_command"
   ): Promise<ToolResult> {
     assertWorkspaceTrusted(vscode.workspace.isTrusted);
-    const parsed = parseSafeCommand(command ?? "");
+    const rawCommand = command ?? "";
+    const parsed = parseSafeCommand(rawCommand);
     const workspace = this.requireWorkspace();
-    await this.confirm(`Run \`${parsed.binary} ${parsed.args.join(" ")}\` in the workspace?`);
+    const displayCommand = [parsed.binary, ...parsed.args]
+      .map((part) => /\s/.test(part) ? JSON.stringify(part) : part)
+      .join(" ");
+    const approval = await this.confirm(`Run \`${displayCommand}\` in the workspace?`);
+    if (approval === "skip") {
+      return this.result(
+        tool,
+        false,
+        `Skipped command: ${displayCommand}. The user chose Skip for this request.`,
+        "skip"
+      );
+    }
+
+    const shell = process.platform === "win32"
+      ? (process.env.ComSpec || "cmd.exe")
+      : (process.env.SHELL || "/bin/sh");
+    const shellArgs = process.platform === "win32"
+      ? ["/d", "/s", "/c", rawCommand]
+      : ["-lc", rawCommand];
 
     try {
-      const result = await execFileAsync(parsed.binary, parsed.args, {
+      const result = await execFileAsync(shell, shellArgs, {
         cwd: workspace.uri.fsPath,
         timeout: tool === "run_tests" ? 180_000 : 60_000,
         maxBuffer: 2_000_000,
@@ -277,11 +311,16 @@ export class WorkspaceToolRegistry {
       });
       const output = [
         `exit_code=0`,
-        `command=${parsed.binary} ${parsed.args.join(" ")}`,
+        `command=${displayCommand}`,
         result.stdout || "",
         result.stderr || ""
       ].join("\n").trim();
-      return this.result(tool, true, output || "Command succeeded with no output.");
+      return this.result(
+        tool,
+        true,
+        output || "Command succeeded with no output.",
+        approval
+      );
     } catch (error) {
       const execError = error as {
         code?: number;
@@ -291,11 +330,11 @@ export class WorkspaceToolRegistry {
       };
       const output = [
         `exit_code=${execError.code ?? 1}`,
-        `command=${parsed.binary} ${parsed.args.join(" ")}`,
+        `command=${displayCommand}`,
         execError.stdout ?? "",
         execError.stderr ?? execError.message ?? String(error)
       ].join("\n").trim();
-      return this.result(tool, false, output);
+      return this.result(tool, false, output, approval);
     }
   }
 
@@ -363,30 +402,42 @@ export class WorkspaceToolRegistry {
     return vscode.Uri.joinPath(workspace.uri, ...normalized.split("/"));
   }
 
-  private async confirm(message: string): Promise<void> {
+  private async confirm(message: string): Promise<ToolApprovalStatus> {
     flow("WorkspaceToolRegistry.confirm", 1, "enter");
-    if (this.approvalHandler) {
-      if (await this.approvalHandler(message)) {
-        return;
-      }
-      throw new Error("Operation was not approved.");
+    if (this.approvalState?.get<boolean>(ALWAYS_APPROVE_TERMINAL_KEY)) {
+      return "always_approved";
     }
 
-    const choice = await vscode.window.showWarningMessage(
-      message,
-      { modal: true },
-      "Approve"
-    );
-    if (choice !== "Approve") {
-      throw new Error("Operation was not approved.");
+    let decision: ToolApprovalDecision;
+    if (this.approvalHandler) {
+      decision = await this.approvalHandler(message);
+    } else {
+      const choice = await vscode.window.showWarningMessage(
+        message,
+        { modal: true },
+        "Approve",
+        "Always Approve",
+        "Skip"
+      );
+      decision = choice === "Approve"
+        ? "approve"
+        : choice === "Always Approve"
+          ? "always_approve"
+          : "skip";
     }
+
+    if (decision === "always_approve") {
+      await this.approvalState?.update(ALWAYS_APPROVE_TERMINAL_KEY, true);
+    }
+    return decision;
   }
 
   private result(
     tool: AgentToolName,
     success: boolean,
-    output: string
+    output: string,
+    approval?: ToolApprovalStatus
   ): ToolResult {
-    return { tool, success, output };
+    return { tool, success, output, approval };
   }
 }

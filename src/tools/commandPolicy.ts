@@ -1,56 +1,67 @@
 import { flow } from "../utils/flowLog.ts";
 
-const ALLOWED_BINARIES = new Set([
-  "npm",
-  "npx",
-  "yarn",
-  "pnpm",
-  "bun",
-  "node",
-  "go",
-  "python",
-  "python3",
-  "pytest",
-  "pip",
-  "pip3",
-  "cargo",
-  "make",
-  "cmake",
-  "tsc",
-  "eslint",
-  "vitest",
-  "jest",
-  "mocha",
-  "php",
-  "composer",
-  "dotnet",
-  "mvn",
-  "gradle",
-  "rustc",
-  "git",
-  "rg",
-  "grep",
-  "cat",
-  "ls",
-  "head",
-  "tail",
-  "sed",
-  "awk"
-]);
-
-const BLOCKED_GIT_ARGS = [
-  "push --force",
-  "push -f",
-  "reset --hard",
-  "clean -fd",
-  "clean -f",
-  "filter-branch",
-  "rebase --abort"
-];
-
 export interface ParsedCommand {
   binary: string;
   args: string[];
+}
+
+function tokenizeCommand(command: string): string[] {
+  const parts: string[] = [];
+  let current = "";
+  let quote: "'" | '"' | undefined;
+  let escaping = false;
+
+  for (let index = 0; index < command.length; index++) {
+    const character = command[index];
+
+    if (escaping) {
+      current += character;
+      escaping = false;
+      continue;
+    }
+
+    if (character === "\\" && quote !== "'") {
+      const next = command[index + 1];
+      if (next === "\\" || next === '"' || /\s/.test(next ?? "")) {
+        escaping = true;
+        continue;
+      }
+    }
+
+    if (quote) {
+      if (character === quote) {
+        quote = undefined;
+      } else {
+        current += character;
+      }
+      continue;
+    }
+
+    if (character === "'" || character === '"') {
+      quote = character;
+      continue;
+    }
+
+    if (/\s/.test(character)) {
+      if (current) {
+        parts.push(current);
+        current = "";
+      }
+      continue;
+    }
+
+    current += character;
+  }
+
+  if (escaping || quote) {
+    throw new Error("MM3 rejected a command with an unfinished quote or escape.");
+  }
+
+  if (current) {
+    parts.push(current);
+  }
+
+  return parts;
 }
 
 export function parseSafeCommand(command: string): ParsedCommand {
@@ -60,29 +71,19 @@ export function parseSafeCommand(command: string): ParsedCommand {
     throw new Error("run_command requires a command.");
   }
 
-  if (/[|;&`$<>\n(){}]/.test(trimmed) || trimmed.includes("$(")) {
-    throw new Error("MM3 rejected a command that uses shell metacharacters.");
+  if (trimmed.includes("\0")) {
+    throw new Error("MM3 rejected a command containing a null byte.");
   }
 
-  const parts = trimmed.split(/\s+/).filter(Boolean);
-  const binary = parts[0].replace(/\\/g, "/").split("/").pop() ?? "";
-  const normalizedBinary = binary.replace(/\.exe$/i, "").replace(/\.cmd$/i, "");
-
-  if (!ALLOWED_BINARIES.has(normalizedBinary)) {
-    throw new Error(
-      `MM3 blocked command binary '${binary}'. Use an allowlisted tool such as npm, go, pytest, or git.`
-    );
-  }
-
-  if (normalizedBinary === "git") {
-    const joined = parts.slice(1).join(" ").toLowerCase();
-    if (BLOCKED_GIT_ARGS.some((item) => joined.includes(item))) {
-      throw new Error("MM3 blocked a destructive git command.");
-    }
+  const parts = tokenizeCommand(trimmed);
+  const binary = parts[0] ?? "";
+  const binaryName = binary.replace(/\\/g, "/").split("/").pop() ?? binary;
+  if (!/^[a-zA-Z0-9._+:-]+(?:\.exe|\.cmd|\.bat)?$/i.test(binaryName)) {
+    throw new Error("MM3 rejected an invalid command executable.");
   }
 
   return {
-    binary: normalizedBinary,
+    binary,
     args: parts.slice(1)
   };
 }

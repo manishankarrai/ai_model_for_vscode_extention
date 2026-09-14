@@ -13,6 +13,7 @@ import {
   AgentEvent,
   AgentRun,
   InteractionMode,
+  ToolApprovalDecision,
 } from "../models/types";
 
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
@@ -45,7 +46,7 @@ export class MM3ViewProvider
 
   private requestController?: AbortController;
 
-  private readonly pendingApprovals = new Map<string, (approved: boolean) => void>();
+  private readonly pendingApprovals = new Map<string, (decision: ToolApprovalDecision) => void>();
 
   private lastQuestion?: {
     question: string;
@@ -162,12 +163,12 @@ export class MM3ViewProvider
         break;
 
       case "cancel_request":
-        this.resolvePendingApprovals(false);
+        this.resolvePendingApprovals("skip");
         this.requestController?.abort();
         break;
 
       case "approval_response":
-        this.resolveApproval(message.approvalId, message.approved);
+        this.resolveApproval(message.approvalId, message.decision);
         break;
 
       case "retry_agent":
@@ -387,7 +388,7 @@ export class MM3ViewProvider
 
     } finally {
 
-      this.resolvePendingApprovals(false);
+      this.resolvePendingApprovals("skip");
       this.isProcessing = false;
       this.requestController = undefined;
 
@@ -678,7 +679,7 @@ export class MM3ViewProvider
     });
   }
 
-  private requestToolApproval(message: string): Promise<boolean> {
+  private requestToolApproval(message: string): Promise<ToolApprovalDecision> {
     const approvalId = `approval-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     this.post({
       type: "approval_request",
@@ -690,19 +691,19 @@ export class MM3ViewProvider
     });
   }
 
-  private resolveApproval(approvalId: string, approved: boolean): void {
+  private resolveApproval(approvalId: string, decision: ToolApprovalDecision): void {
     const resolve = this.pendingApprovals.get(approvalId);
     if (!resolve) {
       return;
     }
     this.pendingApprovals.delete(approvalId);
-    resolve(approved);
+    resolve(decision);
   }
 
-  private resolvePendingApprovals(approved: boolean): void {
+  private resolvePendingApprovals(decision: ToolApprovalDecision): void {
     for (const [approvalId, resolve] of this.pendingApprovals) {
       this.pendingApprovals.delete(approvalId);
-      resolve(approved);
+      resolve(decision);
     }
   }
 
@@ -1054,10 +1055,11 @@ body {
 
 .approval-card {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
   gap: 8px;
   margin: 0 0 8px;
-  padding: 6px 8px;
+  padding: 9px;
   border: 1px solid var(--vscode-inputValidation-warningBorder, var(--vscode-panel-border));
   border-radius: 6px;
   background: var(--vscode-inputValidation-warningBackground, var(--vscode-editor-background));
@@ -1065,22 +1067,23 @@ body {
 }
 
 .approval-card-text {
-  flex: 1;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  color: var(--vscode-foreground);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
 }
 
 .approval-card-actions {
   display: flex;
-  gap: 4px;
-  flex-shrink: 0;
+  gap: 6px;
+  width: 100%;
 }
 
 .approval-card button {
+  flex: 1;
   min-height: 22px;
-  padding: 2px 7px;
+  padding: 4px 8px;
   border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
   border-radius: 4px;
   color: var(--vscode-button-secondaryForeground);
@@ -2429,26 +2432,36 @@ function addApprovalRequest(approvalId, text) {
   approve.className = "approval-approve";
   approve.type = "button";
   approve.textContent = "Approve";
-  const reject = document.createElement("button");
-  reject.type = "button";
-  reject.textContent = "Reject";
+  const alwaysApprove = document.createElement("button");
+  alwaysApprove.type = "button";
+  alwaysApprove.textContent = "Always Approve";
+  const skip = document.createElement("button");
+  skip.type = "button";
+  skip.textContent = "Skip";
 
-  const finish = (approved) => {
+  const finish = (decision) => {
     vscode.postMessage({
       type: "approval_response",
       approvalId,
-      approved
+      decision
     });
     approve.disabled = true;
-    reject.disabled = true;
-    label.textContent = approved ? "Approved" : "Rejected";
+    alwaysApprove.disabled = true;
+    skip.disabled = true;
+    label.textContent = decision === "always_approve"
+      ? "Always approved"
+      : decision === "approve"
+        ? "Approved"
+        : "Skipped";
     label.title = label.textContent;
   };
 
-  approve.addEventListener("click", () => finish(true));
-  reject.addEventListener("click", () => finish(false));
+  approve.addEventListener("click", () => finish("approve"));
+  alwaysApprove.addEventListener("click", () => finish("always_approve"));
+  skip.addEventListener("click", () => finish("skip"));
   actions.appendChild(approve);
-  actions.appendChild(reject);
+  actions.appendChild(skip);
+  actions.appendChild(alwaysApprove);
   card.appendChild(label);
   card.appendChild(actions);
   messages.appendChild(card);
@@ -3388,7 +3401,7 @@ type WebviewMessage =
   | {
       type: "approval_response";
       approvalId: string;
-      approved: boolean;
+      decision: ToolApprovalDecision;
     }
   | {
       type: "retry_last";

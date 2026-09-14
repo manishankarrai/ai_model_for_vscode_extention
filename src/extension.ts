@@ -91,7 +91,8 @@ export function activate(
       taskState,
       projectMemory,
       logger,
-      changeApplier
+      changeApplier,
+      context.workspaceState
     );
 
   // ----------------------------------------------------------
