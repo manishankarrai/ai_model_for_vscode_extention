@@ -184,6 +184,7 @@ export interface ProjectContext {
   id: string;
   name: string;
   indexVersion: number;
+  targetPath?: string;
 }
 
 export interface ConversationMessage {

@@ -85,18 +85,23 @@
       "properties": {
         "mm3.backendUrl": {
           "type": "string",
-          "default": "https://api.mm3ai.com",
+          "default": "http://localhost:8080",
           "description": "MM3 backend URL"
         },
         "mm3.maxContextChars": {
           "type": "number",
-          "default": 5000000,
+          "default": 300000,
           "description": "Maximum source context sent to the backend"
         },
         "mm3.maxFilesInContext": {
           "type": "number",
-          "default": 1000,
+          "default": 30,
           "description": "Maximum files selected for AI context"
+        },
+        "mm3.implementationRoot": {
+          "type": "string",
+          "default": "",
+          "description": "Optional workspace-relative directory to search and edit for implementation tasks"
         },
         "mm3.enableAutoIndex": {
           "type": "boolean",

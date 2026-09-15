@@ -7,10 +7,19 @@ import {
   AIRequest,
   AIResponse,
   AgentEvent,
+  AgentRun,
   AgentTaskStatus,
   BillingAgent,
   CreditPlan,
-  WalletSummary
+  WalletSummary,
+  AgentSelection,
+  AIContext,
+  Intent,
+  InteractionMode,
+  ProjectContext,
+  ToolPolicy,
+  ToolResult,
+  AgentToolName
 } from "../models/types";
 
 interface BackendErrorResponse {
@@ -38,6 +47,125 @@ export interface UsageResponse {
   [key: string]: unknown;
 }
 
+export interface AgentTaskToolRequest {
+  tool: AgentToolName;
+  path?: string;
+  targetPath?: string;
+  target_path?: string;
+  query?: string;
+  command?: string;
+  content?: string;
+  original?: string;
+  updated?: string;
+  taskName?: string;
+  task_name?: string;
+  reason?: string;
+  changes?: Array<{ path: string; original: string; updated: string }>;
+}
+
+export interface AgentTaskPendingDecision {
+  action: "FINAL_ANSWER" | "CONTINUE_INVESTIGATION";
+  answer?: string;
+  confidence: number;
+  reason?: string;
+  tool?: AgentTaskToolRequest;
+  tools?: AgentTaskToolRequest[];
+}
+
+export interface AgentTaskRecord {
+  id?: string;
+  request_id: string;
+  project_key: string;
+  question: string;
+  action: Intent;
+  mode: InteractionMode;
+  project: ProjectContext;
+  agent?: AgentSelection;
+  tool_policy?: ToolPolicy;
+  status: string;
+  phase?: string;
+  current_step?: number;
+  plan?: string[];
+  summary?: string;
+  agents?: AgentRun[];
+  events?: AgentEvent[];
+  pending_decision?: AgentTaskPendingDecision;
+  budget?: {
+    max_steps: number;
+    max_ai_calls: number;
+    max_tool_calls: number;
+    max_files: number;
+    max_context_chars: number;
+  };
+  answer?: string;
+  tool_runs?: Array<{
+    id?: string;
+    request_id: string;
+    step: number;
+    tool: string;
+    path?: string;
+    success: boolean;
+    output?: string;
+    error?: string;
+    created_at: string;
+  }>;
+}
+
+export interface CreateAgentTaskRequest {
+  request_id: string;
+  action?: Intent;
+  question: string;
+  mode: InteractionMode;
+  project: ProjectContext;
+  agent?: AgentSelection;
+  tool_policy?: ToolPolicy;
+  plan?: string[];
+}
+
+export interface AgentTaskStateResponse {
+  task: AgentTaskRecord;
+  tool_runs: AgentTaskRecord["tool_runs"];
+  evidence: Array<{
+    kind: string;
+    path: string;
+    step: number;
+    chars: number;
+    updated_at: string;
+  }>;
+}
+
+export interface AgentTaskSummary {
+  request_id: string;
+  question: string;
+  action: Intent;
+  mode: InteractionMode;
+  status: string;
+  phase?: string;
+  current_step?: number;
+  summary?: string;
+  updated_at: string;
+}
+
+export interface AgentTaskEvidenceRecord {
+  id?: string;
+  request_id: string;
+  kind: "file" | "selection" | "attachment";
+  path: string;
+  content: string;
+  language?: string;
+  start_line?: number;
+  end_line?: number;
+  step: number;
+  chars: number;
+  updated_at: string;
+}
+
+export interface AgentTaskDecisionRequest {
+  context: AIContext;
+  tool_results?: ToolResult[];
+  step?: number;
+}
+
 export class BackendClient {
 
   private readonly backendUrl: string;
@@ -49,7 +177,7 @@ export class BackendClient {
         .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
-          "https://api.mm3ai.com"
+          "http://localhost:8080"
         )
         .replace(/\/$/, "");
   }
@@ -96,6 +224,86 @@ export class BackendClient {
       request,
       accessToken,
       signal
+    );
+  }
+
+  async createAgentTask(
+    request: CreateAgentTaskRequest,
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<AgentTaskRecord> {
+    flow("BackendClient.createAgentTask", 1, "enter", { requestId: request.request_id });
+    return this.post<AgentTaskRecord>(
+      "/api/v1/agent/tasks",
+      request,
+      accessToken,
+      signal
+    );
+  }
+
+  async decideAgentTask(
+    requestId: string,
+    request: AgentTaskDecisionRequest,
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<AIResponse> {
+    flow("BackendClient.decideAgentTask", 1, "enter", { requestId, step: request.step });
+    return this.post<AIResponse>(
+      `/api/v1/agent/tasks/${encodeURIComponent(requestId)}/decide`,
+      request,
+      accessToken,
+      signal
+    );
+  }
+
+  async getAgentTaskState(
+    requestId: string,
+    accessToken: string
+  ): Promise<AgentTaskStateResponse> {
+    flow("BackendClient.getAgentTaskState", 1, "enter", { requestId });
+    return this.get<AgentTaskStateResponse>(
+      `/api/v1/agent/tasks/${encodeURIComponent(requestId)}`,
+      accessToken
+    );
+  }
+
+  async increaseAgentTaskBudget(
+    requestId: string,
+    budget: { toolCalls?: number; aiCalls?: number },
+    accessToken: string,
+    signal?: AbortSignal
+  ): Promise<AgentTaskRecord> {
+    flow("BackendClient.increaseAgentTaskBudget", 1, "enter", { requestId, budget });
+    return this.post<AgentTaskRecord>(
+      `/api/v1/agent/tasks/${encodeURIComponent(requestId)}/budget`,
+      { tool_calls: budget.toolCalls, ai_calls: budget.aiCalls },
+      accessToken,
+      signal
+    );
+  }
+
+  async listAgentTasks(
+    accessToken: string,
+    limit = 20
+  ): Promise<{ tasks: AgentTaskSummary[] }> {
+    flow("BackendClient.listAgentTasks", 1, "enter", { limit });
+    return this.get<{ tasks: AgentTaskSummary[] }>(
+      `/api/v1/agent/tasks?limit=${Math.max(1, Math.min(limit, 50))}`,
+      accessToken
+    );
+  }
+
+  async getAgentTaskEvidence(
+    requestId: string,
+    path: string,
+    accessToken: string,
+    kind: AgentTaskEvidenceRecord["kind"] = "file"
+  ): Promise<AgentTaskEvidenceRecord> {
+    flow("BackendClient.getAgentTaskEvidence", 1, "enter", { requestId, path, kind });
+    const query = new URLSearchParams({ path, kind });
+    return this.get<AgentTaskEvidenceRecord>(
+      `/api/v1/agent/tasks/${encodeURIComponent(requestId)}/evidence?${query.toString()}`,
+      accessToken
     );
   }
 

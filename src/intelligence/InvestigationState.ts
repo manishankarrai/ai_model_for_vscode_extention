@@ -1,4 +1,5 @@
 import { flow } from "../utils/flowLog";
+import { adaptiveLimits } from "../config/adaptiveLimits";
 
 export type InvestigationStopReason =
   | "completed"
@@ -24,11 +25,11 @@ export interface InvestigationLimits {
 export class InvestigationState {
 
   constructor(limits: InvestigationLimits = {}) {
-    this.maxSteps = limits.maxSteps ?? 100;
-    this.maxFiles = limits.maxFiles ?? 1_000;
-    this.maxChars = limits.maxChars ?? 5_000_000;
-    this.maxAICalls = limits.maxAICalls ?? 100;
-    this.maxToolCalls = limits.maxToolCalls ?? 500;
+    this.maxSteps = limits.maxSteps ?? adaptiveLimits.maxSteps;
+    this.maxFiles = limits.maxFiles ?? adaptiveLimits.maxFiles;
+    this.maxChars = limits.maxChars ?? adaptiveLimits.maxChars;
+    this.maxAICalls = limits.maxAICalls ?? adaptiveLimits.maxAICalls;
+    this.maxToolCalls = limits.maxToolCalls ?? adaptiveLimits.maxToolCalls;
   }
 
   // ==========================================================
@@ -149,13 +150,13 @@ export class InvestigationState {
   /**
    * Maximum AI API calls.
    */
-  readonly maxAICalls: number;
+  maxAICalls: number;
 
 
   /**
    * Maximum local tool calls (reads, edits, commands, etc.).
    */
-  readonly maxToolCalls: number;
+  maxToolCalls: number;
 
 
   // ==========================================================
@@ -258,6 +259,18 @@ export class InvestigationState {
     return true;
   }
 
+  extendAICalls(additional: number): boolean {
+    flow("InvestigationState.extendAICalls", 1, "enter", { additional });
+
+    if (additional <= 0 || this.stopReason !== "max_ai_calls") {
+      return false;
+    }
+
+    this.maxAICalls += additional;
+    this._stopReason = undefined;
+    return true;
+  }
+
 
   // ==========================================================
   // Tool Calls
@@ -297,6 +310,18 @@ export class InvestigationState {
     this._toolCalls++;
 
 
+    return true;
+  }
+
+  extendToolCalls(additional: number): boolean {
+    flow("InvestigationState.extendToolCalls", 1, "enter", { additional });
+
+    if (additional <= 0 || this.stopReason !== "max_tool_calls") {
+      return false;
+    }
+
+    this.maxToolCalls += additional;
+    this._stopReason = undefined;
     return true;
   }
 
@@ -698,40 +723,6 @@ export class InvestigationState {
 
       this.stop(
         "max_chars"
-      );
-
-      return false;
-    }
-
-
-    // --------------------------------------------------------
-    // Maximum Gemini calls
-    // --------------------------------------------------------
-
-    if (
-      this._aiCalls >=
-      this.maxAICalls
-    ) {
-
-      this.stop(
-        "max_ai_calls"
-      );
-
-      return false;
-    }
-
-
-    // --------------------------------------------------------
-    // Maximum local tool calls
-    // --------------------------------------------------------
-
-    if (
-      this._toolCalls >=
-      this.maxToolCalls
-    ) {
-
-      this.stop(
-        "max_tool_calls"
       );
 
       return false;

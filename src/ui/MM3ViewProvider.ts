@@ -28,6 +28,7 @@ import {
   type UserFacingErrorHelp
 } from "../backend/userFacingError";
 import type { BillingAgent, CreditPlan, WalletSummary } from "../models/types";
+import { adaptiveLimits } from "../config/adaptiveLimits";
 
 export class MM3ViewProvider
   implements vscode.WebviewViewProvider
@@ -47,6 +48,8 @@ export class MM3ViewProvider
   private requestController?: AbortController;
 
   private readonly pendingApprovals = new Map<string, (decision: ToolApprovalDecision) => void>();
+
+  private pendingLimitDecision?: (continueInvestigation: boolean) => void;
 
   private lastQuestion?: {
     question: string;
@@ -85,6 +88,7 @@ export class MM3ViewProvider
       this.getHtml(webviewView.webview);
 
     void this.refreshBilling();
+    void this.refreshTaskHistory();
 
     webviewView.webview.onDidReceiveMessage(
       async (message: WebviewMessage) => {
@@ -147,6 +151,24 @@ export class MM3ViewProvider
       }
     }
   }
+
+  private async refreshTaskHistory(): Promise<void> {
+    try {
+      const accessToken = await this.getAccessToken();
+      if (!accessToken) {
+        return;
+      }
+      const result = await this.billingClient.listAgentTasks(accessToken, 20);
+      this.post({
+        type: "task_history",
+        tasks: result.tasks ?? []
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Unable to load task history: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
  // handle message
   private async handleMessage(
     message: WebviewMessage
@@ -164,6 +186,7 @@ export class MM3ViewProvider
 
       case "cancel_request":
         this.resolvePendingApprovals("skip");
+        this.resolveLimitDecision(false);
         this.requestController?.abort();
         break;
 
@@ -171,11 +194,18 @@ export class MM3ViewProvider
         this.resolveApproval(message.approvalId, message.decision);
         break;
 
+      case "limit_response":
+        this.resolveLimitDecision(message.continueInvestigation);
+        break;
+
       case "retry_agent":
         await this.retryAgent(message.profile);
         break;
 
       case "retry_last":
+        if (await this.resumeLastTask()) {
+          break;
+        }
         if (this.lastQuestion) {
           await this.handleQuestion(
             this.lastQuestion.question,
@@ -184,6 +214,14 @@ export class MM3ViewProvider
             1
           );
         }
+        break;
+
+      case "load_task_history":
+        await this.refreshTaskHistory();
+        break;
+
+      case "resume_task":
+        await this.resumeLastTask(message.requestId);
         break;
 
       case "attach_files":
@@ -345,7 +383,8 @@ export class MM3ViewProvider
                     : event.message
               }
             });
-          }
+          },
+          async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
         );
 
       this.post({
@@ -389,12 +428,89 @@ export class MM3ViewProvider
     } finally {
 
       this.resolvePendingApprovals("skip");
+      this.resolveLimitDecision(false);
       this.isProcessing = false;
       this.requestController = undefined;
 
       this.post({
         type: "ready",
       });
+    }
+  }
+
+  private async resumeLastTask(requestID?: string): Promise<boolean> {
+    flow("MM3ViewProvider.resumeLastTask", 1, "enter");
+    if (this.isProcessing) {
+      return true;
+    }
+
+    const accessToken = await this.getAccessToken();
+    if (!accessToken) {
+      return false;
+    }
+
+    this.isProcessing = true;
+    this.post({ type: "thinking" });
+    try {
+      const onEvent = (event: AgentEvent) => {
+        this.post({
+          type: "agent_event",
+          event: {
+            ...event,
+            message:
+              event.type === "failed"
+                ? this.sanitizeUserError(event.message)
+                : event.message
+          }
+        });
+      };
+      const response = requestID
+        ? await this.agent.resumeTask(
+            requestID,
+            accessToken,
+            undefined,
+            onEvent,
+            async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
+          )
+        : await this.agent.resumeLastTask(
+            accessToken,
+            undefined,
+            onEvent,
+            async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
+          );
+      if (!response) {
+        return false;
+      }
+
+      this.post({
+        type: "answer",
+        answer: this.formatAnswer(response),
+        usage: response.usage,
+        requestId: response.request_id,
+        model: response.model,
+      });
+      await this.refreshBilling(true);
+      if (response.implementation_plan?.changes?.length) {
+        try {
+          await this.codeChangeApplier.offer(
+            response.implementation_plan.changes
+          );
+        } catch (applyError) {
+          this.logger.error("MM3 failed to apply resumed planned file changes", applyError);
+          this.postError(applyError);
+        }
+      }
+      this.postPendingFileReviews();
+      return true;
+    } catch (error) {
+      this.postError(error);
+      this.logger.error("MM3 task resume failed", error);
+      return true;
+    } finally {
+      this.resolvePendingApprovals("skip");
+      this.resolveLimitDecision(false);
+      this.isProcessing = false;
+      this.post({ type: "ready" });
     }
   }
 
@@ -641,11 +757,37 @@ export class MM3ViewProvider
 
   private postError(error: unknown): void {
     const message = this.getErrorMessage(error);
+    const isInvestigationLimit =
+      /Adaptive investigation stopped: max_(tool|ai)_calls/i.test(message);
     this.post({
       type: "error",
       error: message,
-      help: userFacingErrorHelp(classifyErrorMessage(message))
+      help: isInvestigationLimit
+        ? undefined
+        : userFacingErrorHelp(classifyErrorMessage(message))
     });
+  }
+
+  private async askToExtendLimit(
+    reason: "max_tool_calls" | "max_ai_calls",
+    currentLimit: number
+  ): Promise<number | undefined> {
+    this.resolveLimitDecision(false);
+    this.post({ type: "limit_prompt", reason, currentLimit });
+    const shouldContinue = await new Promise<boolean>((resolve) => {
+      this.pendingLimitDecision = resolve;
+    });
+    return shouldContinue
+      ? reason === "max_ai_calls"
+        ? adaptiveLimits.continuationAICalls
+        : adaptiveLimits.continuationToolCalls
+      : undefined;
+  }
+
+  private resolveLimitDecision(continueInvestigation: boolean): void {
+    const resolve = this.pendingLimitDecision;
+    this.pendingLimitDecision = undefined;
+    resolve?.(continueInvestigation);
   }
 
   private clearFileReviews(): void {
@@ -828,7 +970,71 @@ body {
 .header-actions {
   display: flex;
   align-items: center;
+  gap: 4px;
   flex-shrink: 0;
+}
+
+.task-history {
+  display: none;
+  margin: 0 10px 8px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  overflow: hidden;
+}
+
+.task-history[aria-hidden="false"] {
+  display: block;
+}
+
+.task-history-title {
+  padding: 7px 9px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.task-history-list {
+  max-height: 180px;
+  overflow-y: auto;
+}
+
+.task-history-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 7px 9px;
+  border: none;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  background: transparent;
+  color: var(--vscode-foreground);
+  text-align: left;
+  cursor: pointer;
+  font: inherit;
+  font-size: 11px;
+}
+
+.task-history-row:last-child {
+  border-bottom: none;
+}
+
+.task-history-row:hover {
+  background: var(--vscode-list-hoverBackground);
+}
+
+.task-history-question {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.task-history-status {
+  flex-shrink: 0;
+  color: var(--vscode-descriptionForeground);
+  font-size: 10px;
 }
 
 .credits {
@@ -1698,9 +1904,15 @@ textarea:disabled {
     </div>
 
     <div class="header-actions">
+      <button id="task-history-toggle" class="icon-btn" type="button" title="Task history">◷</button>
       <button id="reset-token" class="icon-btn" type="button" title="Reset access token">🔑</button>
     </div>
 
+  </div>
+
+  <div id="task-history" class="task-history" aria-hidden="true">
+    <div class="task-history-title">Recent tasks</div>
+    <div id="task-history-list" class="task-history-list"></div>
   </div>
 
   <div
@@ -1776,6 +1988,15 @@ const addSelection =
 
 const resetToken =
   document.getElementById("reset-token");
+
+const taskHistoryToggle =
+  document.getElementById("task-history-toggle");
+
+const taskHistory =
+  document.getElementById("task-history");
+
+const taskHistoryList =
+  document.getElementById("task-history-list");
 
 const messages =
   document.getElementById("messages");
@@ -1861,6 +2082,58 @@ addSelection.addEventListener("click", () => {
 resetToken.addEventListener("click", () => {
   vscode.postMessage({ type: "reset_token" });
 });
+
+taskHistoryToggle.addEventListener("click", () => {
+  const open = taskHistory.getAttribute("aria-hidden") !== "false";
+  taskHistory.setAttribute("aria-hidden", open ? "false" : "true");
+  if (open) {
+    vscode.postMessage({ type: "load_task_history" });
+  }
+});
+
+function renderTaskHistory(tasks) {
+  taskHistoryList.textContent = "";
+  if (!Array.isArray(tasks) || tasks.length === 0) {
+    const emptyHistory = document.createElement("div");
+    emptyHistory.className = "task-history-title";
+    emptyHistory.textContent = "No recent tasks";
+    taskHistoryList.appendChild(emptyHistory);
+    return;
+  }
+
+  tasks.forEach((task) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "task-history-row";
+    row.title = task.question || "Task";
+
+    const question = document.createElement("span");
+    question.className = "task-history-question";
+    question.textContent = task.question || task.request_id;
+    row.appendChild(question);
+
+    const taskStatus = document.createElement("span");
+    taskStatus.className = "task-history-status";
+    taskStatus.textContent = task.status === "waiting_for_tool"
+      ? "Resume"
+      : task.status;
+    row.appendChild(taskStatus);
+
+    if (task.status === "waiting_for_tool") {
+      row.addEventListener("click", () => {
+        taskHistory.setAttribute("aria-hidden", "true");
+        vscode.postMessage({
+          type: "resume_task",
+          requestId: task.request_id
+        });
+      });
+    } else {
+      row.disabled = true;
+      row.style.cursor = "default";
+    }
+    taskHistoryList.appendChild(row);
+  });
+}
 
 /* -------------------------------------------------------------------------- */
 /* HTML escaping                                                              */
@@ -2468,6 +2741,45 @@ function addApprovalRequest(approvalId, text) {
   messages.scrollTop = messages.scrollHeight;
 }
 
+function addLimitPrompt(reason, currentLimit) {
+  if (empty) {
+    empty.remove();
+  }
+
+  const card = document.createElement("div");
+  card.className = "approval-card";
+  const label = document.createElement("span");
+  label.className = "approval-card-text";
+  label.textContent = reason === "max_ai_calls"
+    ? "AI API call limit reached (" + currentLimit + "). Continue?"
+    : "Tool call limit reached (" + currentLimit + "). Continue?";
+
+  const actions = document.createElement("div");
+  actions.className = "approval-card-actions";
+  const continueButton = document.createElement("button");
+  continueButton.type = "button";
+  continueButton.textContent = "Continue";
+  const stopButton = document.createElement("button");
+  stopButton.type = "button";
+  stopButton.textContent = "Stop";
+
+  const finish = (continueInvestigation) => {
+    vscode.postMessage({ type: "limit_response", continueInvestigation });
+    continueButton.disabled = true;
+    stopButton.disabled = true;
+    label.textContent = continueInvestigation ? "Continuing" : "Stopped";
+  };
+
+  continueButton.addEventListener("click", () => finish(true));
+  stopButton.addEventListener("click", () => finish(false));
+  actions.appendChild(continueButton);
+  actions.appendChild(stopButton);
+  card.appendChild(label);
+  card.appendChild(actions);
+  messages.appendChild(card);
+  messages.scrollTop = messages.scrollHeight;
+}
+
 function updateStreamingPanel(statusText, delta) {
   if (empty) {
     empty.remove();
@@ -2541,6 +2853,9 @@ function addErrorContent(element, text, help) {
 
   const helpBox = document.createElement("div");
   helpBox.className = "error-help";
+  if (!help) {
+    return;
+  }
   const crm = document.createElement("a");
   crm.href = (help && help.crmUrl) || "https://www.mm3ai.com";
   crm.textContent = "Reset token at www.mm3ai.com";
@@ -3247,6 +3562,10 @@ window.addEventListener(
         addApprovalRequest(message.approvalId, message.message);
         break;
 
+      case "limit_prompt":
+        addLimitPrompt(message.reason, message.currentLimit);
+        break;
+
       case "error":
         hideThinking();
         removeStreamingPanel();
@@ -3292,6 +3611,10 @@ window.addEventListener(
             }
           }
         }
+        break;
+
+      case "task_history":
+        renderTaskHistory(message.tasks || []);
         break;
 
       case "cancelled":
@@ -3404,7 +3727,18 @@ type WebviewMessage =
       decision: ToolApprovalDecision;
     }
   | {
+      type: "limit_response";
+      continueInvestigation: boolean;
+    }
+  | {
       type: "retry_last";
+    }
+  | {
+      type: "load_task_history";
+    }
+  | {
+      type: "resume_task";
+      requestId: string;
     }
   | {
       type: "retry_agent";
@@ -3492,6 +3826,11 @@ type WebviewResponse =
       message: string;
     }
   | {
+      type: "limit_prompt";
+      reason: "max_tool_calls" | "max_ai_calls";
+      currentLimit: number;
+    }
+  | {
       type: "error";
       error: string;
       help?: UserFacingErrorHelp;
@@ -3519,6 +3858,20 @@ type WebviewResponse =
       wallet: WalletSummary;
       agents: BillingAgent[];
       plans: CreditPlan[];
+    }
+  | {
+      type: "task_history";
+      tasks: Array<{
+        request_id: string;
+        question: string;
+        action: string;
+        mode: string;
+        status: string;
+        phase?: string;
+        current_step?: number;
+        summary?: string;
+        updated_at: string;
+      }>;
     }
   | {
       type: "cleared";

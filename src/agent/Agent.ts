@@ -12,28 +12,20 @@ import {
   ContextPart,
   ContextFile,
   InteractionMode,
-  InvestigationResult,
   ImplementationPlan,
   MAX_CONVERSATION_HISTORY,
-  ProjectMemoryPayload,
 } from "../models/types";
 
 import { IntentDetector } from "./IntentDetector";
-import { Planner } from "./Planner";
-import { ToolSelector } from "./ToolSelector";
-import { InvestigationEngine } from "./InvestigationEngine";
 import { InvestigationState } from "../intelligence/InvestigationState";
 
 import { ProjectIndexer } from "../intelligence/ProjectIndexer";
-import { SearchEngine } from "../intelligence/SearchEngine";
-import { RelevanceRanker } from "../intelligence/RelevanceRanker";
 
 import {
-  ContextBuilder,
-  InvestigationContextEvidence
-} from "../intelligence/ContextBuilder";
-
-import { BackendClient } from "../backend/BackendClient";
+  AgentTaskRecord,
+  AgentTaskStateResponse,
+  BackendClient
+} from "../backend/BackendClient";
 
 import { ConversationState } from "../state/ConversationState";
 import { TaskState } from "../state/TaskState";
@@ -41,21 +33,20 @@ import { TaskState } from "../state/TaskState";
 import { TokenEstimator } from "../utils/TokenEstimator";
 import { Logger } from "../utils/Logger";
 
-import { ReadOnlyGuard } from "../safety/ReadOnlyGuard";
-import { ProjectUnderstanding } from "../project/project-understanding";
-import { ProjectMemory } from "../state/ProjectMemory";
 import { resolveRequestContext } from "../intelligence/contextSelection";
 import { getToolPolicy, isToolAllowed } from "../tools/toolPolicy";
 import {
   ToolApprovalHandler,
   WorkspaceToolRegistry
 } from "../tools/WorkspaceToolRegistry";
+import { ReadOnlyToolRegistry } from "../tools/ReadOnlyToolRegistry";
 import type {
   AgentToolName,
   CodeChange,
   ToolApprovalStatus
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
+import { adaptiveLimits } from "../config/adaptiveLimits";
 
 
 import { flow } from "../utils/flowLog";
@@ -100,6 +91,11 @@ interface AdaptiveToolExecution {
   approval?: ToolApprovalStatus;
   error?: string;
 }
+
+type AdaptiveLimitHandler = (details: {
+  reason: "max_tool_calls" | "max_ai_calls";
+  currentLimit: number;
+}) => Promise<number | undefined>;
 
 
 interface AdaptiveDecision {
@@ -168,11 +164,12 @@ type AdaptiveAIRequest =
 //
 // ============================================================
 
-const ADAPTIVE_MAX_SEARCH_RESULTS = 10;
+const ADAPTIVE_MAX_SEARCH_RESULTS = adaptiveLimits.maxSearchResults;
 
-const ADAPTIVE_MAX_LIST_FILES = 10;
+const ADAPTIVE_MAX_LIST_FILES = adaptiveLimits.maxListFiles;
 
-const ADAPTIVE_MAX_FILE_CHARS = 20_000;
+const ADAPTIVE_MAX_FILE_CHARS = adaptiveLimits.maxFileChars;
+const ACTIVE_TASK_STORAGE_KEY = "mm3.activeAgentTask";
 
 
 // ============================================================
@@ -185,26 +182,6 @@ export class Agent {
     new IntentDetector();
 
 
-  private readonly planner =
-    new Planner();
-
-
-  private readonly toolSelector =
-    new ToolSelector();
-
-
-  private readonly searchEngine =
-    new SearchEngine();
-
-
-  private readonly ranker =
-    new RelevanceRanker();
-
-
-  private readonly contextBuilder =
-    new ContextBuilder();
-
-
   private readonly backend =
     new BackendClient();
 
@@ -215,19 +192,15 @@ export class Agent {
     new TokenEstimator();
 
 
-  // Stage 3
-  private readonly investigationEngine:
-    InvestigationEngine;
-
   private readonly workspaceTools: WorkspaceToolRegistry;
+
+  private readonly readOnlyTools =
+    new ReadOnlyToolRegistry();
 
 
   constructor(
     private readonly indexer:
       ProjectIndexer,
-
-    private readonly projectUnderstanding:
-      ProjectUnderstanding,
 
     private readonly conversation:
       ConversationState,
@@ -235,24 +208,16 @@ export class Agent {
     private readonly taskState:
       TaskState,
 
-    private readonly projectMemory:
-      ProjectMemory,
-
     private readonly logger:
       Logger,
 
     changeApplier = new CodeChangeApplier(),
-    approvalState?: vscode.Memento
+    private readonly taskStorage?: vscode.Memento
   ) {
     flow("Agent.constructor", 1, "enter");
 
     this.workspaceTools =
-      new WorkspaceToolRegistry(changeApplier, approvalState);
-
-    this.investigationEngine =
-      new InvestigationEngine(
-        logger
-      );
+      new WorkspaceToolRegistry(changeApplier, taskStorage);
   }
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
@@ -272,7 +237,8 @@ export class Agent {
     agentProfile: AgentProfile = mode === "ask" ? "ask" : "coordinator",
     agentCount = 1,
     signal?: AbortSignal,
-    onEvent?: (event: AgentEvent) => void
+    onEvent?: (event: AgentEvent) => void,
+    onLimitReached?: AdaptiveLimitHandler
   ): Promise<AIResponse> {
     flow("Agent.process", 1, "enter", { mode, agentProfile, agentCount });
 
@@ -309,19 +275,19 @@ export class Agent {
         question
       );
 
-    const intent = intentResolution.intent;
+    const localIntent = intentResolution.intent;
 
 
     const requestId =
       this.createRequestId();
-    flow("Agent.process", 2, "intent and request", { requestId, intent });
+    flow("Agent.process", 2, "local fast-path classification", { requestId, localIntent });
 
     if (intentResolution.kind !== "task") {
       const answer = intentResolution.kind === "greeting"
         ? "Hello. Tell me what you want to inspect, change, or understand."
         : "What would you like me to do? Include the relevant file, behavior, or expected result.";
       this.conversation.addAssistantMessage(answer);
-      return this.createLocalResponse(requestId, intent, answer, intentResolution.reason);
+      return this.createLocalResponse(requestId, localIntent, answer, intentResolution.reason);
     }
 
     if (onEvent && mode === "agent") {
@@ -333,12 +299,19 @@ export class Agent {
       ).catch(async (error: unknown) => {
         this.logger.warn(".............Agent event stream unavailable; loading task status", error);
         try {
-          const task = await this.backend.getAgentTask(requestId, accessToken);
-          for (const event of (task as AgentTaskStatus).events ?? []) {
+          const state = await this.backend.getAgentTaskState(requestId, accessToken);
+          for (const event of state.task.events ?? []) {
             onEvent(event);
           }
         } catch (statusError) {
-          this.logger.warn("Unable to reload agent task status", statusError);
+          try {
+            const task = await this.backend.getAgentTask(requestId, accessToken);
+            for (const event of (task as AgentTaskStatus).events ?? []) {
+              onEvent(event);
+            }
+          } catch (legacyStatusError) {
+            this.logger.warn("Unable to reload agent task status", legacyStatusError);
+          }
         }
       });
     }
@@ -347,7 +320,7 @@ export class Agent {
     this.taskState.start(
       requestId,
       question,
-      intent
+      localIntent
     );
 
 
@@ -355,7 +328,7 @@ export class Agent {
       "MM3 task started",
       {
         requestId,
-        intent
+        localIntent
       }
     );
 
@@ -363,6 +336,8 @@ export class Agent {
     this.conversation.addUserMessage(
       question
     );
+
+    await this.clearPersistedTask();
 
     this.emitProgress(onEvent, agentProfile, "Starting local investigation.");
 
@@ -399,611 +374,56 @@ export class Agent {
       flow("Agent.process", 3, "index ready", { files: index.files.size });
       this.emitProgress(onEvent, agentProfile, "Project index ready.");
 
-
-      // ======================================================
-      // Project model
-      // ======================================================
-
-      const projectModel =
-        this.projectUnderstanding.getModel();
-
-
-      // ======================================================
-      // Local plan
-      // ======================================================
-
-      this.taskState.setStatus(
-        "planning"
-      );
-
-
-      const plan =
-        this.planner.createPlan(
-          intent,
-          question
-        );
-
-
-      const selectedTools =
-        this.toolSelector.select(
-          intent
-        );
-
-
-      for (
-        const tool of selectedTools
-      ) {
-
-        ReadOnlyGuard.assertAllowed(
-          tool,
-          mode
-        );
+      if (!workspace || !index) {
+        throw new Error("Workspace index is unavailable.");
       }
 
-
-      flow("Agent.process", 4, "plan created", { intent, tools: selectedTools });
-
-      this.logger.info(
-        "Local plan created",
-        {
-          steps:
-            plan.steps,
-
-          tools:
-            plan.tools,
-
-          plannerMaxSteps:
-            plan.maxSteps,
-
-          plannerMaxFiles:
-            plan.maxFiles,
-
-          plannerMaxChars:
-            plan.maxChars
-        }
-      );
-
-
-      // ======================================================
-      // STAGE 3
-      // LOCAL SEARCH
-      // ======================================================
-
-      this.taskState.setStatus(
-        "investigating"
-      );
-
-
-      this.logger.info(
-        "Starting local search",
-        {
-          question
-        }
-      );
-
-      this.emitProgress(onEvent, agentProfile, "Searching the project for relevant files.");
-
-
-      const searchResults = mode === "ask"
-        ? []
-        : await this.searchEngine.search(
-            question,
-            index,
-            50
-          );
-
-
-      this.logger.info(
-        "Local search completed",
-        {
-          results:
-            searchResults.length
-        }
-      );
-      this.emitProgress(onEvent, agentProfile, "Ranking the most relevant project files.");
-
-
-      // ======================================================
-      // STAGE 3
-      // RANK RESULTS
-      // ======================================================
-
-      const ranked =
-        this.ranker.rank(
-          question,
-          index,
-          searchResults,
-          projectModel
-        );
-
-
-      this.logger.info(
-        "Local search results ranked",
-        {
-          results:
-            ranked.length,
-
-          topResults:
-            ranked
-              .slice(0, 10)
-              .map(
-                result => ({
-                  path:
-                    result.path,
-
-                  score:
-                    result.score,
-
-                  reason:
-                    result.reason
-                })
-              )
-        }
-      );
-
-
-      // ======================================================
-      // STAGE 3.1
-      // DEEP LOCAL INVESTIGATION
-      // ======================================================
-
-      this.logger.info(
-        "Starting deep local investigation",
-        {
-          rankedResults:
-            ranked.length,
-
-          plannerMaxSteps:
-            plan.maxSteps,
-
-          plannerMaxFiles:
-            plan.maxFiles,
-
-          plannerMaxChars:
-            plan.maxChars
-        }
-      );
-      this.emitProgress(onEvent, agentProfile, "Investigating the relevant code locally.");
-
-
-      let investigation: InvestigationResult;
-      flow("Agent.process", 5, "investigation start", { mode });
-
-      if (mode === "ask") {
-        investigation = {
-          question,
-          steps: [],
-          evidence: [],
-          filesInvestigated: [],
-          completed: true,
-          stoppedReason: "completed"
-        };
-      } else {
-        investigation =
-          await this.investigationEngine.investigate(
-            question,
-            index,
-            ranked,
-            {
-              maxSteps:
-                plan.maxSteps,
-
-              maxFiles:
-                plan.maxFiles,
-
-              maxChars:
-                plan.maxChars
-            }
-          );
-      }
-
-      this.projectMemory.addInvestigationArtifacts({
-        findings:
-          investigation.evidence
-            .slice(0, 8)
-            .map(
-              evidence =>
-                `${evidence.path}: ${evidence.reason}`
-            ),
-        dependencies:
-          investigation.evidence
-            .flatMap(
-              evidence =>
-                evidence.dependencies
-            )
-            .slice(0, 25),
-        conventions:
-          projectModel?.frameworks.map(
-            framework =>
-              `Framework: ${framework}`
-          ) ?? [],
-        architectureNotes:
-          projectModel?.entryPoints.map(
-            entry =>
-              `Entry point: ${entry.filePath}`
-          ) ?? []
-      });
-
-      void this.projectMemory.save();
-
-      // ------------------------------------------------------
-      // Investigation logging
-      // ------------------------------------------------------
-
-      this.logger.info(
-        "Investigation completed",
-        {
-          question,
-
-          steps:
-            investigation.steps.length,
-
-          files:
-            investigation.filesInvestigated.length,
-
-          evidence:
-            investigation.evidence.length,
-
-          stoppedReason:
-            investigation.stoppedReason
-        }
-      );
-      this.emitProgress(onEvent, agentProfile, "Local investigation complete. Preparing AI reasoning.");
-
-
-      this.logger.info(
-        "Investigation files discovered",
-        {
-          files:
-            investigation.filesInvestigated
-        }
-      );
-
-
-      this.logger.info(
-        "Investigation evidence collected",
-        {
-          evidence:
-            investigation.evidence.map(
-              item => ({
-                path:
-                  item.path,
-
-                score:
-                  item.score,
-
-                symbols:
-                  item.symbols,
-
-                dependencies:
-                  item.dependencies,
-
-                relatedSymbols:
-                  item.relatedSymbols ?? []
-              })
-            )
-        }
-      );
-
-
-      // ======================================================
-      // CONTEXT CONFIGURATION
-      // ======================================================
-
-      const config =
-        vscode.workspace
-          .getConfiguration("mm3");
-
-
-      const maxFiles =
-        config.get<number>(
-          "maxFilesInContext",
-          1000
-        );
-
-
-      const maxChars =
-        config.get<number>(
-          "maxContextChars",
-          5_000_000
-        );
-
-
-      // ------------------------------------------------------
-      // Convert investigation evidence
-      // ------------------------------------------------------
-
-      const investigationEvidence:
-        InvestigationContextEvidence[] =
-        investigation.evidence.map(
-          evidence => ({
-            path:
-              evidence.path,
-
-            score:
-              evidence.score,
-
-            reason:
-              evidence.reason,
-
-            content:
-              evidence.content,
-
-            symbols:
-              evidence.symbols,
-
-            dependencies:
-              evidence.dependencies,
-
-            relatedSymbols:
-              evidence.relatedSymbols
-          })
-        );
-
-
-      this.logger.info(
-        "Merging investigation evidence into context",
-        {
-          selectedContext:
-            selectedContext.map(
-              part => ({
-                path: part.path,
-                kind: part.kind,
-                startLine: part.startLine,
-                endLine: part.endLine,
-                chars: part.content.length
-              })
-            ),
-
-          evidenceFiles:
-            investigationEvidence.length,
-
-          files:
-            investigationEvidence.map(
-              evidence =>
-                evidence.path
-            )
-        }
-      );
-
-
-      // ------------------------------------------------------
-      // Build context
-      // ------------------------------------------------------
-
-      let context: AIContext;
-
-      if (mode === "ask") {
-        context = resolveRequestContext({
-          mode,
-          selected: selectedContext,
-          investigated: [],
-          evidence: [],
-          indexSummary: "",
-          maxFiles
-        });
-      } else {
-        const selectedFiles =
-          await this.readSelectedWorkspaceFiles(selectedContext);
-
-        const investigated = selectedContext.length > 0
-          ? {
-              files: [],
-              evidence: [],
-              indexSummary: ""
-            }
-          : await this.contextBuilder.build(
-              index,
-              ranked,
-              projectModel,
-              {
-                maxFiles,
-                maxChars
-              },
-              investigationEvidence
-            );
-
-        context = resolveRequestContext({
-          mode,
-          selected: selectedContext,
-          investigated: [...selectedFiles, ...investigated.files],
-          evidence: investigated.evidence,
-          indexSummary: investigated.indexSummary,
-          maxFiles
-        });
-      }
-
-
-      this.logger.info(
-        "Investigation evidence merged into context",
-        {
-          contextFiles:
-            context.files.length,
-
-          contextPaths:
-            context.files.map(
-              file =>
-                file.path
-            )
-        }
-      );
-
-
-      // ------------------------------------------------------
-      // Task files
-      // ------------------------------------------------------
-
-      this.taskState.setFiles(
-        context.files.map(
-          file =>
-            file.path
-        )
-      );
-
-
-      // ------------------------------------------------------
-      // Token estimation
-      // ------------------------------------------------------
-
-      const estimatedTokens =
-        this.tokenEstimator.estimateFiles(
-          context.files
-        );
-
-
-      this.logger.info(
-        "Context built",
-        {
-          files:
-            context.files.length,
-
-          characters:
-            context.files.reduce(
-              (
-                total,
-                file
-              ) =>
-                total +
-                file.content.length,
-              0
-            ),
-
-          estimatedTokens
-        }
-      );
-
-
-      // ======================================================
-      // INITIAL AI REQUEST
-      // ======================================================
-
-      const request:
-        AdaptiveAIRequest = {
-
-        action:
-          intent,
-
-        request_id:
-          requestId,
-
+      const initialContext: AIContext = {
+        files: [],
+        indexSummary: "",
+        evidence: [],
+        parts: selectedContext
+      };
+      const backendRequest: AdaptiveAIRequest = {
+        action: "chat",
+        request_id: requestId,
         question,
-
         mode,
-
         tool_policy: getToolPolicy(mode),
-
         agent: {
           profile: agentProfile,
           count: Math.max(1, Math.min(agentCount, mode === "ask" ? 1 : 5))
         },
-
         project: {
-
-          id:
-            this.createProjectId(
-              workspace.uri
-            ),
-
-          name:
-            workspace.name,
-
-          indexVersion:
-            index.version
+          id: this.createProjectId(workspace.uri),
+          name: workspace.name,
+          indexVersion: index.version,
+          targetPath: this.getConfiguredImplementationRoot()
         },
-
-        context,
-
-        memory:
-          this.projectMemory.getContextForAI(),
-
-        project_memory:
-          this.getProjectMemoryPayload(),
-
-        conversation_history:
-          this.conversation.getRecent(MAX_CONVERSATION_HISTORY),
-
-        plan:
-          plan.steps
+        context: initialContext,
+        plan: []
       };
 
-      this.lastRequest = request;
+      this.taskState.setStatus("investigating");
+      this.taskState.setFiles(selectedContext.map(part => part.path));
+      this.lastRequest = backendRequest;
+      await this.persistActiveTask(backendRequest.request_id);
 
-
-      this.logger.info(
-        "Initial AI request prepared",
-        {
-          requestId,
-
-          contextFiles:
-            context.files.length,
-
-          estimatedTokens
-        }
+      const backendResponse = await this.runAdaptiveInvestigation(
+        backendRequest,
+        accessToken,
+        workspace.uri,
+        index,
+        initialContext,
+        signal,
+        onEvent,
+        onLimitReached
       );
 
-
-      // ======================================================
-      // STAGE 4
-      // ADAPTIVE INVESTIGATION
-      // ======================================================
-
-      const response =
-        await this.runAdaptiveInvestigation(
-          request,
-          accessToken,
-          workspace.uri,
-          index,
-          projectModel,
-          ranked,
-          plan,
-          context,
-          signal,
-          onEvent
-        );
-
-
-      // ------------------------------------------------------
-      // Task completion
-      // ------------------------------------------------------
-
-      this.taskState.setAICalls(
-        response.usage.ai_api_calls
-      );
-
-
+      this.taskState.setAICalls(backendResponse.usage.ai_api_calls);
       this.taskState.complete();
-
-
-      this.logger.info(
-        "MM3 task completed",
-        {
-          requestId,
-
-          aiCalls:
-            response.usage.ai_api_calls,
-
-          inputTokens:
-            response.usage.input_tokens,
-
-          outputTokens:
-            response.usage.output_tokens,
-
-          totalTokens:
-            response.usage.total_tokens,
-
-          estimatedCost:
-            response.usage.estimated_cost,
-
-          latencyMs:
-            Date.now() -
-            this.taskState.get().startedAt
-        }
-      );
-
-
-      flow("Agent.process", 6, "complete", { requestId: response.request_id });
-      return response;
-
+      await this.clearPersistedTask();
+      return backendResponse;
 
     } catch (error) {
       flow("Agent.process", 7, "failed");
@@ -1046,6 +466,175 @@ export class Agent {
       signal
     ) as { answer: string };
     return result.answer;
+  }
+
+  async resumeLastTask(
+    accessToken: string,
+    signal?: AbortSignal,
+    onEvent?: (event: AgentEvent) => void,
+    onLimitReached?: AdaptiveLimitHandler
+  ): Promise<AIResponse | undefined> {
+    const persistedRequestID =
+      this.taskStorage?.get<string>(ACTIVE_TASK_STORAGE_KEY);
+    const requestID = this.lastRequest?.request_id ?? persistedRequestID;
+    if (!requestID) {
+      return undefined;
+    }
+
+    return this.resumeTask(requestID, accessToken, signal, onEvent, onLimitReached);
+  }
+
+  async resumeTask(
+    requestID: string,
+    accessToken: string,
+    signal?: AbortSignal,
+    onEvent?: (event: AgentEvent) => void,
+    onLimitReached?: AdaptiveLimitHandler
+  ): Promise<AIResponse | undefined> {
+    const reusableRequest =
+      this.lastRequest?.request_id === requestID
+        ? this.lastRequest
+        : undefined;
+
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      throw new Error("Please open a workspace first.");
+    }
+
+    let taskState: AgentTaskStateResponse;
+    try {
+      taskState = await this.backend.getAgentTaskState(requestID, accessToken);
+    } catch (error) {
+      this.logger.warn("Unable to restore persisted agent task", error);
+      await this.clearPersistedTask(requestID);
+      return undefined;
+    }
+    const pendingDecision = taskState.task.pending_decision;
+    if (taskState.task.status !== "waiting_for_tool" || !pendingDecision) {
+      await this.clearPersistedTask(requestID);
+      return undefined;
+    }
+
+    let index = this.indexer.getIndex();
+    if (!index) {
+      index = await this.indexer.build(workspace.uri);
+    }
+
+    const context = await this.loadTaskContext(taskState, accessToken);
+    const initialRequest: AdaptiveAIRequest = {
+      ...(reusableRequest ?? {
+        action: taskState.task.action,
+        request_id: taskState.task.request_id,
+        question: taskState.task.question,
+        mode: taskState.task.mode,
+        project: taskState.task.project,
+        agent: taskState.task.agent,
+        tool_policy: taskState.task.tool_policy,
+        plan: taskState.task.plan ?? [],
+      }),
+      project: {
+        ...taskState.task.project,
+        indexVersion: index.version
+      },
+      context,
+      tool_results: undefined
+    };
+    this.lastRequest = initialRequest;
+
+    this.logger.info("Resuming backend agent task", {
+      requestId: initialRequest.request_id,
+      step: taskState.task.current_step
+    });
+
+    const response = await this.runAdaptiveInvestigation(
+      initialRequest,
+      accessToken,
+      workspace.uri,
+      index,
+      context,
+      signal,
+      onEvent,
+      onLimitReached,
+      taskState.task,
+      pendingDecision as AdaptiveDecision
+    );
+    await this.clearPersistedTask();
+    return response;
+  }
+
+  private async persistActiveTask(requestID: string): Promise<void> {
+    try {
+      await this.taskStorage?.update(ACTIVE_TASK_STORAGE_KEY, requestID);
+    } catch (error) {
+      this.logger.warn("Unable to persist active agent task", error);
+    }
+  }
+
+  private async clearPersistedTask(requestID?: string): Promise<void> {
+    try {
+      const persistedRequestID =
+        this.taskStorage?.get<string>(ACTIVE_TASK_STORAGE_KEY);
+      if (requestID && persistedRequestID && persistedRequestID !== requestID) {
+        return;
+      }
+      await this.taskStorage?.update(ACTIVE_TASK_STORAGE_KEY, undefined);
+    } catch (error) {
+      this.logger.warn("Unable to clear persisted agent task", error);
+    }
+  }
+
+  private async loadTaskContext(
+    taskState: AgentTaskStateResponse,
+    accessToken: string
+  ): Promise<AIContext> {
+    const budget = taskState.task.budget;
+    const maxFiles = budget?.max_files ?? taskState.evidence.length;
+    const maxChars = budget?.max_context_chars ?? Number.MAX_SAFE_INTEGER;
+    const files: ContextFile[] = [];
+    const parts: ContextPart[] = [];
+    let chars = 0;
+
+    for (const summary of taskState.evidence) {
+      if (files.length + parts.length >= maxFiles || chars >= maxChars) {
+        break;
+      }
+
+      const evidence = await this.backend.getAgentTaskEvidence(
+        taskState.task.request_id,
+        summary.path,
+        accessToken,
+        summary.kind as "file" | "selection" | "attachment"
+      );
+      const remaining = maxChars - chars;
+      const content = evidence.content.slice(0, Math.max(0, remaining));
+      if (!content) {
+        continue;
+      }
+      chars += content.length;
+
+      if (summary.kind === "file") {
+        files.push({
+          path: evidence.path,
+          content
+        });
+      } else {
+        parts.push({
+          kind: summary.kind as ContextPart["kind"],
+          path: evidence.path,
+          content,
+          language: evidence.language ?? "",
+          startLine: evidence.start_line,
+          endLine: evidence.end_line
+        });
+      }
+    }
+
+    return {
+      files,
+      indexSummary: "",
+      evidence: [],
+      parts
+    };
   }
 
   private async readSelectedWorkspaceFiles(
@@ -1138,13 +727,6 @@ export class Agent {
     });
   }
 
-  private getProjectMemoryPayload(): ProjectMemoryPayload {
-    return {
-      ...this.projectMemory.getSnapshot(),
-      conversationHistory: this.conversation.getRecent(MAX_CONVERSATION_HISTORY)
-    };
-  }
-
   // ==========================================================
   // STAGE 4
   // ADAPTIVE INVESTIGATION LOOP
@@ -1163,23 +745,33 @@ export class Agent {
     index:
       any,
 
-    projectModel:
-      any,
-
-    ranked:
-      any[],
-
-    plan:
-      any,
-
     initialContext:
       any,
 
     signal?: AbortSignal,
 
-    onEvent?: (event: AgentEvent) => void
+    onEvent?: (event: AgentEvent) => void,
+
+    onLimitReached?: AdaptiveLimitHandler,
+
+    existingTask?: AgentTaskRecord,
+    pendingDecision?: AdaptiveDecision
   ): Promise<AIResponse> {
     flow("Agent.runAdaptiveInvestigation", 1, "enter");
+
+    const task = existingTask ?? await this.backend.createAgentTask(
+      {
+        request_id: initialRequest.request_id,
+        question: initialRequest.question,
+        mode: initialRequest.mode,
+        project: initialRequest.project,
+        agent: initialRequest.agent,
+        tool_policy: initialRequest.tool_policy,
+        plan: initialRequest.plan
+      },
+      accessToken,
+      signal
+    );
 
     // --------------------------------------------------------
     // Central investigation state.
@@ -1196,7 +788,13 @@ export class Agent {
     // --------------------------------------------------------
 
     const state =
-      new InvestigationState();
+      new InvestigationState({
+        maxSteps: task.budget?.max_steps,
+        maxFiles: task.budget?.max_files,
+        maxChars: task.budget?.max_context_chars,
+        maxAICalls: task.budget?.max_ai_calls,
+        maxToolCalls: task.budget?.max_tool_calls
+      });
 
 
     this.logger.info(
@@ -1232,6 +830,41 @@ export class Agent {
     let context =
       initialContext;
 
+    if (existingTask && pendingDecision) {
+      for (let step = 0; step < (existingTask.current_step ?? 0); step++) {
+        if (!state.startStep()) {
+          throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
+        }
+      }
+
+      const pendingTools = [
+        ...(pendingDecision.tools ?? []),
+        ...(pendingDecision.tool ? [pendingDecision.tool] : [])
+      ];
+      for (const tool of pendingTools) {
+        this.validateAdaptiveTool(tool);
+      }
+      const resumed = await this.executeAdaptiveToolBatch(
+        pendingTools,
+        request.request_id,
+        existingTask.current_step ?? 0,
+        workspaceUri,
+        index,
+        state,
+        onEvent,
+        accessToken,
+        signal,
+        onLimitReached,
+        initialRequest.agent?.profile || "agent"
+      );
+      context = this.mergeAdaptiveEvidence(context, resumed.evidence);
+      request = {
+        ...request,
+        context,
+        tool_results: resumed.toolResults,
+        step: existingTask.current_step
+      };
+    }
 
     // --------------------------------------------------------
     // Aggregate AI usage across all adaptive calls.
@@ -1323,21 +956,44 @@ export class Agent {
         !state.incrementAICalls()
       ) {
 
-        this.logger.info(
-          "Adaptive investigation stopped before AI call",
-          {
-            step:
-              currentStep,
-
-            stopReason:
-              state.stopReason
+        if (state.stopReason === "max_ai_calls" && onLimitReached) {
+          const additional = await onLimitReached({
+            reason: "max_ai_calls",
+            currentLimit: state.maxAICalls
+          });
+          if (additional && additional > 0) {
+            await this.backend.increaseAgentTaskBudget(
+              request.request_id,
+              { aiCalls: additional },
+              accessToken,
+              signal
+            );
+            if (state.extendAICalls(additional) && state.incrementAICalls()) {
+              // Continue with the user-approved AI-call budget.
+            } else {
+              throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
+            }
+          } else {
+            throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
           }
-        );
+        } else {
+
+          this.logger.info(
+            "Adaptive investigation stopped before AI call",
+            {
+              step:
+                currentStep,
+
+              stopReason:
+                state.stopReason
+            }
+          );
 
 
-        throw new Error(
-          `Adaptive investigation stopped: ${state.stopReason}`
-        );
+          throw new Error(
+            `Adaptive investigation stopped: ${state.stopReason}`
+          );
+        }
       }
 
 
@@ -1350,12 +1006,6 @@ export class Agent {
         ...request,
 
         context,
-
-        project_memory:
-          this.getProjectMemoryPayload(),
-
-        conversation_history:
-          this.conversation.getRecent(MAX_CONVERSATION_HISTORY),
 
         step:
           currentStep
@@ -1410,8 +1060,13 @@ export class Agent {
       // ======================================================
 
       const rawResponse =
-        await this.backend.sendAIRequest(
-          request,
+        await this.backend.decideAgentTask(
+          request.request_id,
+          {
+            context: request.context,
+            tool_results: request.tool_results,
+            step: request.step
+          },
           accessToken,
           signal
         );
@@ -1675,6 +1330,9 @@ export class Agent {
           index,
           state,
           onEvent,
+          accessToken,
+          signal,
+          onLimitReached,
           initialRequest.agent?.profile || "agent"
         );
 
@@ -1703,6 +1361,17 @@ export class Agent {
           }
         );
 
+        request = {
+          ...request,
+          context: {
+            files: [],
+            indexSummary: context.indexSummary,
+            evidence: []
+          },
+          tool_results: toolResults,
+          step: currentStep
+        };
+
 
         continue;
       }
@@ -1715,6 +1384,8 @@ export class Agent {
       let addedChars = 0;
 
       let addedFiles = 0;
+
+      const deltaContextFiles: ContextFile[] = [];
 
 
       for (
@@ -1843,6 +1514,11 @@ export class Agent {
             content
           };
 
+          deltaContextFiles.push({
+            path: normalizedPath,
+            content
+          });
+
 
           const accepted =
             this.addEvidenceChars(
@@ -1887,6 +1563,11 @@ export class Agent {
           path:
             normalizedPath,
 
+          content
+        });
+
+        deltaContextFiles.push({
+          path: normalizedPath,
           content
         });
 
@@ -2009,7 +1690,11 @@ export class Agent {
 
         ...request,
 
-        context,
+        context: {
+          files: deltaContextFiles,
+          indexSummary: context.indexSummary,
+          evidence: []
+        },
 
         tool_results: toolResults,
 
@@ -2069,6 +1754,28 @@ export class Agent {
   // ==========================================================
   // ADD EVIDENCE CHARACTERS
   // ==========================================================
+
+  private mergeAdaptiveEvidence(
+    context: AIContext,
+    evidence: Array<{ path: string; content: string }>
+  ): AIContext {
+    const files = [...context.files];
+    const existing = new Set(files.map((file) => file.path));
+    for (const item of evidence) {
+      if (!item.path || existing.has(item.path)) {
+        continue;
+      }
+      files.push({
+        path: item.path,
+        content: item.content
+      });
+      existing.add(item.path);
+    }
+    return {
+      ...context,
+      files
+    };
+  }
 
   private addEvidenceChars(
     state:
@@ -2232,6 +1939,9 @@ export class Agent {
     index: any,
     state: InvestigationState,
     onEvent?: (event: AgentEvent) => void,
+    accessToken?: string,
+    signal?: AbortSignal,
+    onLimitReached?: AdaptiveLimitHandler,
     profile: string = "agent"
   ): Promise<{
     evidence: Array<{ path: string; content: string }>;
@@ -2247,10 +1957,44 @@ export class Agent {
     ]);
     const evidence: Array<{ path: string; content: string }> = [];
     const toolResults: AdaptiveToolResult[] = [];
+    let pendingLimitExtension: Promise<boolean> | undefined;
+
+    const reserveToolCall = async (): Promise<boolean> => {
+      if (state.incrementToolCalls()) {
+        return true;
+      }
+      if (state.stopReason !== "max_tool_calls" || !onLimitReached || !accessToken) {
+        return false;
+      }
+
+      pendingLimitExtension ??= (async () => {
+        const additional = await onLimitReached({
+          reason: "max_tool_calls",
+          currentLimit: state.maxToolCalls
+        });
+        if (!additional || additional <= 0) {
+          return false;
+        }
+        await this.backend.increaseAgentTaskBudget(
+          requestId,
+          { toolCalls: additional },
+          accessToken,
+          signal
+        );
+        return state.extendToolCalls(additional);
+      })().finally(() => {
+        pendingLimitExtension = undefined;
+      });
+
+      if (!await pendingLimitExtension) {
+        return false;
+      }
+      return state.incrementToolCalls();
+    };
 
     const executeOne = async (tool: AdaptiveToolRequest): Promise<void> => {
       const toolKey = this.createToolRequestKey(tool);
-      if (!state.recordAIRequest(toolKey) || !state.incrementToolCalls()) {
+      if (!state.recordAIRequest(toolKey) || !await reserveToolCall()) {
         throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
       }
       try {
@@ -2595,11 +2339,15 @@ export class Agent {
     flow("Agent.executeAdaptiveSearch", 1, "enter", { query });
 
     const searchResults =
-      await this.searchEngine.search(
-        query,
-        index,
-        ADAPTIVE_MAX_SEARCH_RESULTS
-      );
+      await this.readOnlyTools.execute(
+        "search",
+        {
+          query,
+          index
+        }
+      ) as Array<{
+        path: string;
+      }>;
 
 
     this.logger.info(
@@ -2723,78 +2471,32 @@ export class Agent {
       );
 
 
-    const files:
-      Array<{
-        path: string;
-        content: string;
-      }> = [];
-
-
-    for (
-      const uri of uris
-    ) {
-
-      const relative =
-        vscode.workspace.asRelativePath(
-          uri,
-          false
-        );
-
-
-      const normalizedPath =
+    const paths = uris
+      .map(uri =>
         this.normalizeRelativePath(
-          relative
-        );
-
-
-      if (!normalizedPath) {
-        continue;
-      }
-
-
-      if (
-        this.isSensitivePath(
-          normalizedPath
+          vscode.workspace.asRelativePath(uri, false)
         )
-      ) {
-        continue;
-      }
+      )
+      .filter(path =>
+        Boolean(path) && !this.isSensitivePath(path)
+      );
 
-
-      try {
-
-        const fileEvidence =
-          await this.executeAdaptiveReadFile(
-            normalizedPath,
-            workspaceUri
-          );
-
-
-        files.push(
-          ...fileEvidence
-        );
-
-
-      } catch (error) {
-
-        this.logger.info(
-          "Adaptive list_files could not read file",
-          {
-            path:
-              normalizedPath,
-
-            error
-          }
-        );
-      }
-    }
+    const files = paths.length === 0
+      ? []
+      : [{
+          path: "m3-tools/workspace-files.txt",
+          content: paths.join("\n")
+        }];
 
 
     this.logger.info(
       "Adaptive list_files completed",
       {
         files:
-          files.length
+          paths.length,
+
+        manifestChars:
+          files[0]?.content.length ?? 0
       }
     );
 
@@ -3106,6 +2808,14 @@ export class Agent {
     ].join(
       "-"
     );
+  }
+
+  private getConfiguredImplementationRoot(): string | undefined {
+    const configured = vscode.workspace
+      .getConfiguration("mm3")
+      .get<string>("implementationRoot", "");
+    const normalized = this.normalizeRelativePath(configured);
+    return normalized || undefined;
   }
 
 
