@@ -6,6 +6,7 @@ export const adaptiveLimits = {
   maxToolCalls: 5000,
   maxSearchResults: 100,
   maxListFiles: 500,
+  maxFingerprintItems: 12,
   maxFileChars: 5_000_000,
   continuationToolCalls: 5000,
   continuationAICalls: 1000,

@@ -47,6 +47,7 @@ import type {
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { adaptiveLimits } from "../config/adaptiveLimits";
+import { buildProjectFingerprint } from "../intelligence/projectFingerprint";
 
 
 import { flow } from "../utils/flowLog";
@@ -398,7 +399,8 @@ export class Agent {
           id: this.createProjectId(workspace.uri),
           name: workspace.name,
           indexVersion: index.version,
-          targetPath: this.getConfiguredImplementationRoot()
+          targetPath: this.getConfiguredImplementationRoot(),
+          fingerprint: buildProjectFingerprint(index)
         },
         context: initialContext,
         plan: []
@@ -727,6 +729,66 @@ export class Agent {
     });
   }
 
+  private compactInvestigationText(value: string, maxLength = 280): string {
+    const compact = value.replace(/\s+/g, " ").trim();
+    if (compact.length <= maxLength) {
+      return compact;
+    }
+    return compact.slice(0, maxLength - 3) + "...";
+  }
+
+  private emitInvestigationUpdate(
+    onEvent: ((event: AgentEvent) => void) | undefined,
+    profile: AgentProfile,
+    message: string
+  ): void {
+    const compact = this.compactInvestigationText(message);
+    if (!compact) {
+      return;
+    }
+    onEvent?.({
+      profile,
+      type: "progress",
+      message: compact,
+      timestamp: Date.now()
+    });
+  }
+
+  private buildInvestigationSummary(
+    entries: string[],
+    state: InvestigationState
+  ): string {
+    const uniqueEntries = [...new Set(entries.filter(Boolean))].slice(-12);
+    const lines = uniqueEntries.length > 0
+      ? uniqueEntries.map((entry) => `- ${entry}`)
+      : ["- Reviewed the available project context and completed the requested reasoning."];
+    lines.push(`- Investigation completed after ${state.steps} step(s), ${state.aiCalls} AI call(s), and ${state.toolCalls} tool call(s).`);
+    return [
+      "## Investigation Summary",
+      ...lines,
+      "",
+      "## Final Result"
+    ].join("\n");
+  }
+
+  private summarizeAdaptiveToolResult(result: AdaptiveToolResult): string {
+    const target = result.path ? ` (${result.path})` : "";
+    const detail = this.compactInvestigationText(result.error || result.output, 180);
+    return `${result.tool}${target}: ${result.success ? "completed" : "failed"}${detail ? ` - ${detail}` : ""}`;
+  }
+
+  private addInvestigationSummaryToAnswer(
+    answer: string,
+    entries: string[],
+    state: InvestigationState
+  ): string {
+    const normalizedAnswer = answer.trim();
+    if (/^(?:#{1,6}\s*)?investigation summary\b/i.test(normalizedAnswer)) {
+      return normalizedAnswer;
+    }
+    return `${this.buildInvestigationSummary(entries, state)}\n${normalizedAnswer}`;
+  }
+
   // ==========================================================
   // STAGE 4
   // ADAPTIVE INVESTIGATION LOOP
@@ -830,6 +892,8 @@ export class Agent {
     let context =
       initialContext;
 
+    const investigationSummary: string[] = [];
+
     if (existingTask && pendingDecision) {
       for (let step = 0; step < (existingTask.current_step ?? 0); step++) {
         if (!state.startStep()) {
@@ -864,6 +928,15 @@ export class Agent {
         tool_results: resumed.toolResults,
         step: existingTask.current_step
       };
+      for (const result of resumed.toolResults) {
+        const toolSummary = this.summarizeAdaptiveToolResult(result);
+        this.emitInvestigationUpdate(
+          onEvent,
+          initialRequest.agent?.profile || "agent",
+          `Evidence update: ${toolSummary}`
+        );
+        investigationSummary.push(toolSummary);
+      }
     }
 
     // --------------------------------------------------------
@@ -1081,6 +1154,17 @@ export class Agent {
         "AI response received. Evaluating the next step."
       );
 
+      const decisionReason = response.decision?.reason?.trim();
+      if (decisionReason) {
+        const reasonUpdate = `AI reasoning: ${this.compactInvestigationText(decisionReason)}`;
+        this.emitInvestigationUpdate(
+          onEvent,
+          initialRequest.agent?.profile || "agent",
+          reasonUpdate
+        );
+        investigationSummary.push(reasonUpdate);
+      }
+
       this.recordAdaptiveResponse(response);
 
 
@@ -1175,9 +1259,14 @@ export class Agent {
         );
 
 
+        const answer = this.addInvestigationSummaryToAnswer(
+          response.answer?.trim() || "",
+          investigationSummary,
+          state
+        );
         return {
           ...response,
-
+          answer,
           usage:
             totalUsage
         };
@@ -1232,6 +1321,13 @@ export class Agent {
           "completed"
         );
 
+        investigationSummary.push("Final answer prepared from the collected evidence.");
+        const summarizedAnswer = this.addInvestigationSummaryToAnswer(
+          answer,
+          investigationSummary,
+          state
+        );
+
 
         this.logger.info(
           "Adaptive reasoning finished",
@@ -1257,7 +1353,7 @@ export class Agent {
         return {
           ...response,
 
-          answer,
+          answer: summarizedAnswer,
 
           usage:
             totalUsage,
@@ -1310,6 +1406,15 @@ export class Agent {
         );
       }
 
+      const requestedTools = tools.map((tool) => tool.tool).join(", ");
+      const requestedToolsUpdate = `Requested tools: ${requestedTools}`;
+      this.emitInvestigationUpdate(
+        onEvent,
+        initialRequest.agent?.profile || "agent",
+        requestedToolsUpdate
+      );
+      investigationSummary.push(requestedToolsUpdate);
+
 
       this.taskState.setStatus(
         "investigating"
@@ -1335,6 +1440,24 @@ export class Agent {
           onLimitReached,
           initialRequest.agent?.profile || "agent"
         );
+
+      for (const result of toolResults) {
+        const toolSummary = this.summarizeAdaptiveToolResult(result);
+        this.emitInvestigationUpdate(
+          onEvent,
+          initialRequest.agent?.profile || "agent",
+          `Evidence update: ${toolSummary}`
+        );
+        investigationSummary.push(toolSummary);
+        if (!result.success && (result.tool === "run_command" || result.tool === "run_tests" || result.tool === "get_diagnostics")) {
+          this.emitInvestigationUpdate(
+            onEvent,
+            initialRequest.agent?.profile || "agent",
+            "Validation reported an error; sending the failure back for continued investigation."
+          );
+          investigationSummary.push("Validation reported an error; the failure was returned to the investigation loop.");
+        }
+      }
 
 
       // ======================================================

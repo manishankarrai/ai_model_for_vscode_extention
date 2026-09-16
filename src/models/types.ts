@@ -185,6 +185,20 @@ export interface ProjectContext {
   name: string;
   indexVersion: number;
   targetPath?: string;
+  fingerprint?: ProjectFingerprint;
+}
+
+export interface ProjectFingerprint {
+  file_count: number;
+  total_bytes: number;
+  symbol_count: number;
+  dependency_count: number;
+  test_file_count: number;
+  config_file_count: number;
+  languages: string[];
+  frameworks: string[];
+  top_level_directories: string[];
+  entry_points: string[];
 }
 
 export interface ConversationMessage {

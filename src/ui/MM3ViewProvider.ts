@@ -1090,6 +1090,22 @@ body {
   white-space: normal;
 }
 
+.final-answer {
+  border: 1px solid var(--vscode-textLink-foreground);
+  border-left: 4px solid var(--vscode-textLink-foreground);
+  background: var(--vscode-editor-background);
+  box-shadow: 0 4px 14px var(--vscode-widget-shadow, transparent);
+}
+
+.final-answer-label {
+  margin-bottom: 8px;
+  color: var(--vscode-textLink-foreground);
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .error {
   background:
     var(--vscode-inputValidation-errorBackground);
@@ -1234,6 +1250,18 @@ body {
   box-shadow: inset 0 1px 0 var(--vscode-widget-border, transparent);
 }
 
+.streaming-panel-complete {
+  min-height: 0;
+  max-height: 280px;
+  background: var(--vscode-textCodeBlock-background);
+  border-color: var(--vscode-textLink-foreground);
+  box-shadow: none;
+}
+
+.streaming-panel-complete .thinking-dots {
+  display: none;
+}
+
 .streaming-panel-header {
   display: flex;
   align-items: center;
@@ -1247,6 +1275,20 @@ body {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.streaming-panel-activity {
+  max-height: 150px;
+  overflow: auto;
+  margin-bottom: 10px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--vscode-panel-border);
+  line-height: 1.45;
+}
+
+.streaming-panel-activity-item {
+  margin: 2px 0;
+  color: var(--vscode-descriptionForeground);
 }
 
 .streaming-panel-content {
@@ -2642,8 +2684,15 @@ function addMessage(
   element.className =
     "message " + type;
 
+  if (type === "final-answer") {
+    const label = document.createElement("div");
+    label.className = "final-answer-label";
+    label.textContent = "Final result";
+    element.appendChild(label);
+  }
+
   if (
-    type === "assistant"
+    type === "assistant" || type === "final-answer"
   ) {
 
     const markdown =
@@ -2682,6 +2731,19 @@ function removeStreamingPanel() {
   const panel = document.getElementById("streaming-panel");
   if (panel) {
     panel.remove();
+  }
+}
+
+function completeStreamingPanel() {
+  const panel = document.getElementById("streaming-panel");
+  if (!panel) {
+    return;
+  }
+  panel.id = "streaming-panel-complete-" + Date.now();
+  panel.classList.add("streaming-panel-complete");
+  const status = panel.querySelector(".streaming-panel-status");
+  if (status) {
+    status.textContent = "INFO";
   }
 }
 
@@ -2820,6 +2882,25 @@ function updateStreamingPanel(statusText, delta) {
     const content = panel.querySelector(".streaming-panel-content");
     if (content) {
       content.remove();
+    }
+  }
+
+  if (!delta && statusText) {
+    let activity = panel.querySelector(".streaming-panel-activity");
+    if (!activity) {
+      activity = document.createElement("div");
+      activity.className = "streaming-panel-activity";
+      panel.insertBefore(activity, panel.querySelector(".streaming-panel-content"));
+    }
+    const last = activity.lastElementChild;
+    if (!last || last.textContent !== String(statusText)) {
+      const item = document.createElement("div");
+      item.className = "streaming-panel-activity-item";
+      item.textContent = String(statusText);
+      activity.appendChild(item);
+      while (activity.children.length > 24) {
+        activity.firstElementChild?.remove();
+      }
     }
   }
 
@@ -3510,7 +3591,7 @@ window.addEventListener(
       case "answer":
 
         hideThinking();
-        removeStreamingPanel();
+        completeStreamingPanel();
 
         setProcessing(
           false
@@ -3518,7 +3599,7 @@ window.addEventListener(
 
         addMessage(
           message.answer,
-          "assistant"
+          "final-answer"
         );
 
         addUsage(
