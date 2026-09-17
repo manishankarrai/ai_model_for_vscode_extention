@@ -10,11 +10,19 @@ import {
 } from "./toolPolicy.ts";
 
 describe("agent tool policy", () => {
-  it("exposes no tools in Ask mode", () => {
+  it("exposes read-only tools in Ask mode", () => {
     flow("toolPolicy.test.askMode", 1, "enter");
-    assert.deepEqual(availableTools("ask"), []);
-    assert.equal(isToolAllowed("ask", "read_file"), false);
-    assert.deepEqual(getToolPolicy("ask").allowed, []);
+    assert.deepEqual(availableTools("ask"), [
+      "read_file",
+      "search",
+      "list_files",
+      "get_diagnostics",
+      "git_diff",
+      "git_status"
+    ]);
+    assert.equal(isToolAllowed("ask", "read_file"), true);
+    assert.equal(isToolAllowed("ask", "edit_file"), false);
+    assert.deepEqual(getToolPolicy("ask").allowed, availableTools("ask"));
   });
 
   it("auto-applies file mutations and only asks approval for terminal tools", () => {

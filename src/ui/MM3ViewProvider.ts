@@ -870,30 +870,6 @@ export class MM3ViewProvider
     if (event.type === "failed") {
       return { ...event, message: this.sanitizeUserError(event.message) };
     }
-
-    const message = event.message.trim();
-    if (/^Backend AI response:/i.test(message)) {
-      const details = message.replace(/^Backend AI response:\s*/i, "");
-      const action = details.split(" - ")[0].trim();
-      return {
-        ...event,
-        message: action === "CONTINUE_INVESTIGATION"
-          ? "Reviewing the project context."
-          : "Preparing the response."
-      };
-    }
-    if (/^AI reasoning:/i.test(message)) {
-      return { ...event, message: "Reviewing the request and relevant files." };
-    }
-    if (/^Requested tools:/i.test(message)) {
-      return { ...event, message: "Checking the files needed for this request." };
-    }
-    if (/^Continuing local investigation\.?$/i.test(message)) {
-      return { ...event, message: "Checking the latest workspace state." };
-    }
-    if (/^Evidence update:/i.test(message)) {
-      return { ...event, message: message.replace(/^Evidence update:\s*/i, "Checked: ") };
-    }
     return event;
   }
 
@@ -3183,8 +3159,14 @@ function addUsage(
     "usage";
 
   element.textContent =
-    " • Tokens: " +
+    " • Input: " +
+    Number(usage.input_tokens ?? 0) +
+    " • Output: " +
+    Number(usage.output_tokens ?? 0) +
+    " • Total: " +
     totalTokens +
+    " • AI calls: " +
+    aiApiCalls +
     " • Credits: " +
     charged.toFixed(4) +
     " • Wallet: " +

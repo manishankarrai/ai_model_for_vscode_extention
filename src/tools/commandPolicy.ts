@@ -1,4 +1,5 @@
 import { flow } from "../utils/flowLog.ts";
+import { adaptiveLimits } from "../config/adaptiveLimits.ts";
 
 export interface ParsedCommand {
   binary: string;
@@ -71,6 +72,10 @@ export function parseSafeCommand(command: string): ParsedCommand {
     throw new Error("run_command requires a command.");
   }
 
+  if (trimmed.length > adaptiveLimits.maxCommandChars) {
+    throw new Error(`MM3 rejected a command longer than ${adaptiveLimits.maxCommandChars} characters.`);
+  }
+
   if (trimmed.includes("\0")) {
     throw new Error("MM3 rejected a command containing a null byte.");
   }
@@ -80,6 +85,10 @@ export function parseSafeCommand(command: string): ParsedCommand {
   const binaryName = binary.replace(/\\/g, "/").split("/").pop() ?? binary;
   if (!/^[a-zA-Z0-9._+:-]+(?:\.exe|\.cmd|\.bat)?$/i.test(binaryName)) {
     throw new Error("MM3 rejected an invalid command executable.");
+  }
+
+  if (parts.length - 1 > adaptiveLimits.maxCommandArgs) {
+    throw new Error(`MM3 rejected a command with more than ${adaptiveLimits.maxCommandArgs} arguments.`);
   }
 
   return {

@@ -177,7 +177,7 @@ export class BackendClient {
         .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
-          "https://api.mm3ai.com"
+          "http://localhost:8080"
         )
         .replace(/\/$/, "");
   }
@@ -209,21 +209,6 @@ export class BackendClient {
         email,
         password
       }
-    );
-  }
-
-  async sendAIRequest(
-    request: AIRequest,
-    accessToken: string,
-    signal?: AbortSignal
-  ): Promise<AIResponse> {
-    flow("BackendClient.sendAIRequest", 1, "enter", { requestId: request.request_id, action: request.action });
-
-    return this.post<AIResponse>(
-      "/api/v1/ai",
-      request,
-      accessToken,
-      signal
     );
   }
 
@@ -348,14 +333,6 @@ export class BackendClient {
       "/api/v1/orders",
       { plan_id: planId },
       accessToken
-    );
-  }
-
-  async health(): Promise<unknown> {
-    flow("BackendClient.health", 1, "enter");
-
-    return this.get<unknown>(
-      "/api/v1/health"
     );
   }
 

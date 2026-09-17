@@ -38,4 +38,9 @@ describe("command policy", () => {
     assert.throws(() => parseSafeCommand('python -c "unfinished'), /unfinished quote/);
     assert.throws(() => parseSafeCommand("bad?command arg"), /invalid command executable/);
   });
+
+  it("rejects oversized command payloads", () => {
+    assert.throws(() => parseSafeCommand("node " + "x".repeat(4_001)), /longer than/);
+    assert.throws(() => parseSafeCommand("node " + Array(65).fill("arg").join(" ")), /more than/);
+  });
 });

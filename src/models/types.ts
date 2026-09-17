@@ -76,49 +76,6 @@ export interface ToolPolicy {
   approval_required: AgentToolName[];
 }
 
-export interface ProjectFile {
-  path: string;
-  absolutePath: string;
-  size: number;
-  language: string;
-  hash: string;
-  modifiedAt: number;
-}
-
-export interface SymbolInfo {
-  name: string;
-  kind: string;
-  filePath: string;
-  line: number;
-  character: number;
-}
-
-export interface DependencyInfo {
-  source: string;
-  target: string;
-  type: "import" | "require" | "package" | "reference";
-}
-
-export interface IndexedFile {
-  file: ProjectFile;
-  symbols: SymbolInfo[];
-  dependencies: DependencyInfo[];
-}
-
-export interface ProjectIndex {
-  rootPath: string;
-  version: number;
-
-  files: Map<string, IndexedFile>;
-
-  symbols: SymbolInfo[];
-
-  dependencies: DependencyInfo[];
-
-  createdAt: number;
-  updatedAt: number;
-}
-
 export interface SearchResult {
 
   path: string;
@@ -185,20 +142,6 @@ export interface ProjectContext {
   name: string;
   indexVersion: number;
   targetPath?: string;
-  fingerprint?: ProjectFingerprint;
-}
-
-export interface ProjectFingerprint {
-  file_count: number;
-  total_bytes: number;
-  symbol_count: number;
-  dependency_count: number;
-  test_file_count: number;
-  config_file_count: number;
-  languages: string[];
-  frameworks: string[];
-  top_level_directories: string[];
-  entry_points: string[];
 }
 
 export interface ConversationMessage {
@@ -209,20 +152,6 @@ export interface ConversationMessage {
 
 export const MAX_CONVERSATION_HISTORY = 30;
 
-export interface ProjectMemoryPayload {
-  rootPath: string;
-  projectSummary: string;
-  languages: string[];
-  frameworks: string[];
-  files: string[];
-  findings: string[];
-  dependencies: string[];
-  conventions: string[];
-  architectureNotes: string[];
-  decisions: string[];
-  updatedAt: number;
-  conversationHistory: ConversationMessage[];
-}
 
 export interface InvestigationPlan {
   steps: string[];
@@ -409,8 +338,6 @@ export interface AIRequest {
   context: AIContext;
 
   memory?: string;
-
-  project_memory?: ProjectMemoryPayload;
 
   conversation_history?: ConversationMessage[];
 

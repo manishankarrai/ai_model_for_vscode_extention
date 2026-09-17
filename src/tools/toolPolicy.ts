@@ -32,7 +32,7 @@ const TERMINAL_APPROVAL_TOOLS: AgentToolName[] = [
 export function availableTools(mode: InteractionMode): AgentToolName[] {
   flow("availableTools", 1, "enter");
   if (mode === "ask") {
-    return [];
+    return [...READ_TOOLS];
   }
 
   return [...READ_TOOLS, ...FILE_MUTATION_TOOLS, ...TERMINAL_APPROVAL_TOOLS];
@@ -42,7 +42,7 @@ export function getToolPolicy(mode: InteractionMode): ToolPolicy {
   flow("getToolPolicy", 1, "enter");
   if (mode === "ask") {
     return {
-      allowed: [],
+      allowed: [...READ_TOOLS],
       approval_required: []
     };
   }

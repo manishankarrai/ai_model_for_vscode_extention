@@ -21,6 +21,7 @@ import {
 } from "../safety/changeValidation";
 import { availableTools, isToolAllowed, isReadOnlyTool } from "./toolPolicy";
 import { parseSafeCommand } from "./commandPolicy";
+import { adaptiveLimits } from "../config/adaptiveLimits";
 
 import { flow } from "../utils/flowLog";
 
@@ -62,12 +63,12 @@ export class WorkspaceToolRegistry {
     mode: InteractionMode
   ): Promise<ToolResult> {
     flow("WorkspaceToolRegistry.execute", 1, "enter", { tool: request.tool });
-    if (mode !== "agent") {
-      throw new Error("Ask mode does not permit tool execution.");
-    }
-
     if (!isToolAllowed(mode, request.tool)) {
       throw new Error(`Tool '${request.tool}' is not available.`);
+    }
+
+    if (mode === "ask" && !isReadOnlyTool(request.tool)) {
+      throw new Error(`Ask mode only permits read-only tools: '${request.tool}'.`);
     }
 
     switch (request.tool) {
@@ -306,7 +307,7 @@ export class WorkspaceToolRegistry {
       const result = await execFileAsync(shell, shellArgs, {
         cwd: workspace.uri.fsPath,
         timeout: tool === "run_tests" ? 180_000 : 60_000,
-        maxBuffer: 2_000_000,
+        maxBuffer: adaptiveLimits.maxToolOutputChars * 4,
         env: process.env
       });
       const output = [
@@ -348,7 +349,7 @@ export class WorkspaceToolRegistry {
       const result = await execFileAsync("git", args, {
         cwd: workspace.uri.fsPath,
         timeout: 10_000,
-        maxBuffer: 1_000_000
+        maxBuffer: adaptiveLimits.maxToolOutputChars * 4
       });
       return this.result(tool, true, result.stdout || "No changes.");
     } catch (error) {
@@ -438,6 +439,10 @@ export class WorkspaceToolRegistry {
     output: string,
     approval?: ToolApprovalStatus
   ): ToolResult {
-    return { tool, success, output, approval };
+    const marker = "\n...[tool output truncated]...\n";
+    const boundedOutput = output.length <= adaptiveLimits.maxToolOutputChars
+      ? output
+      : output.slice(0, adaptiveLimits.maxToolOutputChars - marker.length) + marker;
+    return { tool, success, output: boundedOutput, approval };
   }
 }

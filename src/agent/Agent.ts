@@ -162,6 +162,7 @@ const ADAPTIVE_MAX_SEARCH_RESULTS = adaptiveLimits.maxSearchResults;
 const ADAPTIVE_MAX_LIST_FILES = adaptiveLimits.maxListFiles;
 
 const ADAPTIVE_MAX_FILE_CHARS = adaptiveLimits.maxFileChars;
+const ADAPTIVE_MAX_TOOL_OUTPUT_CHARS = adaptiveLimits.maxToolOutputChars;
 const ACTIVE_TASK_STORAGE_KEY = "mm3.activeAgentTask";
 
 
@@ -772,6 +773,9 @@ export class Agent {
     let context =
       initialContext;
 
+    let reasoningContext =
+      initialContext;
+
     const investigationSummary: string[] = [];
 
     if (existingTask && pendingDecision) {
@@ -798,12 +802,20 @@ export class Agent {
         accessToken,
         signal,
         onLimitReached,
-        initialRequest.agent?.profile || "agent"
+        initialRequest.agent?.profile || "agent",
+        initialRequest.mode
       );
       context = this.mergeAdaptiveEvidence(context, resumed.evidence);
+      reasoningContext = {
+        ...context,
+        files: resumed.evidence.map(item => ({
+          path: item.path,
+          content: item.content
+        }))
+      };
       request = {
         ...request,
-        context,
+        context: reasoningContext,
         tool_results: resumed.toolResults,
         step: existingTask.current_step
       };
@@ -957,7 +969,7 @@ export class Agent {
 
         ...request,
 
-        context,
+        context: reasoningContext,
 
         step:
           currentStep
@@ -1316,7 +1328,8 @@ export class Agent {
           accessToken,
           signal,
           onLimitReached,
-          initialRequest.agent?.profile || "agent"
+          initialRequest.agent?.profile || "agent",
+          initialRequest.mode
         );
 
       for (const result of toolResults) {
@@ -1371,6 +1384,11 @@ export class Agent {
           },
           tool_results: toolResults,
           step: currentStep
+        };
+
+        reasoningContext = {
+          ...context,
+          files: []
         };
 
 
@@ -1603,6 +1621,11 @@ export class Agent {
             file.path
         )
       );
+
+      reasoningContext = {
+        ...context,
+        files: deltaContextFiles
+      };
 
 
       // ======================================================
@@ -1934,7 +1957,8 @@ export class Agent {
     accessToken?: string,
     signal?: AbortSignal,
     onLimitReached?: AdaptiveLimitHandler,
-    profile: string = "agent"
+    profile: string = "agent",
+    mode: InteractionMode = "agent"
   ): Promise<{
     evidence: Array<{ path: string; content: string }>;
     toolResults: AdaptiveToolResult[];
@@ -1995,7 +2019,7 @@ export class Agent {
           profile as AgentProfile,
           this.describeToolAction(tool)
         );
-        const result = await this.executeAdaptiveTool(tool, workspaceUri);
+        const result = await this.executeAdaptiveTool(tool, workspaceUri, mode);
         evidence.push(...result.evidence);
         toolResults.push({
           tool: tool.tool,
@@ -2102,7 +2126,10 @@ export class Agent {
       AdaptiveToolRequest,
 
     workspaceUri:
-      vscode.Uri
+      vscode.Uri,
+
+    mode:
+      InteractionMode
   ): Promise<AdaptiveToolExecution> {
     flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
@@ -2118,7 +2145,7 @@ export class Agent {
       return {
         evidence,
         success: true,
-        output: evidence.map(item => item.content).filter(Boolean).join("\n\n")
+        output: this.capAdaptiveOutput(evidence.map(item => item.content).filter(Boolean).join("\n\n"))
       };
     }
 
@@ -2134,7 +2161,7 @@ export class Agent {
       return {
         evidence,
         success: true,
-        output: evidence.map(item => item.content).filter(Boolean).join("\n\n")
+        output: this.capAdaptiveOutput(evidence.map(item => item.content).filter(Boolean).join("\n\n"))
       };
     }
 
@@ -2149,7 +2176,7 @@ export class Agent {
       return {
         evidence,
         success: true,
-        output: evidence.map(item => item.content).filter(Boolean).join("\n\n")
+        output: this.capAdaptiveOutput(evidence.map(item => item.content).filter(Boolean).join("\n\n"))
       };
     }
 
@@ -2167,9 +2194,10 @@ export class Agent {
         reason: tool.reason,
         changes: tool.changes
       },
-      "agent"
+      mode
     );
 
+    const output = this.capAdaptiveOutput(result.output);
     return {
       evidence: [{
         path: `m3-tools/${tool.tool}.txt`,
@@ -2177,14 +2205,22 @@ export class Agent {
           `tool=${result.tool}`,
           `success=${result.success}`,
           result.approval ? `approval=${result.approval}` : "",
-          result.output
+          output
         ].filter(Boolean).join("\n")
       }],
       success: result.success,
-      output: result.output,
+      output,
       approval: result.approval,
-      error: result.success ? undefined : result.output
+      error: result.success ? undefined : output
     };
+  }
+
+  private capAdaptiveOutput(output: string): string {
+    if (output.length <= ADAPTIVE_MAX_TOOL_OUTPUT_CHARS) {
+      return output;
+    }
+    const marker = "\n...[tool output truncated]...\n";
+    return output.slice(0, ADAPTIVE_MAX_TOOL_OUTPUT_CHARS - marker.length) + marker;
   }
 
 
@@ -2424,16 +2460,18 @@ export class Agent {
 
       try {
 
-        const fileEvidence =
-          await this.executeAdaptiveReadFile(
-            normalizedPath,
-            workspaceUri
-          );
-
-
-        evidence.push(
-          ...fileEvidence
-        );
+        const content = Buffer.from(
+          await vscode.workspace.fs.readFile(
+            vscode.Uri.joinPath(workspaceUri, ...normalizedPath.split("/"))
+          )
+        ).toString("utf8");
+        const matchIndex = content.toLowerCase().indexOf(needle);
+        if (matchIndex >= 0) {
+          evidence.push({
+            path: normalizedPath,
+            content: this.createSearchSnippet(content, matchIndex)
+          });
+        }
 
 
       } catch (error) {
@@ -2452,6 +2490,16 @@ export class Agent {
 
 
     return evidence;
+  }
+
+  private createSearchSnippet(content: string, matchIndex: number): string {
+    const snippetLimit = Math.min(8_000, ADAPTIVE_MAX_TOOL_OUTPUT_CHARS);
+    const contextChars = Math.floor((snippetLimit - 80) / 2);
+    const start = Math.max(0, matchIndex - contextChars);
+    const end = Math.min(content.length, matchIndex + contextChars);
+    const prefix = start > 0 ? "...[context before match omitted]...\n" : "";
+    const suffix = end < content.length ? "\n...[context after match omitted]..." : "";
+    return prefix + content.slice(start, end) + suffix;
   }
 
 
