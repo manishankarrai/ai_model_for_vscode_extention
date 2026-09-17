@@ -2,22 +2,14 @@ import * as vscode from "vscode";
 
 import { Logger } from "./utils/Logger";
 
-import { ProjectIndexer } from "./intelligence/ProjectIndexer";
-
-import { ChangeDetector } from "./intelligence/ChangeDetector";
-
 import { ConversationState } from "./state/ConversationState";
 
-import { IndexState } from "./state/IndexState";
-
 import { TaskState } from "./state/TaskState";
-import { ProjectMemory } from "./state/ProjectMemory";
 
 import { Agent } from "./agent/Agent";
 
 import { MM3ViewProvider } from "./ui/MM3ViewProvider";
 import { CodeChangeApplier } from "./safety/CodeChangeApplier";
-import { ProjectUnderstanding } from "./project/project-understanding";
 
 import { flow } from "./utils/flowLog";
 
@@ -47,35 +39,6 @@ export function activate(
   const taskState =
     new TaskState();
 
-  const projectMemory =
-    new ProjectMemory(
-      context.workspaceState
-    );
-
-  const indexer =
-    new ProjectIndexer();
-
-  const indexState =
-    new IndexState(
-      context.workspaceState
-    );
-
-  const projectUnderstanding =
-    new ProjectUnderstanding();
-  // ----------------------------------------------------------
-  // Change detection
-  // ----------------------------------------------------------
-
-  const changeDetector =
-    new ChangeDetector(
-      indexer,
-      logger
-    );
-
-  context.subscriptions.push(
-    changeDetector
-  );
-
   // ----------------------------------------------------------
   // Agent
   // ----------------------------------------------------------
@@ -85,7 +48,6 @@ export function activate(
 
   const agent =
     new Agent(
-      indexer,
       conversation,
       taskState,
       logger,
@@ -165,49 +127,6 @@ export function activate(
   );
 
   // ----------------------------------------------------------
-  // Scan project
-  // ----------------------------------------------------------
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "mm3.scanProject",
-      async () => {
-        flow("command.scanProject", 1, "enter");
-
-        await scanProject(
-          indexer,
-          indexState,
-          projectUnderstanding,
-          projectMemory,
-          logger
-        );
-      }
-    )
-  );
-
-  // ----------------------------------------------------------
-  // Rebuild index
-  // ----------------------------------------------------------
-
-  context.subscriptions.push(
-    vscode.commands.registerCommand(
-      "mm3.rebuildIndex",
-      async () => {
-        flow("command.rebuildIndex", 1, "enter");
-
-        await scanProject(
-          indexer,
-          indexState,
-          projectUnderstanding,
-          projectMemory,
-          logger,
-          true
-        );
-      }
-    )
-  );
-
-  // ----------------------------------------------------------
   // Clear conversation
   // ----------------------------------------------------------
 
@@ -235,257 +154,9 @@ export function activate(
       }
     )
   );
-     // ----------------------------------------------------------
-// Inspect project understanding
-// ----------------------------------------------------------
-
-context.subscriptions.push(
-  vscode.commands.registerCommand(
-    "mm3.inspectProject",
-    () => {
-      flow("command.inspectProject", 1, "enter");
-
-      const model =
-        projectUnderstanding.getModel();
-
-      if (!model) {
-
-        vscode.window.showWarningMessage(
-          "MM3: Project understanding is not initialized."
-        );
-
-        return;
-      }
-
-      logger.info(
-        "Project Model",
-        {
-          rootPath:
-            model.rootPath,
-
-          languages:
-            model.languages,
-
-          frameworks:
-            model.frameworks,
-
-          files:
-            model.files.length,
-
-          symbols:
-            model.symbols.length,
-
-          imports:
-            model.imports.length,
-
-          dependencies:
-            model.dependencies.length,
-
-          entryPoints:
-            model.entryPoints.length,
-
-          modules:
-            model.modules.length,
-
-          configFiles:
-            model.configFiles.length,
-
-          testFiles:
-            model.testFiles.length
-        }
-      );
-
-      vscode.window.showInformationMessage(
-        [
-          `Languages: ${model.languages.join(", ") || "None"}`,
-          `Frameworks: ${model.frameworks.join(", ") || "None"}`,
-          `Files: ${model.files.length}`,
-          `Entry points: ${model.entryPoints.length}`,
-          `Modules: ${model.modules.length}`,
-          `Tests: ${model.testFiles.length}`,
-          `Config files: ${model.configFiles.length}`
-        ].join(" | ")
-      );
-    }
-  )
-);
-  // ----------------------------------------------------------
-  // Auto index
-  // ----------------------------------------------------------
-
-  const autoIndex =
-    vscode.workspace
-      .getConfiguration("mm3")
-      .get<boolean>(
-        "enableAutoIndex",
-        true
-      );
-
-  if (autoIndex) {
-
-    void scanProject(
-      indexer,
-      indexState,
-      projectUnderstanding,
-      projectMemory,
-      logger
-    );
-  }
-
   logger.info(
     "MM3 AI Agent activated."
   );
-}
-
-async function scanProject(
-  indexer: ProjectIndexer,
-  indexState: IndexState,
-  projectUnderstanding: ProjectUnderstanding,
-  projectMemory: ProjectMemory,
-  logger: Logger,
-  force = false
-): Promise<void> {
-  flow("scanProject", 1, "enter", { force });
-
-  const workspace =
-    vscode.workspace.workspaceFolders?.[0];
-
-  if (!workspace) {
-
-    vscode.window.showWarningMessage(
-      "MM3: Please open a workspace first."
-    );
-
-    return;
-  }
-
-  try {
-
-    await vscode.window.withProgress(
-      {
-        location:
-          vscode.ProgressLocation.Notification,
-
-        title:
-          force
-            ? "MM3: Rebuilding project index..."
-            : "MM3: Indexing project..."
-      },
-
-      async progress => {
-
-        // ----------------------------------------------------
-        // Stage 1 - Project Index
-        // ----------------------------------------------------
-
-        progress.report({
-          message:
-            "Scanning files..."
-        });
-
-        const index =
-          await indexer.build(
-            workspace.uri
-          );
-
-        await indexState.save(
-          index
-        );
-
-        logger.info(
-          "Project indexed",
-          {
-            files:
-              index.files.size,
-
-            symbols:
-              index.symbols.length,
-
-            dependencies:
-              index.dependencies.length,
-
-            version:
-              index.version
-          }
-        );
-
-        progress.report({
-          message:
-            `${index.files.size} files indexed`
-        });
-
-        // ----------------------------------------------------
-        // Stage 2 - Project Understanding
-        // ----------------------------------------------------
-
-        progress.report({
-          message:
-            "Building project understanding..."
-        });
-
-        const projectModel =
-          projectUnderstanding.initialize(
-            index
-          );
-
-        projectMemory.initializeFromProjectModel(
-          projectModel
-        );
-
-        await projectMemory.save();
-
-        logger.info(
-          "Project understanding ready",
-          {
-            languages:
-              projectModel.languages,
-
-            frameworks:
-              projectModel.frameworks,
-
-            files:
-              projectModel.files.length,
-
-            entryPoints:
-              projectModel.entryPoints.length,
-
-            modules:
-              projectModel.modules.length,
-
-            configFiles:
-              projectModel.configFiles.length,
-
-            testFiles:
-              projectModel.testFiles.length
-          }
-        );
-
-        progress.report({
-          message:
-            "Project understanding ready"
-        });
-      }
-    );
-
-    vscode.window.showInformationMessage(
-      "MM3 project index and project understanding are ready."
-    );
-
-  } catch (error) {
-
-    logger.error(
-      "Project indexing failed",
-      error
-    );
-
-    vscode.window.showErrorMessage(
-      `MM3 indexing failed: ${
-        error instanceof Error
-          ? error.message
-          : String(error)
-      }`
-    );
-  }
 }
 
 async function getAccessToken(

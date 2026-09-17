@@ -51,24 +51,12 @@
         "title": "MM3: Open Chat"
       },
       {
-        "command": "mm3.scanProject",
-        "title": "MM3: Scan Project"
-      },
-      {
-        "command": "mm3.rebuildIndex",
-        "title": "MM3: Rebuild Index"
-      },
-      {
         "command": "mm3.clearConversation",
         "title": "MM3: Clear Conversation"
       },
       {
         "command": "mm3.rollbackLastChanges",
         "title": "MM3: Roll Back Last Approved Changes"
-      },
-      {
-        "command": "mm3.inspectProject",
-        "title": "MM3: Inspect Project"
       },
       {
         "command": "mm3.addSelectionToChat",
@@ -85,7 +73,7 @@
       "properties": {
         "mm3.backendUrl": {
           "type": "string",
-          "default": "https://api.mm3ai.com",
+          "default": "http://localhost:8080",
           "description": "MM3 backend URL"
         },
         "mm3.maxContextChars": {
@@ -102,11 +90,6 @@
           "type": "string",
           "default": "",
           "description": "Optional workspace-relative directory to search and edit for implementation tasks"
-        },
-        "mm3.enableAutoIndex": {
-          "type": "boolean",
-          "default": true,
-          "description": "Automatically index the workspace"
         }
       }
     },

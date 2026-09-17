@@ -203,14 +203,14 @@ export class MM3ViewProvider
         break;
 
       case "retry_last":
-        if (await this.resumeLastTask()) {
+        if (await this.resumeLastTask(undefined, message.agentProfile)) {
           break;
         }
         if (this.lastQuestion) {
           await this.handleQuestion(
             this.lastQuestion.question,
             this.lastQuestion.mode,
-            this.lastQuestion.agentProfile,
+            message.agentProfile || this.lastQuestion.agentProfile,
             1
           );
         }
@@ -433,7 +433,10 @@ export class MM3ViewProvider
     }
   }
 
-  private async resumeLastTask(requestID?: string): Promise<boolean> {
+  private async resumeLastTask(
+    requestID?: string,
+    preferredProfile?: AgentProfile
+  ): Promise<boolean> {
     flow("MM3ViewProvider.resumeLastTask", 1, "enter");
     if (this.isProcessing) {
       return true;
@@ -466,7 +469,8 @@ export class MM3ViewProvider
             accessToken,
             undefined,
             onEvent,
-            async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
+            async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit),
+            preferredProfile
           );
       if (!response) {
         return false;
@@ -3559,7 +3563,10 @@ action.addEventListener("click", () => {
       sendMessage();
       return;
     }
-    vscode.postMessage({ type: "retry_last" });
+    vscode.postMessage({
+      type: "retry_last",
+      agentProfile: agentProfile.value
+    });
     clearFileReviews();
     return;
   }
@@ -3858,6 +3865,7 @@ type WebviewMessage =
     }
   | {
       type: "retry_last";
+      agentProfile?: AgentProfile;
     }
   | {
       type: "load_task_history";

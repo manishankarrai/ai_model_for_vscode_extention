@@ -13,13 +13,9 @@ import {
   ContextFile,
   InteractionMode,
   ImplementationPlan,
-  MAX_CONVERSATION_HISTORY,
 } from "../models/types";
 
-import { IntentDetector } from "./IntentDetector";
 import { InvestigationState } from "../intelligence/InvestigationState";
-
-import { ProjectIndexer } from "../intelligence/ProjectIndexer";
 
 import {
   AgentTaskRecord,
@@ -30,16 +26,13 @@ import {
 import { ConversationState } from "../state/ConversationState";
 import { TaskState } from "../state/TaskState";
 
-import { TokenEstimator } from "../utils/TokenEstimator";
 import { Logger } from "../utils/Logger";
 
-import { resolveRequestContext } from "../intelligence/contextSelection";
 import { getToolPolicy, isToolAllowed } from "../tools/toolPolicy";
 import {
   ToolApprovalHandler,
   WorkspaceToolRegistry
 } from "../tools/WorkspaceToolRegistry";
-import { ReadOnlyToolRegistry } from "../tools/ReadOnlyToolRegistry";
 import type {
   AgentToolName,
   CodeChange,
@@ -47,7 +40,6 @@ import type {
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { adaptiveLimits } from "../config/adaptiveLimits";
-import { buildProjectFingerprint } from "../intelligence/projectFingerprint";
 
 
 import { flow } from "../utils/flowLog";
@@ -178,31 +170,16 @@ const ACTIVE_TASK_STORAGE_KEY = "mm3.activeAgentTask";
 // ============================================================
 
 export class Agent {
-
-  private readonly intentDetector =
-    new IntentDetector();
-
-
   private readonly backend =
     new BackendClient();
 
   private lastRequest?: AdaptiveAIRequest;
 
 
-  private readonly tokenEstimator =
-    new TokenEstimator();
-
-
   private readonly workspaceTools: WorkspaceToolRegistry;
-
-  private readonly readOnlyTools =
-    new ReadOnlyToolRegistry();
 
 
   constructor(
-    private readonly indexer:
-      ProjectIndexer,
-
     private readonly conversation:
       ConversationState,
 
@@ -267,31 +244,13 @@ export class Agent {
     }
 
 
-    // --------------------------------------------------------
-    // Intent
-    // --------------------------------------------------------
-
-    const intentResolution =
-      this.intentDetector.resolve(
-        question
-      );
-
-    const localIntent = mode === "agent" && intentResolution.kind === "task"
-      ? "implementation"
-      : intentResolution.intent;
+    // The action is a protocol mode for the backend, not a local intent decision.
+    const requestAction: Intent = mode === "agent" ? "implementation" : "chat";
 
 
     const requestId =
       this.createRequestId();
-    flow("Agent.process", 2, "local fast-path classification", { requestId, localIntent });
-
-    if (intentResolution.kind !== "task") {
-      const answer = intentResolution.kind === "greeting"
-        ? "Hello. Tell me what you want to inspect, change, or understand."
-        : "What would you like me to do? Include the relevant file, behavior, or expected result.";
-      this.conversation.addAssistantMessage(answer);
-      return this.createLocalResponse(requestId, localIntent, answer, intentResolution.reason);
-    }
+    flow("Agent.process", 2, "backend investigation requested", { requestId, requestAction });
 
     if (onEvent && mode === "agent") {
       void this.backend.streamAgentEvents(
@@ -323,7 +282,7 @@ export class Agent {
     this.taskState.start(
       requestId,
       question,
-      localIntent
+      requestAction
     );
 
 
@@ -331,7 +290,7 @@ export class Agent {
       "MM3 task started",
       {
         requestId,
-        localIntent
+        requestAction
       }
     );
 
@@ -342,44 +301,14 @@ export class Agent {
 
     await this.clearPersistedTask();
 
-    this.emitProgress(onEvent, agentProfile, "Starting local investigation.");
+    this.emitProgress(onEvent, agentProfile, "Starting backend investigation.");
 
 
     try {
 
       // ======================================================
-      // Ensure project index
+      // Start with explicit user context; the backend requests any further tools.
       // ======================================================
-
-      let index =
-        this.indexer.getIndex();
-
-
-      if (!index) {
-
-        this.taskState.setStatus(
-          "investigating"
-        );
-
-
-        this.logger.info(
-          "No project index found. Building index."
-        );
-
-        this.emitProgress(onEvent, agentProfile, "Building the project index.");
-
-
-        index =
-          await this.indexer.build(
-            workspace.uri
-          );
-      }
-      flow("Agent.process", 3, "index ready", { files: index.files.size });
-      this.emitProgress(onEvent, agentProfile, "Project index ready.");
-
-      if (!workspace || !index) {
-        throw new Error("Workspace index is unavailable.");
-      }
 
       const initialContext: AIContext = {
         files: [],
@@ -388,7 +317,7 @@ export class Agent {
         parts: selectedContext
       };
       const backendRequest: AdaptiveAIRequest = {
-        action: localIntent,
+        action: requestAction,
         request_id: requestId,
         question,
         mode,
@@ -400,9 +329,8 @@ export class Agent {
         project: {
           id: this.createProjectId(workspace.uri),
           name: workspace.name,
-          indexVersion: index.version,
-          targetPath: this.getConfiguredImplementationRoot(),
-          fingerprint: buildProjectFingerprint(index)
+          indexVersion: 0,
+          targetPath: this.getConfiguredImplementationRoot()
         },
         context: initialContext,
         plan: []
@@ -417,7 +345,6 @@ export class Agent {
         backendRequest,
         accessToken,
         workspace.uri,
-        index,
         initialContext,
         signal,
         onEvent,
@@ -476,7 +403,8 @@ export class Agent {
     accessToken: string,
     signal?: AbortSignal,
     onEvent?: (event: AgentEvent) => void,
-    onLimitReached?: AdaptiveLimitHandler
+    onLimitReached?: AdaptiveLimitHandler,
+    preferredProfile?: AgentProfile
   ): Promise<AIResponse | undefined> {
     const persistedRequestID =
       this.taskStorage?.get<string>(ACTIVE_TASK_STORAGE_KEY);
@@ -485,7 +413,7 @@ export class Agent {
       return undefined;
     }
 
-    return this.resumeTask(requestID, accessToken, signal, onEvent, onLimitReached);
+    return this.resumeTask(requestID, accessToken, signal, onEvent, onLimitReached, preferredProfile);
   }
 
   async resumeTask(
@@ -493,7 +421,8 @@ export class Agent {
     accessToken: string,
     signal?: AbortSignal,
     onEvent?: (event: AgentEvent) => void,
-    onLimitReached?: AdaptiveLimitHandler
+    onLimitReached?: AdaptiveLimitHandler,
+    expectedProfile?: AgentProfile
   ): Promise<AIResponse | undefined> {
     const reusableRequest =
       this.lastRequest?.request_id === requestID
@@ -513,15 +442,19 @@ export class Agent {
       await this.clearPersistedTask(requestID);
       return undefined;
     }
+    if (expectedProfile && taskState.task.agent?.profile !== expectedProfile) {
+      this.logger.info("Skipping stale agent task after profile change", {
+        requestId: requestID,
+        previousProfile: taskState.task.agent?.profile,
+        selectedProfile: expectedProfile
+      });
+      await this.clearPersistedTask(requestID);
+      return undefined;
+    }
     const pendingDecision = taskState.task.pending_decision;
     if (taskState.task.status !== "waiting_for_tool" || !pendingDecision) {
       await this.clearPersistedTask(requestID);
       return undefined;
-    }
-
-    let index = this.indexer.getIndex();
-    if (!index) {
-      index = await this.indexer.build(workspace.uri);
     }
 
     const context = await this.loadTaskContext(taskState, accessToken);
@@ -536,10 +469,7 @@ export class Agent {
         tool_policy: taskState.task.tool_policy,
         plan: taskState.task.plan ?? [],
       }),
-      project: {
-        ...taskState.task.project,
-        indexVersion: index.version
-      },
+      project: taskState.task.project,
       context,
       tool_results: undefined
     };
@@ -554,7 +484,6 @@ export class Agent {
       initialRequest,
       accessToken,
       workspace.uri,
-      index,
       context,
       signal,
       onEvent,
@@ -640,54 +569,6 @@ export class Agent {
       parts
     };
   }
-
-  private async readSelectedWorkspaceFiles(
-    selected: ContextPart[]
-  ): Promise<ContextFile[]> {
-    const workspace = vscode.workspace.workspaceFolders?.[0];
-    if (!workspace || selected.length === 0) {
-      return [];
-    }
-
-    const files: ContextFile[] = [];
-    const seen = new Set<string>();
-
-    for (const part of selected) {
-      const relativePath = part.path.replace(/\\/g, "/");
-      if (!relativePath || seen.has(relativePath)) {
-        continue;
-      }
-      seen.add(relativePath);
-      if (part.kind === "selection" && part.content?.trim()) {
-        files.push({
-          path: relativePath,
-          content: part.content
-        });
-        continue;
-      }
-      try {
-        const uri = vscode.Uri.joinPath(
-          workspace.uri,
-          ...relativePath.split("/")
-        );
-        const document = await vscode.workspace.openTextDocument(uri);
-        files.push({
-          path: relativePath,
-          content: document.getText()
-        });
-      } catch {
-        if (part.content) {
-          files.push({
-            path: relativePath,
-            content: part.content
-          });
-        }
-      }
-    }
-
-    return files;
-  }
-
 
   private recordAdaptiveResponse(response: AdaptiveAIResponse): void {
     const decision = response.decision;
@@ -806,9 +687,6 @@ export class Agent {
     workspaceUri:
       vscode.Uri,
 
-    index:
-      any,
-
     initialContext:
       any,
 
@@ -848,7 +726,6 @@ export class Agent {
     // - max evidence
     // - max AI calls
     // - max tool calls
-    // - loop detection
     // - stop reason
     // --------------------------------------------------------
 
@@ -916,7 +793,6 @@ export class Agent {
         request.request_id,
         existingTask.current_step ?? 0,
         workspaceUri,
-        index,
         state,
         onEvent,
         accessToken,
@@ -1435,7 +1311,6 @@ export class Agent {
           request.request_id,
           currentStep,
           workspaceUri,
-          index,
           state,
           onEvent,
           accessToken,
@@ -1734,12 +1609,6 @@ export class Agent {
       // TOKEN ESTIMATION
       // ======================================================
 
-      const adaptiveTokens =
-        this.tokenEstimator.estimateFiles(
-          context.files
-        );
-
-
       this.logger.info(
         "Adaptive evidence added",
         {
@@ -1770,8 +1639,6 @@ export class Agent {
           contextFiles:
             context.files.length,
 
-          estimatedTokens:
-            adaptiveTokens
         }
       );
 
@@ -2062,7 +1929,6 @@ export class Agent {
     requestId: string,
     step: number,
     workspaceUri: vscode.Uri,
-    index: any,
     state: InvestigationState,
     onEvent?: (event: AgentEvent) => void,
     accessToken?: string,
@@ -2129,7 +1995,7 @@ export class Agent {
           profile as AgentProfile,
           this.describeToolAction(tool)
         );
-        const result = await this.executeAdaptiveTool(tool, workspaceUri, index);
+        const result = await this.executeAdaptiveTool(tool, workspaceUri);
         evidence.push(...result.evidence);
         toolResults.push({
           tool: tool.tool,
@@ -2236,10 +2102,7 @@ export class Agent {
       AdaptiveToolRequest,
 
     workspaceUri:
-      vscode.Uri,
-
-    index:
-      any
+      vscode.Uri
   ): Promise<AdaptiveToolExecution> {
     flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
@@ -2266,7 +2129,6 @@ export class Agent {
 
       const evidence = await this.executeAdaptiveSearch(
         tool.query!,
-        index,
         workspaceUri
       );
       return {
@@ -2455,10 +2317,6 @@ export class Agent {
   private async executeAdaptiveSearch(
     query:
       string,
-
-    index:
-      any,
-
     workspaceUri:
       vscode.Uri
   ): Promise<Array<{
@@ -2467,16 +2325,34 @@ export class Agent {
   }>> {
     flow("Agent.executeAdaptiveSearch", 1, "enter", { query });
 
-    const searchResults =
-      await this.readOnlyTools.execute(
-        "search",
-        {
-          query,
-          index
+    const searchResults: Array<{ path: string }> = [];
+    const uris = await vscode.workspace.findFiles(
+      new vscode.RelativePattern(workspaceUri, "**/*"),
+      "**/{node_modules,.git,dist,build,out,coverage}/**",
+      ADAPTIVE_MAX_LIST_FILES
+    );
+    const needle = query.toLowerCase();
+    for (const uri of uris) {
+      if (searchResults.length >= ADAPTIVE_MAX_SEARCH_RESULTS) {
+        break;
+      }
+      const path = this.normalizeRelativePath(
+        vscode.workspace.asRelativePath(uri, false)
+      );
+      if (!path || this.isSensitivePath(path)) {
+        continue;
+      }
+      try {
+        const content = Buffer.from(
+          await vscode.workspace.fs.readFile(uri)
+        ).toString("utf8");
+        if (content.toLowerCase().includes(needle)) {
+          searchResults.push({ path });
         }
-      ) as Array<{
-        path: string;
-      }>;
+      } catch {
+        // Ignore unreadable files and continue the requested search.
+      }
+    }
 
 
     this.logger.info(

@@ -8,7 +8,6 @@ export type InvestigationStopReason =
   | "max_chars"
   | "max_ai_calls"
   | "max_tool_calls"
-  | "loop_detected"
   | "timeout"
   | "insufficient_evidence"
   | "error";
@@ -97,32 +96,15 @@ export class InvestigationState {
 
 
   // ==========================================================
-  // AI Request Loop Detection
-  // ==========================================================
-  //
-  // Stores unique investigation requests.
-  //
-  // Example:
-  //
-  //   read_file|src/auth/jwt.ts|
-  //
-  // If Gemini requests the exact same operation again,
-  // the investigation is stopped.
-  //
+  // AI Request Telemetry
   // ==========================================================
 
   private readonly aiRequests =
     new Set<string>();
 
-  /** How many times each exact tool key has been requested. */
+  /** How many times each exact tool key has been requested for telemetry. */
   private readonly aiRequestCounts =
     new Map<string, number>();
-
-  /** Most recent tool request key (for consecutive-loop checks). */
-  private lastAIRequestKey = "";
-
-  /** How many times the current key has been repeated back-to-back. */
-  private consecutiveAIRequestCount = 0;
 
 
   // ==========================================================
@@ -734,30 +716,10 @@ export class InvestigationState {
 
 
   // ==========================================================
-  // AI Request Loop Detection
+  // AI Request Telemetry
   // ==========================================================
 
-  /**
-   * Returns true if this exact investigation request has
-   * already been processed.
-   */
-  hasAIRequest(
-    requestKey: string
-  ): boolean {
-
-    return this.aiRequests.has(
-      requestKey
-    );
-  }
-
-
-  /**
-   * Records an AI investigation request for telemetry only.
-   *
-  * Repeated tool keys are allowed when they are separated by progress, such
-  * as a mutation. An identical operation repeated back-to-back is stopped
-  * after a small number of attempts so a provider cannot spin forever.
-   */
+  /** Records an AI investigation request for telemetry only. */
   recordAIRequest(
     requestKey: string
   ): boolean {
@@ -771,19 +733,6 @@ export class InvestigationState {
     const nextCount = previousCount + 1;
     this.aiRequestCounts.set(requestKey, nextCount);
     this.aiRequests.add(requestKey);
-
-    if (requestKey === this.lastAIRequestKey) {
-      this.consecutiveAIRequestCount += 1;
-    } else {
-      this.lastAIRequestKey = requestKey;
-      this.consecutiveAIRequestCount = 1;
-    }
-
-    if (this.consecutiveAIRequestCount >= 3) {
-      this.stop("loop_detected");
-      return false;
-    }
-
     return true;
   }
 
@@ -809,13 +758,6 @@ export class InvestigationState {
       }
     }
 
-    if (
-      this.lastAIRequestKey.startsWith(`read_file|${normalized}|`) ||
-      this.lastAIRequestKey.startsWith(`get_diagnostics|${normalized}|`)
-    ) {
-      this.lastAIRequestKey = "";
-      this.consecutiveAIRequestCount = 0;
-    }
   }
 
 
