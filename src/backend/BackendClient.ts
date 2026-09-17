@@ -177,7 +177,7 @@ export class BackendClient {
         .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
-          "http://localhost:8080"
+          "https://api.mm3ai.com"
         )
         .replace(/\/$/, "");
   }
