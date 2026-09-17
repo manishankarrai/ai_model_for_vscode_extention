@@ -88,6 +88,37 @@ export function restoreDocumentNewlines(text: string, sample: string): string {
   return normalizeNewlines(text);
 }
 
+function findUniqueWhitespaceInsensitiveSpan(
+  current: string,
+  original: string
+): { start: number; end: number } | undefined {
+  const target = original.replace(/\s+/g, "");
+  if (!target) {
+    return undefined;
+  }
+
+  const tokens = [...current.matchAll(/\S+/g)];
+  const matches: Array<{ start: number; end: number }> = [];
+
+  for (let startIndex = 0; startIndex < tokens.length; startIndex += 1) {
+    let combined = "";
+    for (let endIndex = startIndex; endIndex < tokens.length; endIndex += 1) {
+      combined += tokens[endIndex][0];
+      if (combined.length >= target.length) {
+        if (combined === target) {
+          matches.push({
+            start: tokens[startIndex].index!,
+            end: tokens[endIndex].index! + tokens[endIndex][0].length
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  return matches.length === 1 ? matches[0] : undefined;
+}
+
 /**
  * Map a planned original/updated pair onto the live document.
  * Selected snippets and CRLF/LF mismatches used to fail as "changed since investigation".
@@ -126,6 +157,15 @@ export function resolveApplyContent(
         currentN.slice(first + originalN.length);
       return restoreDocumentNewlines(merged, current);
     }
+  }
+
+  const equivalentSpan = findUniqueWhitespaceInsensitiveSpan(currentN, originalN);
+  if (equivalentSpan) {
+    const merged =
+      currentN.slice(0, equivalentSpan.start) +
+      updatedN +
+      currentN.slice(equivalentSpan.end);
+    return restoreDocumentNewlines(merged, current);
   }
 
   throw new Error(

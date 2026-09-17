@@ -34,7 +34,7 @@ describe("context selection", () => {
     assert.equal(context.parts?.[0].kind, "selection");
   });
 
-  it("uses full investigated file when the user selected a snippet", () => {
+  it("keeps selected code authoritative over stale investigated content", () => {
     const context = resolveRequestContext({
       mode: "agent",
       selected: [{
@@ -54,7 +54,7 @@ describe("context selection", () => {
       maxFiles: 8
     });
 
-    assert.equal(context.files[0].content, "package handlers\n\nfunc GetShop() {}\n");
+    assert.equal(context.files[0].content, "func GetShop() {}");
     assert.equal(context.parts?.[0].kind, "selection");
   });
 

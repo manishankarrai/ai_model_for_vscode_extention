@@ -312,7 +312,7 @@ export interface AIResponse {
 
 export interface AgentEvent {
   profile: AgentProfile;
-  type: "started" | "completed" | "failed" | "synthesizing" | "progress" | "token" | "citation" | "quality" | "done";
+  type: "started" | "completed" | "failed" | "synthesizing" | "progress" | "change" | "token" | "citation" | "quality" | "done";
   message: string;
   timestamp: number;
   delta?: string;

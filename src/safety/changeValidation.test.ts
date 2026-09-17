@@ -91,6 +91,17 @@ describe("stale-file protection", () => {
       /does not match the current file/i
     );
   });
+
+  it("applies a uniquely matching selection when only whitespace differs", () => {
+    assert.equal(
+      resolveApplyContent(
+        "func Update() {\n\treturn 1\n}\n",
+        "func Update() {\n  return 1\n}",
+        "func Update() {\n\treturn 2\n}"
+      ),
+      "func Update() {\n\treturn 2\n}\n"
+    );
+  });
 });
 
 describe("change sets", () => {

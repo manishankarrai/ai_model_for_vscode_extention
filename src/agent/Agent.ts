@@ -276,7 +276,9 @@ export class Agent {
         question
       );
 
-    const localIntent = intentResolution.intent;
+    const localIntent = mode === "agent" && intentResolution.kind === "task"
+      ? "implementation"
+      : intentResolution.intent;
 
 
     const requestId =
@@ -386,7 +388,7 @@ export class Agent {
         parts: selectedContext
       };
       const backendRequest: AdaptiveAIRequest = {
-        action: "chat",
+        action: localIntent,
         request_id: requestId,
         question,
         mode,
@@ -824,6 +826,7 @@ export class Agent {
     const task = existingTask ?? await this.backend.createAgentTask(
       {
         request_id: initialRequest.request_id,
+        action: initialRequest.action,
         question: initialRequest.question,
         mode: initialRequest.mode,
         project: initialRequest.project,
@@ -2153,8 +2156,11 @@ export class Agent {
         if (onEvent && result.success && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
           onEvent({
             profile: profile as AgentEvent["profile"],
-            type: "progress",
-            message: "Updated `" + (tool.path || "file") + "`",
+            type: "change",
+            message: [
+              "Changed `" + (tool.path || "file") + "`",
+              result.output
+            ].filter(Boolean).join("\n\n"),
             timestamp: Date.now()
           });
         }

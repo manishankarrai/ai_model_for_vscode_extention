@@ -64,11 +64,6 @@ export function resolveRequestContext(options: {
 
   const files: ContextFile[] = [];
   const seen = new Set<string>();
-  const investigatedByPath = new Map(
-    options.investigated
-      .filter((file) => isSafeContextPath(file.path))
-      .map((file) => [file.path, file] as const)
-  );
 
   // 1) Selected full-file attachments first (highest priority).
   for (const part of selected) {
@@ -82,7 +77,8 @@ export function resolveRequestContext(options: {
     files.push({ path: part.path, content: part.content });
   }
 
-  // 2) Selected selection paths: prefer full investigated content when available.
+  // 2) Selected code is authoritative. The agent can request the live full file
+  // with read_file before editing, so stale indexed content must not replace it.
   for (const part of selected) {
     if (files.length >= options.maxFiles) {
       break;
@@ -91,8 +87,7 @@ export function resolveRequestContext(options: {
       continue;
     }
     seen.add(part.path);
-    const full = investigatedByPath.get(part.path);
-    files.push(full ?? { path: part.path, content: part.content });
+    files.push({ path: part.path, content: part.content });
   }
 
   // 3) Remaining investigated evidence.

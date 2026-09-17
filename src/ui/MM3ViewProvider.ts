@@ -373,15 +373,10 @@ export class MM3ViewProvider
           agentCount,
           this.requestController.signal,
           (event: AgentEvent) => {
+            const userEvent = this.toUserFacingAgentEvent(event);
             this.post({
               type: "agent_event",
-              event: {
-                ...event,
-                message:
-                  event.type === "failed"
-                    ? this.sanitizeUserError(event.message)
-                    : event.message
-              }
+              event: userEvent
             });
           },
           async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
@@ -453,15 +448,10 @@ export class MM3ViewProvider
     this.post({ type: "thinking" });
     try {
       const onEvent = (event: AgentEvent) => {
+        const userEvent = this.toUserFacingAgentEvent(event);
         this.post({
           type: "agent_event",
-          event: {
-            ...event,
-            message:
-              event.type === "failed"
-                ? this.sanitizeUserError(event.message)
-                : event.message
-          }
+          event: userEvent
         });
       };
       const response = requestID
@@ -557,6 +547,10 @@ export class MM3ViewProvider
 
   private async getRequestContext(): Promise<ContextPart[]> {
     flow("MM3ViewProvider.getRequestContext", 1, "enter");
+    const editor = vscode.window.activeTextEditor;
+    if (editor && !editor.selection.isEmpty) {
+      await this.attachCurrentSelection(false);
+    }
     return this.selectedContext.filter(
       (part) => !this.dismissedContextKeys.has(contextPartKey(part))
     );
@@ -605,7 +599,7 @@ export class MM3ViewProvider
     this.postContextParts();
   }
 
-  async attachCurrentSelection(): Promise<void> {
+  async attachCurrentSelection(showFeedback = true): Promise<void> {
     flow("MM3ViewProvider.attachCurrentSelection", 1, "enter");
     const editor = vscode.window.activeTextEditor;
     if (!editor || editor.selection.isEmpty) {
@@ -637,13 +631,18 @@ export class MM3ViewProvider
       startLine,
       endLine
     };
+    if (!showFeedback && this.dismissedContextKeys.has(contextPartKey(nextPart))) {
+      return;
+    }
     this.dismissedContextKeys.delete(contextPartKey(nextPart));
     this.selectedContext.unshift(nextPart);
     this.postContextParts();
-    await this.focusChat();
-    vscode.window.showInformationMessage(
-      `Added ${relativePath}:${startLine}-${endLine} to MM3 chat`
-    );
+    if (showFeedback) {
+      await this.focusChat();
+      vscode.window.showInformationMessage(
+        `Added ${relativePath}:${startLine}-${endLine} to MM3 chat`
+      );
+    }
   }
 
   async focusChat(): Promise<void> {
@@ -741,6 +740,13 @@ export class MM3ViewProvider
     }
     if (text === "MM3 is already processing another request.") {
       return text;
+    }
+    if (/agent implementation cannot finish without a successful workspace mutation/i.test(text)) {
+      const reason = text.match(/Reason:\s*(.+)$/i)?.[1]?.trim();
+      return [
+        "No file was changed because Agent mode did not receive a successful workspace edit.",
+        reason ? `Why it stopped: ${reason}` : "The AI ended before requesting a file change."
+      ].join("\n");
     }
     if (
       /i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|unable to reach|unable to connect/i.test(
@@ -854,6 +860,37 @@ export class MM3ViewProvider
   ): string {
     flow("MM3ViewProvider.formatAnswer", 1, "enter");
     return response.answer;
+  }
+
+  private toUserFacingAgentEvent(event: AgentEvent): AgentEvent {
+    if (event.type === "failed") {
+      return { ...event, message: this.sanitizeUserError(event.message) };
+    }
+
+    const message = event.message.trim();
+    if (/^Backend AI response:/i.test(message)) {
+      const details = message.replace(/^Backend AI response:\s*/i, "");
+      const action = details.split(" - ")[0].trim();
+      return {
+        ...event,
+        message: action === "CONTINUE_INVESTIGATION"
+          ? "Reviewing the project context."
+          : "Preparing the response."
+      };
+    }
+    if (/^AI reasoning:/i.test(message)) {
+      return { ...event, message: "Reviewing the request and relevant files." };
+    }
+    if (/^Requested tools:/i.test(message)) {
+      return { ...event, message: "Checking the files needed for this request." };
+    }
+    if (/^Continuing local investigation\.?$/i.test(message)) {
+      return { ...event, message: "Checking the latest workspace state." };
+    }
+    if (/^Evidence update:/i.test(message)) {
+      return { ...event, message: message.replace(/^Evidence update:\s*/i, "Checked: ") };
+    }
+    return event;
   }
 
   private post(
@@ -1237,66 +1274,53 @@ body {
 }
 
 .streaming-panel {
-  margin: 0 0 10px;
-  min-height: clamp(220px, 42vh, 480px);
+  margin: 0 0 12px;
   display: flex;
   flex-direction: column;
-  padding: 14px;
-  border: 1px solid var(--vscode-panel-border);
-  border-radius: 12px;
-  background: linear-gradient(145deg, var(--vscode-editor-background), var(--vscode-textCodeBlock-background));
-  color: var(--vscode-descriptionForeground);
-  font-size: 11px;
-  box-shadow: inset 0 1px 0 var(--vscode-widget-border, transparent);
-}
-
-.streaming-panel-complete {
-  min-height: 0;
-  max-height: 280px;
-  background: var(--vscode-textCodeBlock-background);
-  border-color: var(--vscode-textLink-foreground);
-  box-shadow: none;
-}
-
-.streaming-panel-complete .thinking-dots {
-  display: none;
+  gap: 7px;
+  font-size: 12px;
 }
 
 .streaming-panel-header {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: 12px;
   min-height: 24px;
   color: var(--vscode-foreground);
 }
 
 .streaming-panel-status {
+  flex: 1;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .streaming-panel-activity {
-  max-height: 150px;
-  overflow: auto;
-  margin-bottom: 10px;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--vscode-panel-border);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 2px 0 2px 18px;
   line-height: 1.45;
 }
 
 .streaming-panel-activity-item {
-  margin: 2px 0;
-  color: var(--vscode-descriptionForeground);
+  position: relative;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.streaming-panel-activity-item::before {
+  position: absolute;
+  top: 0.55em;
+  left: -16px;
+  content: "•";
+  line-height: 1;
 }
 
 .streaming-panel-content {
-  flex: 1;
-  min-height: 0;
-  overflow: auto;
   padding: 0;
-  opacity: 0.75;
   white-space: pre-wrap;
   line-height: 1.55;
 }
@@ -2059,6 +2083,7 @@ let processing = false;
 let composerState = "idle";
 let streamPauseTimer = 0;
 let streamingText = "";
+let streamingPanelSequence = 0;
 const STREAM_PAUSE_MS = 180;
 
 const contextParts = [];
@@ -2726,12 +2751,44 @@ function addMessage(
     messages.scrollHeight;
 }
 
-function removeStreamingPanel() {
+function createStreamingPanel() {
+  const panel = document.createElement("div");
+  panel.id = "streaming-panel";
+  panel.className = "streaming-panel";
+  panel.dataset.completed = "false";
+
+  const header = document.createElement("div");
+  header.className = "streaming-panel-header";
+  header.innerHTML =
+    '<span class="thinking-dots"><span></span><span></span><span></span></span>' +
+    '<span class="streaming-panel-status"></span>';
+  panel.appendChild(header);
+  messages.appendChild(panel);
+  return panel;
+}
+
+function beginStreamingPanel() {
+  const existing = document.getElementById("streaming-panel");
+  if (existing) {
+    completeStreamingPanel();
+    existing.id = "streaming-panel-complete-" + Date.now();
+  }
   streamingText = "";
+  streamingPanelSequence += 1;
+  createStreamingPanel().dataset.sequence = String(streamingPanelSequence);
+}
+
+function removeStreamingPanel() {
   const panel = document.getElementById("streaming-panel");
   if (panel) {
-    panel.remove();
+    const status = panel.querySelector(".streaming-panel-status");
+    if (status && panel.dataset.completed !== "true") {
+      status.textContent = "Stopped";
+    }
+    panel.querySelector(".streaming-panel-content")?.remove();
+    panel.dataset.completed = "true";
   }
+  streamingText = "";
 }
 
 function completeStreamingPanel() {
@@ -2739,11 +2796,13 @@ function completeStreamingPanel() {
   if (!panel) {
     return;
   }
-  panel.id = "streaming-panel-complete-" + Date.now();
-  panel.classList.add("streaming-panel-complete");
+  panel.dataset.completed = "true";
+  panel.querySelector(".thinking-dots")?.remove();
+  panel.querySelector(".streaming-panel-content")?.remove();
+  streamingText = "";
   const status = panel.querySelector(".streaming-panel-status");
   if (status) {
-    status.textContent = "INFO";
+    status.textContent = "Completed";
   }
 }
 
@@ -2849,18 +2908,7 @@ function updateStreamingPanel(statusText, delta) {
 
   let panel = document.getElementById("streaming-panel");
   if (!panel) {
-    panel = document.createElement("div");
-    panel.id = "streaming-panel";
-    panel.className = "streaming-panel";
-
-    const header = document.createElement("div");
-    header.className = "streaming-panel-header";
-    header.innerHTML =
-      '<span class="thinking-dots"><span></span><span></span><span></span></span>' +
-      '<span class="streaming-panel-status"></span>';
-
-    panel.appendChild(header);
-    messages.appendChild(panel);
+    panel = createStreamingPanel();
   }
 
   const status = panel.querySelector(".streaming-panel-status");
@@ -2877,12 +2925,6 @@ function updateStreamingPanel(statusText, delta) {
       panel.appendChild(content);
     }
     content.textContent = streamingText;
-  } else if (streamingText) {
-    streamingText = "";
-    const content = panel.querySelector(".streaming-panel-content");
-    if (content) {
-      content.remove();
-    }
   }
 
   if (!delta && statusText) {
@@ -2892,19 +2934,18 @@ function updateStreamingPanel(statusText, delta) {
       activity.className = "streaming-panel-activity";
       panel.insertBefore(activity, panel.querySelector(".streaming-panel-content"));
     }
-    const last = activity.lastElementChild;
+    const last = activity.firstElementChild;
     if (!last || last.textContent !== String(statusText)) {
       const item = document.createElement("div");
       item.className = "streaming-panel-activity-item";
       item.textContent = String(statusText);
-      activity.appendChild(item);
-      while (activity.children.length > 24) {
-        activity.firstElementChild?.remove();
-      }
+      activity.prepend(item);
     }
   }
 
-  messages.appendChild(panel);
+  if (panel.parentElement !== messages) {
+    messages.appendChild(panel);
+  }
   messages.scrollTop = messages.scrollHeight;
 }
 
@@ -3579,6 +3620,8 @@ window.addEventListener(
           true
         );
 
+        beginStreamingPanel();
+
         setStatus(
           "Analyzing project..."
         );
@@ -3597,10 +3640,7 @@ window.addEventListener(
           false
         );
 
-        addMessage(
-          message.answer,
-          "final-answer"
-        );
+        addMessage(message.answer, "final-answer");
 
         addUsage(
           message.usage
@@ -3630,6 +3670,11 @@ window.addEventListener(
         if (message.event.type === "token" && message.event.delta) {
           noteStreamActivity("Writing");
           updateStreamingPanel("Writing", message.event.delta);
+          break;
+        }
+
+        if (message.event.type === "change") {
+          updateStreamingPanel("Change applied", "");
           break;
         }
 
@@ -3706,7 +3751,7 @@ window.addEventListener(
 
       case "ready":
         hideThinking();
-        removeStreamingPanel();
+        completeStreamingPanel();
         if (composerState === "running") {
           setComposerState("idle");
         }
