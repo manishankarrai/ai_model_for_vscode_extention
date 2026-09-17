@@ -3159,18 +3159,8 @@ function addUsage(
     "usage";
 
   element.textContent =
-    " • Input: " +
-    Number(usage.input_tokens ?? 0) +
-    " • Output: " +
-    Number(usage.output_tokens ?? 0) +
-    " • Total: " +
-    totalTokens +
-    " • AI calls: " +
-    aiApiCalls +
     " • Credits: " +
-    charged.toFixed(4) +
-    " • Wallet: " +
-    wallet.toFixed(2);
+    charged.toFixed(4);
 
   if (walletBalance && wallet > 0) {
     walletBalance.textContent = wallet.toFixed(2) + " credits";
