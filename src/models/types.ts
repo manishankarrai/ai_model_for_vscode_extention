@@ -50,6 +50,7 @@ export type AgentToolName =
 export interface ToolRequest {
   tool: AgentToolName;
   path?: string;
+  offset?: number;
   targetPath?: string;
   query?: string;
   command?: string;

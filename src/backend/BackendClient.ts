@@ -50,6 +50,7 @@ export interface UsageResponse {
 export interface AgentTaskToolRequest {
   tool: AgentToolName;
   path?: string;
+  offset?: number;
   targetPath?: string;
   target_path?: string;
   query?: string;

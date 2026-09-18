@@ -191,6 +191,17 @@ export class MM3ViewProvider
         break;
 
       case "approval_response":
+        this.post({
+          type: "agent_event",
+          event: {
+            profile: this.lastQuestion?.agentProfile || "agent",
+            type: "progress",
+            message: message.decision === "skip"
+              ? "Approval skipped. Continuing investigation."
+              : "Approval granted. Resuming investigation.",
+            timestamp: Date.now()
+          }
+        });
         this.resolveApproval(message.approvalId, message.decision);
         break;
 
@@ -379,7 +390,7 @@ export class MM3ViewProvider
               event: userEvent
             });
           },
-          async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
+          async (details) => this.askToExtendLimit(details)
         );
 
       this.post({
@@ -463,13 +474,13 @@ export class MM3ViewProvider
             accessToken,
             undefined,
             onEvent,
-            async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit)
+            async (details) => this.askToExtendLimit(details)
           )
         : await this.agent.resumeLastTask(
             accessToken,
             undefined,
             onEvent,
-            async ({ reason, currentLimit }) => this.askToExtendLimit(reason, currentLimit),
+            async (details) => this.askToExtendLimit(details),
             preferredProfile
           );
       if (!response) {
@@ -762,6 +773,16 @@ export class MM3ViewProvider
         "The MM3 service did not respond in time. Please try again."
       );
     }
+    if (
+      /adaptive investigation stopped: max_(steps|tool_calls|ai_calls)|adaptive reasoning|tool request|workspace operation|gemini requested/i.test(
+        text
+      )
+    ) {
+      return formatUserFacingError(
+        "unexpected",
+        "The investigation could not complete this request. Please try again with a narrower task."
+      );
+    }
     return formatUserFacingError(classifyErrorMessage(text), text);
   }
 
@@ -778,19 +799,28 @@ export class MM3ViewProvider
     });
   }
 
-  private async askToExtendLimit(
-    reason: "max_tool_calls" | "max_ai_calls",
-    currentLimit: number
-  ): Promise<number | undefined> {
+  private async askToExtendLimit(details: {
+    reason: "max_tool_calls" | "max_ai_calls";
+    currentLimit: number;
+    currentToolLimit: number;
+    currentAICallLimit: number;
+  }): Promise<{ toolCalls: number; aiCalls: number } | undefined> {
+    const {
+      reason,
+      currentLimit,
+      currentToolLimit,
+      currentAICallLimit
+    } = details;
     this.resolveLimitDecision(false);
     this.post({ type: "limit_prompt", reason, currentLimit });
     const shouldContinue = await new Promise<boolean>((resolve) => {
       this.pendingLimitDecision = resolve;
     });
     return shouldContinue
-      ? reason === "max_ai_calls"
-        ? adaptiveLimits.continuationAICalls
-        : adaptiveLimits.continuationToolCalls
+      ? {
+          toolCalls: currentToolLimit * (adaptiveLimits.limitExpansionFactor - 1),
+          aiCalls: currentAICallLimit * (adaptiveLimits.limitExpansionFactor - 1)
+        }
       : undefined;
   }
 
@@ -2782,7 +2812,7 @@ function completeStreamingPanel() {
   streamingText = "";
   const status = panel.querySelector(".streaming-panel-status");
   if (status) {
-    status.textContent = "Completed";
+    status.textContent = panel.dataset.finalStatus || "Completed";
   }
 }
 
@@ -2819,15 +2849,7 @@ function addApprovalRequest(approvalId, text) {
       approvalId,
       decision
     });
-    approve.disabled = true;
-    alwaysApprove.disabled = true;
-    skip.disabled = true;
-    label.textContent = decision === "always_approve"
-      ? "Always approved"
-      : decision === "approve"
-        ? "Approved"
-        : "Skipped";
-    label.title = label.textContent;
+    card.remove();
   };
 
   approve.addEventListener("click", () => finish("approve"));
@@ -2847,8 +2869,12 @@ function addLimitPrompt(reason, currentLimit) {
     empty.remove();
   }
 
+  document.getElementById("limit-prompt")?.remove();
+
   const card = document.createElement("div");
+  card.id = "limit-prompt";
   card.className = "approval-card";
+  card.dataset.limitPrompt = "true";
   const label = document.createElement("span");
   label.className = "approval-card-text";
   label.textContent = reason === "max_ai_calls"
@@ -2865,10 +2891,12 @@ function addLimitPrompt(reason, currentLimit) {
   stopButton.textContent = "Stop";
 
   const finish = (continueInvestigation) => {
+    card.remove();
+    const panel = document.getElementById("streaming-panel");
+    if (panel) {
+      messages.appendChild(panel);
+    }
     vscode.postMessage({ type: "limit_response", continueInvestigation });
-    continueButton.disabled = true;
-    stopButton.disabled = true;
-    label.textContent = continueInvestigation ? "Continuing" : "Stopped";
   };
 
   continueButton.addEventListener("click", () => finish(true));
@@ -2914,18 +2942,16 @@ function updateStreamingPanel(statusText, delta) {
       activity.className = "streaming-panel-activity";
       panel.insertBefore(activity, panel.querySelector(".streaming-panel-content"));
     }
-    const last = activity.firstElementChild;
+    const last = activity.lastElementChild;
     if (!last || last.textContent !== String(statusText)) {
       const item = document.createElement("div");
       item.className = "streaming-panel-activity-item";
       item.textContent = String(statusText);
-      activity.prepend(item);
+      activity.appendChild(item);
     }
   }
 
-  if (panel.parentElement !== messages) {
-    messages.appendChild(panel);
-  }
+  messages.appendChild(panel);
   messages.scrollTop = messages.scrollHeight;
 }
 
@@ -3448,11 +3474,14 @@ function hideThinking() {
   }
   const row = document.getElementById("thinking-indicator");
   if (row) {
-    row.hidden = true;
-    if (row.parentElement?.id === "streaming-panel") {
-      messages.appendChild(row);
-    }
+    row.remove();
   }
+}
+
+function clearPermissionWaiting() {
+  document
+    .querySelectorAll('[data-stream-state="permission"]')
+    .forEach((item) => item.remove());
 }
 
 function noteStreamActivity(label) {

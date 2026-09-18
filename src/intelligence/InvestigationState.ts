@@ -1,5 +1,5 @@
-import { flow } from "../utils/flowLog";
-import { adaptiveLimits } from "../config/adaptiveLimits";
+import { flow } from "../utils/flowLog.ts";
+import { adaptiveLimits } from "../config/adaptiveLimits.ts";
 
 export type InvestigationStopReason =
   | "completed"
@@ -253,6 +253,26 @@ export class InvestigationState {
     return true;
   }
 
+  extendLimits(additionalToolCalls: number, additionalAICalls: number): boolean {
+    flow("InvestigationState.extendLimits", 1, "enter", {
+      additionalToolCalls,
+      additionalAICalls
+    });
+
+    if (
+      additionalToolCalls <= 0 ||
+      additionalAICalls <= 0 ||
+      (this.stopReason !== "max_ai_calls" && this.stopReason !== "max_tool_calls")
+    ) {
+      return false;
+    }
+
+    this.maxToolCalls += additionalToolCalls;
+    this.maxAICalls += additionalAICalls;
+    this._stopReason = undefined;
+    return true;
+  }
+
 
   // ==========================================================
   // Tool Calls
@@ -318,9 +338,11 @@ export class InvestigationState {
 
 
   /**
-   * Adds evidence character count.
+   * Adds evidence character count for the current reasoning request.
    *
-   * The counter is capped at maxChars.
+   * maxChars is a per-request evidence window, not a lifetime
+   * investigation budget. Reaching it limits this request's evidence but
+   * must not stop the investigation.
    */
   addChars(
     chars: number
@@ -347,38 +369,21 @@ export class InvestigationState {
     if (
       remaining <= 0
     ) {
-
-      this.stop(
-        "max_chars"
-      );
-
       return false;
     }
 
-
-    const accepted =
-      Math.min(
-        chars,
-        remaining
-      );
-
-
-    this._totalChars +=
-      accepted;
-
-
-    if (
-      this._totalChars >=
-      this.maxChars
-    ) {
-
-      this.stop(
-        "max_chars"
-      );
-    }
+    const accepted = Math.min(chars, remaining);
+    this._totalChars += accepted;
 
 
     return accepted === chars;
+  }
+
+
+  /** Starts a fresh evidence window for the next reasoning request. */
+  resetCharsForNextRequest(): void {
+    flow("InvestigationState.resetCharsForNextRequest", 1, "enter");
+    this._totalChars = 0;
   }
 
 
@@ -688,23 +693,6 @@ export class InvestigationState {
 
       this.stop(
         "max_files"
-      );
-
-      return false;
-    }
-
-
-    // --------------------------------------------------------
-    // Maximum evidence characters
-    // --------------------------------------------------------
-
-    if (
-      this._totalChars >=
-      this.maxChars
-    ) {
-
-      this.stop(
-        "max_chars"
       );
 
       return false;

@@ -16,6 +16,7 @@ import {
 } from "../models/types";
 
 import { InvestigationState } from "../intelligence/InvestigationState";
+import { hasSufficientAdaptiveConfidence } from "../intelligence/confidence";
 
 import {
   AgentTaskRecord,
@@ -54,6 +55,7 @@ type AdaptiveToolName = AgentToolName;
 interface AdaptiveToolRequest {
   tool: AdaptiveToolName;
   path?: string;
+  offset?: number;
   targetPath?: string;
   target_path?: string;
   query?: string;
@@ -85,10 +87,17 @@ interface AdaptiveToolExecution {
   error?: string;
 }
 
+interface AdaptiveLimitExtension {
+  toolCalls: number;
+  aiCalls: number;
+}
+
 type AdaptiveLimitHandler = (details: {
   reason: "max_tool_calls" | "max_ai_calls";
   currentLimit: number;
-}) => Promise<number | undefined>;
+  currentToolLimit: number;
+  currentAICallLimit: number;
+}) => Promise<AdaptiveLimitExtension | undefined>;
 
 
 interface AdaptiveDecision {
@@ -163,6 +172,7 @@ const ADAPTIVE_MAX_LIST_FILES = adaptiveLimits.maxListFiles;
 
 const ADAPTIVE_MAX_FILE_CHARS = adaptiveLimits.maxFileChars;
 const ADAPTIVE_MAX_TOOL_OUTPUT_CHARS = adaptiveLimits.maxToolOutputChars;
+const MIN_ADAPTIVE_CONFIDENCE = adaptiveLimits.minConfidence;
 const ACTIVE_TASK_STORAGE_KEY = "mm3.activeAgentTask";
 
 
@@ -656,9 +666,23 @@ export class Agent {
   }
 
   private summarizeAdaptiveToolResult(result: AdaptiveToolResult): string {
+    if (!result.success) {
+      return `${result.tool}: the requested workspace operation could not be completed; continuing investigation.`;
+    }
     const target = result.path ? ` (${result.path})` : "";
     const detail = this.compactInvestigationText(result.error || result.output, 180);
     return `${result.tool}${target}: ${result.success ? "completed" : "failed"}${detail ? ` - ${detail}` : ""}`;
+  }
+
+  private getAdaptiveToolRequestFailure(error: unknown): string | undefined {
+    const message = error instanceof Error ? error.message : String(error);
+    if (!/(?:requires|must|unsupported|not allowed)/i.test(message)) {
+      return undefined;
+    }
+    const match = message.match(
+      /\b(read_file|search|list_files|get_diagnostics|git_status|git_diff|edit_file|write_file|create_file|delete_file|move_file|rename_file|apply_change_set|apply_patch|run_command|run_task|run_tests)\b/i
+    );
+    return match?.[1];
   }
 
   private addInvestigationSummaryToAnswer(
@@ -776,6 +800,8 @@ export class Agent {
     let reasoningContext =
       initialContext;
 
+    const readOffsets = new Map<string, number>();
+
     const investigationSummary: string[] = [];
 
     if (existingTask && pendingDecision) {
@@ -803,7 +829,8 @@ export class Agent {
         signal,
         onLimitReached,
         initialRequest.agent?.profile || "agent",
-        initialRequest.mode
+        initialRequest.mode,
+        readOffsets
       );
       context = this.mergeAdaptiveEvidence(context, resumed.evidence);
       reasoningContext = {
@@ -870,6 +897,10 @@ export class Agent {
     for (;;) {
       flow("Agent.runAdaptiveInvestigation", 2, "loop tick");
 
+      // maxChars limits the evidence sent in one reasoning request. It is
+      // reset here so repeated API cycles can continue reading large files.
+      state.resetCharsForNextRequest();
+
       // ======================================================
       // START NEW ADAPTIVE STEP
       // ======================================================
@@ -921,19 +952,31 @@ export class Agent {
       ) {
 
         if (state.stopReason === "max_ai_calls" && onLimitReached) {
-          const additional = await onLimitReached({
+          const extension = await onLimitReached({
             reason: "max_ai_calls",
-            currentLimit: state.maxAICalls
+            currentLimit: state.maxAICalls,
+            currentToolLimit: state.maxToolCalls,
+            currentAICallLimit: state.maxAICalls
           });
-          if (additional && additional > 0) {
+          if (extension && extension.aiCalls > 0 && extension.toolCalls > 0) {
             await this.backend.increaseAgentTaskBudget(
               request.request_id,
-              { aiCalls: additional },
+              {
+                toolCalls: extension.toolCalls,
+                aiCalls: extension.aiCalls
+              },
               accessToken,
               signal
             );
-            if (state.extendAICalls(additional) && state.incrementAICalls()) {
-              // Continue with the user-approved AI-call budget.
+            if (
+              state.extendLimits(extension.toolCalls, extension.aiCalls) &&
+              state.incrementAICalls()
+            ) {
+              this.emitProgress(
+                onEvent,
+                initialRequest.agent?.profile || "agent",
+                `Continuing investigation with ${state.maxAICalls} AI calls and ${state.maxToolCalls} tool calls.`
+              );
             } else {
               throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
             }
@@ -1023,8 +1066,9 @@ export class Agent {
       // BACKEND / GEMINI
       // ======================================================
 
-      const rawResponse =
-        await this.backend.decideAgentTask(
+      let rawResponse: AIResponse;
+      try {
+        rawResponse = await this.backend.decideAgentTask(
           request.request_id,
           {
             context: request.context,
@@ -1034,7 +1078,37 @@ export class Agent {
           accessToken,
           signal
         );
+      } catch (error) {
+        const invalidTool = this.getAdaptiveToolRequestFailure(error);
+        if (!invalidTool) {
+          throw error;
+        }
 
+        const correction = "The previous workspace operation was incomplete or invalid. Re-check every required argument and request the corrected operation.";
+        this.logger.warn("Adaptive decision contained an invalid tool request", {
+          tool: invalidTool,
+          error
+        });
+        this.emitInvestigationUpdate(
+          onEvent,
+          initialRequest.agent?.profile || "agent",
+          "The requested workspace operation was incomplete. Retrying with corrected details."
+        );
+        const failedToolResult: AdaptiveToolResult = {
+          tool: invalidTool as AdaptiveToolName,
+          success: false,
+          output: "",
+          error: correction
+        };
+        request = {
+          ...request,
+          tool_results: [
+            ...(request.tool_results ?? []),
+            failedToolResult
+          ]
+        };
+        continue;
+      }
 
       const response =
         rawResponse as AdaptiveAIResponse;
@@ -1160,6 +1234,37 @@ export class Agent {
           answer,
           usage:
             totalUsage
+        };
+      }
+
+      if (
+        response.decision.action === "FINAL_ANSWER" &&
+        !hasSufficientAdaptiveConfidence(response.decision.confidence)
+      ) {
+        const modelTools = [
+          ...(response.decision.tools ?? []),
+          ...(response.decision.tool ? [response.decision.tool] : [])
+        ];
+        const followUpTools = modelTools.length > 0
+          ? modelTools
+          : [{
+              tool: "list_files" as AdaptiveToolName,
+              reason: `Confidence must be greater than ${MIN_ADAPTIVE_CONFIDENCE}; inspect the workspace before answering.`
+            }];
+
+        this.emitInvestigationUpdate(
+          onEvent,
+          initialRequest.agent?.profile || "agent",
+          `Confidence ${response.decision.confidence} is not greater than ${MIN_ADAPTIVE_CONFIDENCE}; continuing investigation.`
+        );
+        investigationSummary.push(
+          `Investigation continued because confidence was not greater than ${MIN_ADAPTIVE_CONFIDENCE}.`
+        );
+        response.decision = {
+          ...response.decision,
+          action: "CONTINUE_INVESTIGATION",
+          tool: undefined,
+          tools: followUpTools
         };
       }
 
@@ -1329,7 +1434,8 @@ export class Agent {
           signal,
           onLimitReached,
           initialRequest.agent?.profile || "agent",
-          initialRequest.mode
+          initialRequest.mode,
+          readOffsets
         );
 
       for (const result of toolResults) {
@@ -1427,11 +1533,6 @@ export class Agent {
           state.totalChars >=
           state.maxChars
         ) {
-
-          state.stop(
-            "max_chars"
-          );
-
           break;
         }
 
@@ -1472,11 +1573,6 @@ export class Agent {
         if (
           remaining <= 0
         ) {
-
-          state.stop(
-            "max_chars"
-          );
-
           break;
         }
 
@@ -1817,11 +1913,6 @@ export class Agent {
     if (
       remaining <= 0
     ) {
-
-      state.stop(
-        "max_chars"
-      );
-
       return 0;
     }
 
@@ -1958,7 +2049,8 @@ export class Agent {
     signal?: AbortSignal,
     onLimitReached?: AdaptiveLimitHandler,
     profile: string = "agent",
-    mode: InteractionMode = "agent"
+    mode: InteractionMode = "agent",
+    readOffsets: Map<string, number> = new Map()
   ): Promise<{
     evidence: Array<{ path: string; content: string }>;
     toolResults: AdaptiveToolResult[];
@@ -1984,20 +2076,33 @@ export class Agent {
       }
 
       pendingLimitExtension ??= (async () => {
-        const additional = await onLimitReached({
+        const extension = await onLimitReached({
           reason: "max_tool_calls",
-          currentLimit: state.maxToolCalls
+          currentLimit: state.maxToolCalls,
+          currentToolLimit: state.maxToolCalls,
+          currentAICallLimit: state.maxAICalls
         });
-        if (!additional || additional <= 0) {
+        if (!extension || extension.toolCalls <= 0 || extension.aiCalls <= 0) {
           return false;
         }
         await this.backend.increaseAgentTaskBudget(
           requestId,
-          { toolCalls: additional },
+          {
+            toolCalls: extension.toolCalls,
+            aiCalls: extension.aiCalls
+          },
           accessToken,
           signal
         );
-        return state.extendToolCalls(additional);
+        const extended = state.extendLimits(extension.toolCalls, extension.aiCalls);
+        if (extended) {
+          this.emitProgress(
+            onEvent,
+            profile as AgentProfile,
+            `Continuing investigation with ${state.maxAICalls} AI calls and ${state.maxToolCalls} tool calls.`
+          );
+        }
+        return extended;
       })().finally(() => {
         pendingLimitExtension = undefined;
       });
@@ -2019,7 +2124,7 @@ export class Agent {
           profile as AgentProfile,
           this.describeToolAction(tool)
         );
-        const result = await this.executeAdaptiveTool(tool, workspaceUri, mode);
+        const result = await this.executeAdaptiveTool(tool, workspaceUri, mode, readOffsets);
         evidence.push(...result.evidence);
         toolResults.push({
           tool: tool.tool,
@@ -2038,10 +2143,12 @@ export class Agent {
         ]);
         if (result.success && resets.has(tool.tool) && tool.path?.trim()) {
           state.clearPathInspectionKeys(tool.path.trim());
+          readOffsets.delete(tool.path.trim());
         }
         const target = tool.targetPath ?? tool.target_path;
         if (result.success && (tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
           state.clearPathInspectionKeys(target.trim());
+          readOffsets.delete(target.trim());
         }
         if (onEvent && result.success && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
           onEvent({
@@ -2129,7 +2236,10 @@ export class Agent {
       vscode.Uri,
 
     mode:
-      InteractionMode
+      InteractionMode,
+
+    readOffsets:
+      Map<string, number>
   ): Promise<AdaptiveToolExecution> {
     flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
@@ -2138,14 +2248,32 @@ export class Agent {
       "read_file"
     ) {
 
-      const evidence = await this.executeAdaptiveReadFile(
+      const normalizedPath = this.normalizeRelativePath(tool.path!);
+      const offset = Number.isInteger(tool.offset) && tool.offset! >= 0
+        ? tool.offset!
+        : readOffsets.get(normalizedPath) ?? 0;
+      const read = await this.executeAdaptiveReadFile(
         tool.path!,
-        workspaceUri
+        workspaceUri,
+        offset
+      );
+      if (read.hasMore) {
+        readOffsets.set(normalizedPath, read.nextOffset);
+      } else {
+        readOffsets.delete(normalizedPath);
+      }
+      const chunkStatus = read.hasMore
+        ? `\n[read_file chunk offset=${offset} chars=${read.chars}; more content is available. Request read_file for this path again to continue.]`
+        : `\n[read_file complete offset=${offset} chars=${read.chars}]`;
+      const chunkOutput = read.evidence.map(item => item.content).filter(Boolean).join("\n\n");
+      const availableOutputChars = Math.max(
+        0,
+        ADAPTIVE_MAX_TOOL_OUTPUT_CHARS - chunkStatus.length
       );
       return {
-        evidence,
+        evidence: read.evidence,
         success: true,
-        output: this.capAdaptiveOutput(evidence.map(item => item.content).filter(Boolean).join("\n\n"))
+        output: chunkOutput.slice(0, availableOutputChars) + chunkStatus
       };
     }
 
@@ -2233,11 +2361,19 @@ export class Agent {
       string,
 
     workspaceUri:
-      vscode.Uri
-  ): Promise<Array<{
-    path: string;
-    content: string;
-  }>> {
+      vscode.Uri,
+
+    offset:
+      number
+  ): Promise<{
+    evidence: Array<{
+      path: string;
+      content: string;
+    }>;
+    nextOffset: number;
+    chars: number;
+    hasMore: boolean;
+  }> {
     flow("Agent.executeAdaptiveReadFile", 1, "enter", { relativePath });
 
     const normalizedPath =
@@ -2291,17 +2427,9 @@ export class Agent {
           .toString("utf8");
 
 
-      if (
-        content.length >
-        ADAPTIVE_MAX_FILE_CHARS
-      ) {
-
-        content =
-          content.slice(
-            0,
-            ADAPTIVE_MAX_FILE_CHARS
-          );
-      }
+      const safeOffset = Math.min(Math.max(0, offset), content.length);
+      const chunk = content.slice(safeOffset, safeOffset + ADAPTIVE_MAX_FILE_CHARS);
+      const nextOffset = safeOffset + chunk.length;
 
 
       this.logger.info(
@@ -2310,20 +2438,26 @@ export class Agent {
           path:
             normalizedPath,
 
+          offset:
+            safeOffset,
+
+          hasMore:
+            nextOffset < content.length,
+
           chars:
-            content.length
+            chunk.length
         }
       );
 
-
-      return [
-        {
-          path:
-            normalizedPath,
-
-          content
-        }
-      ];
+      return {
+        evidence: [{
+          path: normalizedPath,
+          content: chunk
+        }],
+        nextOffset,
+        chars: chunk.length,
+        hasMore: nextOffset < content.length
+      };
 
 
     } catch (error) {
