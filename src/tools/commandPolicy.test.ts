@@ -40,7 +40,7 @@ describe("command policy", () => {
   });
 
   it("rejects oversized command payloads", () => {
-    assert.throws(() => parseSafeCommand("node " + "x".repeat(4_001)), /longer than/);
-    assert.throws(() => parseSafeCommand("node " + Array(65).fill("arg").join(" ")), /more than/);
+    assert.throws(() => parseSafeCommand("node " + "x".repeat(16_001)), /longer than/);
+    assert.throws(() => parseSafeCommand("node " + Array(201).fill("arg").join(" ")), /more than/);
   });
 });
