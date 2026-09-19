@@ -41,6 +41,7 @@ import type {
 } from "../models/types";
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { adaptiveLimits } from "../config/adaptiveLimits";
+import { chunkContextParts } from "../intelligence/contextSelection";
 
 
 import { flow } from "../utils/flowLog";
@@ -80,7 +81,7 @@ interface AdaptiveToolResult {
 }
 
 interface AdaptiveToolExecution {
-  evidence: Array<{ path: string; content: string }>;
+  evidence: ContextFile[];
   success: boolean;
   output: string;
   approval?: ToolApprovalStatus;
@@ -325,7 +326,11 @@ export class Agent {
         files: [],
         indexSummary: "",
         evidence: [],
-        parts: selectedContext
+        parts: chunkContextParts(
+          selectedContext,
+          adaptiveLimits.maxFileChars,
+          adaptiveLimits.maxChars
+        )
       };
       const backendRequest: AdaptiveAIRequest = {
         action: requestAction,
@@ -549,27 +554,32 @@ export class Agent {
         accessToken,
         summary.kind as "file" | "selection" | "attachment"
       );
-      const remaining = maxChars - chars;
-      const content = evidence.content.slice(0, Math.max(0, remaining));
-      if (!content) {
-        continue;
-      }
-      chars += content.length;
-
-      if (summary.kind === "file") {
-        files.push({
-          path: evidence.path,
-          content
-        });
-      } else {
-        parts.push({
+      const chunks = chunkContextParts(
+        [{
           kind: summary.kind as ContextPart["kind"],
           path: evidence.path,
-          content,
+          content: evidence.content,
           language: evidence.language ?? "",
           startLine: evidence.start_line,
           endLine: evidence.end_line
-        });
+        }],
+        adaptiveLimits.maxFileChars,
+        maxChars - chars
+      );
+
+      for (const chunk of chunks) {
+        if (files.length + parts.length >= maxFiles) {
+          break;
+        }
+        chars += Buffer.byteLength(chunk.content, "utf8");
+        if (summary.kind === "file") {
+          files.push({
+            path: chunk.path,
+            content: chunk.content
+          });
+        } else {
+          parts.push(chunk);
+        }
       }
     }
 
@@ -1626,10 +1636,13 @@ export class Agent {
               existingIndex
             ],
 
+            ...item,
+            path: normalizedPath,
             content
           };
 
           deltaContextFiles.push({
+            ...item,
             path: normalizedPath,
             content
           });
@@ -1674,14 +1687,13 @@ export class Agent {
         // ----------------------------------------------------
 
         context.files.push({
-
-          path:
-            normalizedPath,
-
+          ...item,
+          path: normalizedPath,
           content
         });
 
         deltaContextFiles.push({
+          ...item,
           path: normalizedPath,
           content
         });
@@ -2366,10 +2378,7 @@ export class Agent {
     offset:
       number
   ): Promise<{
-    evidence: Array<{
-      path: string;
-      content: string;
-    }>;
+    evidence: ContextFile[];
     nextOffset: number;
     chars: number;
     hasMore: boolean;
@@ -2452,7 +2461,15 @@ export class Agent {
       return {
         evidence: [{
           path: normalizedPath,
-          content: chunk
+          content: chunk,
+          byteStart: Buffer.byteLength(content.slice(0, safeOffset), "utf8"),
+          byteEnd: Buffer.byteLength(content.slice(0, nextOffset), "utf8"),
+          totalBytes: Buffer.byteLength(content, "utf8"),
+          hasMore: nextOffset < content.length,
+          startLine: content.slice(0, safeOffset).split("\n").length,
+          endLine: content.slice(0, safeOffset).split("\n").length +
+            chunk.split("\n").length -
+            (chunk.endsWith("\n") ? 2 : 1)
         }],
         nextOffset,
         chars: chunk.length,

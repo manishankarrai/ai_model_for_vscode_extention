@@ -96,6 +96,14 @@ export interface SearchResult {
 export interface ContextFile {
   path: string;
   content: string;
+  chunkIndex?: number;
+  chunkCount?: number;
+  byteStart?: number;
+  byteEnd?: number;
+  totalBytes?: number;
+  hasMore?: boolean;
+  startLine?: number;
+  endLine?: number;
 }
 export interface ContextEvidence {
 
@@ -136,6 +144,12 @@ export interface ContextPart {
   language: string;
   startLine?: number;
   endLine?: number;
+  chunkIndex?: number;
+  chunkCount?: number;
+  byteStart?: number;
+  byteEnd?: number;
+  totalBytes?: number;
+  hasMore?: boolean;
 }
 
 export interface ProjectContext {

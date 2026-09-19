@@ -2,9 +2,29 @@ import { flow } from "../utils/flowLog.ts";
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { resolveRequestContext, selectRankedFiles } from "./contextSelection.ts";
+import {
+  chunkContextParts,
+  resolveRequestContext,
+  selectRankedFiles
+} from "./contextSelection.ts";
 
 describe("context selection", () => {
+  it("chunks large context parts within byte and total limits", () => {
+    const chunks = chunkContextParts([{
+      kind: "attachment",
+      path: "src/large.ts",
+      content: "😀".repeat(20_000),
+      language: "typescript"
+    }], 48_000, 96_000);
+
+    assert.equal(chunks.length, 2);
+    assert.ok(chunks.every((chunk) => Buffer.byteLength(chunk.content, "utf8") <= 48_000));
+    assert.equal(
+      chunks.reduce((total, chunk) => total + Buffer.byteLength(chunk.content, "utf8"), 0),
+      80_000
+    );
+  });
+
   it("keeps Ask mode limited to explicit parts", () => {
     flow("contextSelection.test.askMode", 1, "enter");
     const context = resolveRequestContext({
