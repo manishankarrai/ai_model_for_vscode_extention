@@ -2,6 +2,10 @@ import * as vscode from "vscode";
 
 import { flow } from "../utils/flowLog";
 import { formatConnectError, formatUserFacingError } from "./userFacingError";
+import {
+  AgentEventStreamHttpError,
+  streamAgentEvents as readAgentEventStream
+} from "./agentEventStream";
 
 import {
   AIRequest,
@@ -131,6 +135,14 @@ export interface AgentTaskStateResponse {
     path: string;
     step: number;
     chars: number;
+    chunkIndex?: number;
+    chunkCount?: number;
+    byteStart?: number;
+    byteEnd?: number;
+    totalBytes?: number;
+    hasMore?: boolean;
+    startLine?: number;
+    endLine?: number;
     updated_at: string;
   }>;
 }
@@ -156,6 +168,12 @@ export interface AgentTaskEvidenceRecord {
   language?: string;
   start_line?: number;
   end_line?: number;
+  chunkIndex?: number;
+  chunkCount?: number;
+  byteStart?: number;
+  byteEnd?: number;
+  totalBytes?: number;
+  hasMore?: boolean;
   step: number;
   chars: number;
   updated_at: string;
@@ -283,10 +301,16 @@ export class BackendClient {
     requestId: string,
     path: string,
     accessToken: string,
-    kind: AgentTaskEvidenceRecord["kind"] = "file"
+    kind: AgentTaskEvidenceRecord["kind"] = "file",
+    byteStart?: number,
+    byteEnd?: number
   ): Promise<AgentTaskEvidenceRecord> {
     flow("BackendClient.getAgentTaskEvidence", 1, "enter", { requestId, path, kind });
     const query = new URLSearchParams({ path, kind });
+    if (byteStart !== undefined && byteEnd !== undefined) {
+      query.set("byteStart", String(byteStart));
+      query.set("byteEnd", String(byteEnd));
+    }
     return this.get<AgentTaskEvidenceRecord>(
       `/api/v1/agent/tasks/${encodeURIComponent(requestId)}/evidence?${query.toString()}`,
       accessToken
@@ -371,46 +395,21 @@ export class BackendClient {
     signal?: AbortSignal
   ): Promise<void> {
     flow("BackendClient.streamAgentEvents", 1, "enter", { requestId });
-    const response = await fetch(
-      `${this.backendUrl}/api/v1/ai/events?request_id=${encodeURIComponent(requestId)}`,
-      {
-        headers: { Authorization: `Bearer ${accessToken}` },
-        signal
-      }
-    );
-
-    if (!response.ok || !response.body) {
-      throw this.toBackendError(
-        response.status,
-        `Unable to open agent event stream (${response.status}).`
-      );
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
     try {
-      while (true) {
-        const chunk = await reader.read();
-        if (chunk.done) {
-          break;
-        }
-        buffer += decoder.decode(chunk.value, { stream: true });
-        const frames = buffer.split("\n\n");
-        buffer = frames.pop() ?? "";
-        for (const frame of frames) {
-          const data = frame
-            .split("\n")
-            .find((line) => line.startsWith("data: "));
-          if (data) {
-            // data is send furthur 
-            onEvent(JSON.parse(data.slice(6)) as AgentEvent);
-          }
-        }
+      await readAgentEventStream({
+        url: `${this.backendUrl}/api/v1/ai/events?request_id=${encodeURIComponent(requestId)}`,
+        accessToken,
+        onEvent,
+        signal
+      });
+    } catch (error) {
+      if (error instanceof AgentEventStreamHttpError) {
+        throw this.toBackendError(
+          error.status,
+          `Unable to open agent event stream (${error.status}).`
+        );
       }
-    } finally {
-      reader.releaseLock();
+      throw error;
     }
   }
 

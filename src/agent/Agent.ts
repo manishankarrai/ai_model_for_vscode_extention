@@ -552,20 +552,28 @@ export class Agent {
         taskState.task.request_id,
         summary.path,
         accessToken,
-        summary.kind as "file" | "selection" | "attachment"
+        summary.kind as "file" | "selection" | "attachment",
+        summary.byteStart,
+        summary.byteEnd
       );
-      const chunks = chunkContextParts(
-        [{
-          kind: summary.kind as ContextPart["kind"],
-          path: evidence.path,
-          content: evidence.content,
-          language: evidence.language ?? "",
-          startLine: evidence.start_line,
-          endLine: evidence.end_line
-        }],
-        adaptiveLimits.maxFileChars,
-        maxChars - chars
-      );
+      const recoveredPart: ContextPart = {
+        kind: summary.kind as ContextPart["kind"],
+        path: evidence.path,
+        content: evidence.content,
+        language: evidence.language ?? "",
+        startLine: evidence.start_line,
+        endLine: evidence.end_line,
+        chunkIndex: evidence.chunkIndex,
+        chunkCount: evidence.chunkCount,
+        byteStart: evidence.byteStart,
+        byteEnd: evidence.byteEnd,
+        totalBytes: evidence.totalBytes,
+        hasMore: evidence.hasMore
+      };
+      const recoveredBytes = Buffer.byteLength(recoveredPart.content, "utf8");
+      const chunks = recoveredBytes <= adaptiveLimits.maxFileChars && recoveredBytes <= maxChars - chars
+        ? [recoveredPart]
+        : chunkContextParts([recoveredPart], adaptiveLimits.maxFileChars, maxChars - chars);
 
       for (const chunk of chunks) {
         if (files.length + parts.length >= maxFiles) {
@@ -574,6 +582,7 @@ export class Agent {
         chars += Buffer.byteLength(chunk.content, "utf8");
         if (summary.kind === "file") {
           files.push({
+            ...chunk,
             path: chunk.path,
             content: chunk.content
           });
@@ -845,10 +854,7 @@ export class Agent {
       context = this.mergeAdaptiveEvidence(context, resumed.evidence);
       reasoningContext = {
         ...context,
-        files: resumed.evidence.map(item => ({
-          path: item.path,
-          content: item.content
-        }))
+        files: context.files
       };
       request = {
         ...request,
@@ -1520,9 +1526,6 @@ export class Agent {
 
       let addedFiles = 0;
 
-      const deltaContextFiles: ContextFile[] = [];
-
-
       for (
         const item of evidence
       ) {
@@ -1607,11 +1610,13 @@ export class Agent {
         // Check if file already exists in context.
         // ----------------------------------------------------
 
-        const existingIndex =
-          context.files.findIndex(
-            (file: any) =>
-              file.path ===
-              normalizedPath
+          const evidenceKey = this.contextFileKey({
+            ...item,
+            path: normalizedPath,
+            content
+          });
+          const existingIndex = context.files.findIndex(
+            (file: ContextFile) => this.contextFileKey(file) === evidenceKey
           );
 
 
@@ -1624,9 +1629,7 @@ export class Agent {
         // evidence budget because Gemini receives it again.
         // ----------------------------------------------------
 
-        if (
-          existingIndex >= 0
-        ) {
+        if (existingIndex >= 0) {
 
           context.files[
             existingIndex
@@ -1640,13 +1643,6 @@ export class Agent {
             path: normalizedPath,
             content
           };
-
-          deltaContextFiles.push({
-            ...item,
-            path: normalizedPath,
-            content
-          });
-
 
           const accepted =
             this.addEvidenceChars(
@@ -1669,10 +1665,10 @@ export class Agent {
         // Respect InvestigationState maxFiles.
         // ----------------------------------------------------
 
-        if (
-          state.investigatedCount >=
-          state.maxFiles
-        ) {
+        const pathAlreadyInvestigated = context.files.some(
+          (file: ContextFile) => file.path === normalizedPath
+        );
+        if (!pathAlreadyInvestigated && state.investigatedCount >= state.maxFiles) {
 
           state.stop(
             "max_files"
@@ -1692,16 +1688,9 @@ export class Agent {
           content
         });
 
-        deltaContextFiles.push({
-          ...item,
-          path: normalizedPath,
-          content
-        });
-
-
-        state.markInvestigated(
-          normalizedPath
-        );
+        if (!pathAlreadyInvestigated) {
+          state.markInvestigated(normalizedPath);
+        }
 
 
         const accepted =
@@ -1732,7 +1721,7 @@ export class Agent {
 
       reasoningContext = {
         ...context,
-        files: deltaContextFiles
+        files: context.files
       };
 
 
@@ -1815,7 +1804,7 @@ export class Agent {
         ...request,
 
         context: {
-          files: deltaContextFiles,
+          files: context.files,
           indexSummary: context.indexSummary,
           evidence: []
         },
@@ -1881,24 +1870,29 @@ export class Agent {
 
   private mergeAdaptiveEvidence(
     context: AIContext,
-    evidence: Array<{ path: string; content: string }>
+    evidence: ContextFile[]
   ): AIContext {
     const files = [...context.files];
-    const existing = new Set(files.map((file) => file.path));
+    const existing = new Set(files.map((file) => this.contextFileKey(file)));
     for (const item of evidence) {
-      if (!item.path || existing.has(item.path)) {
+      const key = this.contextFileKey(item);
+      if (!item.path || existing.has(key)) {
         continue;
       }
-      files.push({
-        path: item.path,
-        content: item.content
-      });
-      existing.add(item.path);
+      files.push(item);
+      existing.add(key);
     }
     return {
       ...context,
       files
     };
+  }
+
+  private contextFileKey(file: ContextFile): string {
+    const range = file.byteStart !== undefined || file.byteEnd !== undefined
+      ? `${file.byteStart ?? 0}:${file.byteEnd ?? file.content.length}`
+      : "full";
+    return `${file.path}:${range}`;
   }
 
   private addEvidenceChars(
@@ -2462,6 +2456,8 @@ export class Agent {
         evidence: [{
           path: normalizedPath,
           content: chunk,
+          chunkIndex: Math.floor(safeOffset / ADAPTIVE_MAX_FILE_CHARS) + 1,
+          chunkCount: Math.ceil(content.length / ADAPTIVE_MAX_FILE_CHARS),
           byteStart: Buffer.byteLength(content.slice(0, safeOffset), "utf8"),
           byteEnd: Buffer.byteLength(content.slice(0, nextOffset), "utf8"),
           totalBytes: Buffer.byteLength(content, "utf8"),
