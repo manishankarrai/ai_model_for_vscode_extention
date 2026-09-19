@@ -7,10 +7,10 @@ export const adaptiveLimits = {
   maxToolCalls: 2_000,
   maxSearchResults: 400,
   maxListFiles: 2_000,
-  maxFileChars: 24_000,
+  maxFileChars: 48_000,
   limitExpansionFactor: 2,
   maxToolResultsPerDecision: 100,
-  maxToolOutputChars: 24_000,
+  maxToolOutputChars: 48_000,
   maxCommandChars: 16_000,
   maxCommandArgs: 200
 } as const;
