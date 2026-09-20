@@ -14,10 +14,9 @@ The VS Code extension builds local project intelligence and enforces safety. The
 - View citations, quoted code, validation checks, confidence, and proposed diffs.
 - Review, accept, reject, or roll back approved file changes.
 - Choose specialist agents for exploration, bugs, reviews, architecture, implementation, testing, or project memory.
-- Use AI models from supported providers such as OpenAI, Claude, Gemini, Grok, and DeepSeek.
 ## Preview
 ![MM3 AI Agent Insert Token](https://api.mm3ai.com/assets/9584332c106dbd40e0707a01c362f058.png)
-![MM3 AI Agent preview](https://api.mm3ai.com/assets/d74ac48adebf6d102c422130f7c0ae68.png)
+![MM3 AI Agent preview](https://api.mm3ai.com/assets/635777d9ec0f060eae2b52135259ecd7.png)
 ## Safety And Privacy
 
 - The backend does not receive direct filesystem or terminal access.
@@ -42,17 +41,6 @@ AI requests use MM3 credits. Plans and available models are managed through your
 ## Review Changes
 
 When Agent mode proposes file changes, MM3 shows a review panel with the affected files and diffs. Review each file before accepting it. You can reject individual files, accept all reviewed files, or use **MM3: Roll Back Last Approved Changes**.
-
-## Configuration
-
-Open **Settings** and search for `MM3`.
-
-| Setting | Description | Default |
-| --- | --- | --- |
-| `mm3.maxContextChars` | Maximum source context sent to the backend | `300000` |
-| `mm3.maxFilesInContext` | Maximum files included in a request | `30` |
-| `mm3.implementationRoot` | Optional workspace-relative directory to search and edit for implementation tasks | `""` |
-| `mm3.enableAutoIndex` | Build the workspace index automatically | `true` |
 
 The default URL is for local backend development. Hosted users should use the MM3 backend endpoint provided with their account.
 

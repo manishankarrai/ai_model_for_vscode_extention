@@ -770,7 +770,7 @@ export class MM3ViewProvider
     ) {
       return formatUserFacingError(
         "api",
-        "The MM3 service did not respond in time. Please try again."
+        "AI having issue, please try another version."
       );
     }
     if (
@@ -2025,8 +2025,8 @@ Describe the task, bug, or issue you want MM3 to investigate or fix.
         <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
         <button id="add-selection" class="icon-btn" type="button" title="Add selection to chat">↧</button>
         <select id="mode" aria-label="Mode">
-          <option value="agent" selected>Agent</option>
-          <option value="ask">Ask</option>
+          <option value="ask" selected>Ask</option>
+          <option value="agent">Agent</option>
         </select>
         <select id="agent-profile" aria-label="Agent">
           <option value="">Agents</option>
