@@ -425,6 +425,31 @@ export class MM3ViewProvider
         return;
       }
 
+      if (
+        mode === "agent" &&
+        /agent implementation cannot finish without a successful workspace mutation/i.test(
+          error instanceof Error ? error.message : String(error)
+        )
+      ) {
+        this.logger.info("Agent question completed without a workspace mutation", {
+          intent: "model-selected-read-only"
+        });
+        this.post({
+          type: "answer",
+          answer: "This request was treated as a question, so no files were modified. Use Ask mode for a read-only answer, or describe the code change you want Agent mode to make.",
+          usage: {
+            input_tokens: 0,
+            output_tokens: 0,
+            total_tokens: 0,
+            ai_api_calls: 0,
+            estimated_cost: 0
+          },
+          requestId: "question",
+          model: ""
+        });
+        return;
+      }
+
       this.postError(error);
       this.logger.error(
         "MM3 request failed",
@@ -762,6 +787,24 @@ export class MM3ViewProvider
         "No file was changed because Agent mode did not receive a successful workspace edit.",
         reason ? `Why it stopped: ${reason}` : "The AI ended before requesting a file change."
       ].join("\n");
+    }
+    if (/file too large|project context is too large|context is too large|request entity too large/i.test(text)) {
+      return formatUserFacingError(
+        "unexpected",
+        "This project is too large for one AI request. MM3 can work more reliably from focused files and search results; narrow the question or select the relevant area."
+      );
+    }
+    if (/invalid (?:gemini )?reasoning json|malformed reasoning|returned invalid structured response/i.test(text)) {
+      return formatUserFacingError(
+        "api",
+        "The selected AI model returned an incomplete structured response. No files were changed; try again or choose another model."
+      );
+    }
+    if (/unable to read file|workspace operation failed|access to sensitive file is blocked/i.test(text)) {
+      return formatUserFacingError(
+        "unexpected",
+        "MM3 could not read one of the requested workspace items. The rest of the request was kept safe; try a narrower file or folder."
+      );
     }
     if (
       /i\/o timeout|dial tcp|lookup |no such host|connection refused|connection reset|tls handshake timeout|client\.timeout exceeded|planning failed|adaptive reasoning failed|ECONNREFUSED|ENOTFOUND|ETIMEDOUT|unable to reach|unable to connect/i.test(
@@ -2844,12 +2887,24 @@ function addApprovalRequest(approvalId, text) {
   skip.textContent = "Skip";
 
   const finish = (decision) => {
+    if (card.dataset.resolved === "true") {
+      return;
+    }
+    card.dataset.resolved = "true";
+    card.classList.add("approval-resolved");
+    label.textContent = decision === "always_approve"
+      ? "Always approved"
+      : decision === "approve"
+        ? "Approved"
+        : "Skipped";
+    [approve, skip, alwaysApprove].forEach((button) => {
+      button.disabled = true;
+    });
     vscode.postMessage({
       type: "approval_response",
       approvalId,
       decision
     });
-    card.remove();
   };
 
   approve.addEventListener("click", () => finish("approve"));
@@ -2915,6 +2970,9 @@ function updateStreamingPanel(statusText, delta) {
   }
 
   let panel = document.getElementById("streaming-panel");
+  if (panel && panel.dataset.completed === "true") {
+    return;
+  }
   if (!panel) {
     panel = createStreamingPanel();
   }
@@ -3675,6 +3733,9 @@ window.addEventListener(
         break;
 
       case "agent_event":
+        if (composerState !== "running") {
+          break;
+        }
         if (message.event.type === "token" && message.event.delta) {
           noteStreamActivity("Writing");
           updateStreamingPanel("Writing", message.event.delta);

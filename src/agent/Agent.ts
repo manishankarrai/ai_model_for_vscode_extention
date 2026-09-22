@@ -103,6 +103,8 @@ type AdaptiveLimitHandler = (details: {
 
 interface AdaptiveDecision {
 
+  intent?: Exclude<Intent, "auto">;
+
   action:
     "FINAL_ANSWER"
     | "CONTINUE_INVESTIGATION";
@@ -170,6 +172,11 @@ type AdaptiveAIRequest =
 const ADAPTIVE_MAX_SEARCH_RESULTS = adaptiveLimits.maxSearchResults;
 
 const ADAPTIVE_MAX_LIST_FILES = adaptiveLimits.maxListFiles;
+const ADAPTIVE_MAX_MANIFEST_FILES = adaptiveLimits.ADAPTIVE_MAX_MANIFEST_FILES;
+const ADAPTIVE_MANIFEST_PAGE_CHARS =  adaptiveLimits.ADAPTIVE_MANIFEST_PAGE_CHARS;
+const ADAPTIVE_MAX_SEARCH_FILE_BYTES =  adaptiveLimits.ADAPTIVE_MAX_SEARCH_FILE_BYTES;
+const ADAPTIVE_MANIFEST_CACHE_TTL_MS = adaptiveLimits.ADAPTIVE_MANIFEST_CACHE_TTL_MS;
+const ADAPTIVE_TOOL_CONCURRENCY = adaptiveLimits.ADAPTIVE_TOOL_CONCURRENCY;
 
 const ADAPTIVE_MAX_FILE_CHARS = adaptiveLimits.maxFileChars;
 const ADAPTIVE_MAX_TOOL_OUTPUT_CHARS = adaptiveLimits.maxToolOutputChars;
@@ -186,6 +193,12 @@ export class Agent {
     new BackendClient();
 
   private lastRequest?: AdaptiveAIRequest;
+
+  private manifestCache?: {
+    workspaceKey: string;
+    content: string;
+    expiresAt: number;
+  };
 
 
   private readonly workspaceTools: WorkspaceToolRegistry;
@@ -256,8 +269,7 @@ export class Agent {
     }
 
 
-    // The action is a protocol mode for the backend, not a local intent decision.
-    const requestAction: Intent = mode === "agent" ? "implementation" : "chat";
+    const requestAction: Intent = "auto";
 
 
     const requestId =
@@ -2151,6 +2163,13 @@ export class Agent {
           state.clearPathInspectionKeys(tool.path.trim());
           readOffsets.delete(tool.path.trim());
         }
+        if (
+          result.success &&
+          ["edit_file", "write_file", "create_file", "delete_file", "rename_file", "move_file", "apply_change_set", "apply_patch"].includes(tool.tool)
+        ) {
+          this.manifestCache = undefined;
+          readOffsets.delete("m3-tools/workspace-files.txt");
+        }
         const target = tool.targetPath ?? tool.target_path;
         if (result.success && (tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
           state.clearPathInspectionKeys(target.trim());
@@ -2190,7 +2209,16 @@ export class Agent {
 
     const parallel = tools.filter(tool => readOnlyTools.has(tool.tool));
     const ordered = tools.filter(tool => !readOnlyTools.has(tool.tool));
-    await Promise.all(parallel.map(tool => executeOne(tool)));
+    const workerCount = Math.min(ADAPTIVE_TOOL_CONCURRENCY, parallel.length);
+    let nextParallelIndex = 0;
+    await Promise.all(
+      Array.from({ length: workerCount }, async () => {
+        while (nextParallelIndex < parallel.length) {
+          const tool = parallel[nextParallelIndex++];
+          await executeOne(tool);
+        }
+      })
+    );
     for (const tool of ordered) {
       await executeOne(tool);
     }
@@ -2258,11 +2286,9 @@ export class Agent {
       const offset = Number.isInteger(tool.offset) && tool.offset! >= 0
         ? tool.offset!
         : readOffsets.get(normalizedPath) ?? 0;
-      const read = await this.executeAdaptiveReadFile(
-        tool.path!,
-        workspaceUri,
-        offset
-      );
+      const read = normalizedPath === "m3-tools/workspace-files.txt"
+        ? await this.executeAdaptiveManifestPage(workspaceUri, offset)
+        : await this.executeAdaptiveReadFile(tool.path!, workspaceUri, offset);
       if (read.hasMore) {
         readOffsets.set(normalizedPath, read.nextOffset);
       } else {
@@ -2304,13 +2330,26 @@ export class Agent {
       "list_files"
     ) {
 
-      const evidence = await this.executeAdaptiveListFiles(
-        workspaceUri
+      const manifestPath = "m3-tools/workspace-files.txt";
+      const offset = readOffsets.get(manifestPath) ?? 0;
+      const read = await this.executeAdaptiveManifestPage(workspaceUri, offset);
+      if (read.hasMore) {
+        readOffsets.set(manifestPath, read.nextOffset);
+      } else {
+        readOffsets.delete(manifestPath);
+      }
+      const chunkStatus = read.hasMore
+        ? `\n[list_files page offset=${offset} chars=${read.chars}; more paths are available. Request list_files again to continue.]`
+        : `\n[list_files complete offset=${offset} chars=${read.chars}]`;
+      const availableOutputChars = Math.max(
+        0,
+        ADAPTIVE_MAX_TOOL_OUTPUT_CHARS - chunkStatus.length
       );
+      const output = read.evidence.map(item => item.content).join("\n\n");
       return {
-        evidence,
+        evidence: read.evidence,
         success: true,
-        output: this.capAdaptiveOutput(evidence.map(item => item.content).filter(Boolean).join("\n\n"))
+        output: output.slice(0, availableOutputChars) + chunkStatus
       };
     }
 
@@ -2508,15 +2547,15 @@ export class Agent {
   }>> {
     flow("Agent.executeAdaptiveSearch", 1, "enter", { query });
 
-    const searchResults: Array<{ path: string }> = [];
+    const evidence: Array<{ path: string; content: string }> = [];
     const uris = await vscode.workspace.findFiles(
       new vscode.RelativePattern(workspaceUri, "**/*"),
       "**/{node_modules,.git,dist,build,out,coverage}/**",
-      ADAPTIVE_MAX_LIST_FILES
+      ADAPTIVE_MAX_MANIFEST_FILES
     );
     const needle = query.toLowerCase();
     for (const uri of uris) {
-      if (searchResults.length >= ADAPTIVE_MAX_SEARCH_RESULTS) {
+      if (evidence.length >= ADAPTIVE_MAX_SEARCH_RESULTS) {
         break;
       }
       const path = this.normalizeRelativePath(
@@ -2526,11 +2565,19 @@ export class Agent {
         continue;
       }
       try {
+        const stat = await vscode.workspace.fs.stat(uri);
+        if (stat.size > ADAPTIVE_MAX_SEARCH_FILE_BYTES) {
+          continue;
+        }
         const content = Buffer.from(
           await vscode.workspace.fs.readFile(uri)
         ).toString("utf8");
-        if (content.toLowerCase().includes(needle)) {
-          searchResults.push({ path });
+        const matchIndex = content.toLowerCase().indexOf(needle);
+        if (matchIndex >= 0) {
+          evidence.push({
+            path,
+            content: this.createSearchSnippet(content, matchIndex)
+          });
         }
       } catch {
         // Ignore unreadable files and continue the requested search.
@@ -2543,99 +2590,9 @@ export class Agent {
       {
         query,
 
-        results:
-          searchResults.length
+        results: evidence.length
       }
     );
-
-
-    const results =
-      searchResults.slice(
-        0,
-        ADAPTIVE_MAX_SEARCH_RESULTS
-      );
-
-
-    const evidence:
-      Array<{
-        path: string;
-        content: string;
-      }> = [];
-
-
-    const seen =
-      new Set<string>();
-
-
-    for (
-      const result of results
-    ) {
-
-      const normalizedPath =
-        this.normalizeRelativePath(
-          result.path
-        );
-
-
-      if (!normalizedPath) {
-        continue;
-      }
-
-
-      if (
-        seen.has(
-          normalizedPath
-        )
-      ) {
-        continue;
-      }
-
-
-      seen.add(
-        normalizedPath
-      );
-
-
-      if (
-        this.isSensitivePath(
-          normalizedPath
-        )
-      ) {
-        continue;
-      }
-
-
-      try {
-
-        const content = Buffer.from(
-          await vscode.workspace.fs.readFile(
-            vscode.Uri.joinPath(workspaceUri, ...normalizedPath.split("/"))
-          )
-        ).toString("utf8");
-        const matchIndex = content.toLowerCase().indexOf(needle);
-        if (matchIndex >= 0) {
-          evidence.push({
-            path: normalizedPath,
-            content: this.createSearchSnippet(content, matchIndex)
-          });
-        }
-
-
-      } catch (error) {
-
-        this.logger.info(
-          "Adaptive search result could not be read",
-          {
-            path:
-              normalizedPath,
-
-            error
-          }
-        );
-      }
-    }
-
-
     return evidence;
   }
 
@@ -2654,56 +2611,82 @@ export class Agent {
   // LOCAL LIST FILES
   // ==========================================================
 
-  private async executeAdaptiveListFiles(
+  private async executeAdaptiveManifestPage(
     workspaceUri:
       vscode.Uri
-  ): Promise<Array<{
-    path: string;
-    content: string;
-  }>> {
-    flow("Agent.executeAdaptiveListFiles", 1, "enter");
+    ,
+    offset:
+      number
+  ): Promise<{
+    evidence: ContextFile[];
+    nextOffset: number;
+    chars: number;
+    hasMore: boolean;
+  }> {
+    flow("Agent.executeAdaptiveManifestPage", 1, "enter", { offset });
 
-    const uris =
-      await vscode.workspace.findFiles(
+    const workspaceKey = workspaceUri.toString();
+    const now = Date.now();
+    const cachedManifest = this.manifestCache?.workspaceKey === workspaceKey &&
+      this.manifestCache.expiresAt > now
+      ? this.manifestCache.content
+      : undefined;
+    let manifest = cachedManifest;
+    let fileCount = 0;
+    if (manifest === undefined) {
+      const uris = await vscode.workspace.findFiles(
         "**/*",
         "**/{node_modules,.git,dist,build,out,coverage}/**",
-        ADAPTIVE_MAX_LIST_FILES
+        ADAPTIVE_MAX_MANIFEST_FILES
       );
-
-
-    const paths = uris
-      .map(uri =>
-        this.normalizeRelativePath(
-          vscode.workspace.asRelativePath(uri, false)
-        )
-      )
-      .filter(path =>
-        Boolean(path) && !this.isSensitivePath(path)
-      );
-
-    const files = paths.length === 0
-      ? []
-      : [{
-          path: "m3-tools/workspace-files.txt",
-          content: paths.join("\n")
-        }];
-
+      const paths = uris
+        .map(uri => this.normalizeRelativePath(vscode.workspace.asRelativePath(uri, false)))
+        .filter(path => Boolean(path) && !this.isSensitivePath(path));
+      manifest = paths.join("\n");
+      fileCount = paths.length;
+      this.manifestCache = {
+        workspaceKey,
+        content: manifest,
+        expiresAt: now + ADAPTIVE_MANIFEST_CACHE_TTL_MS
+      };
+    }
+    const safeOffset = Math.min(Math.max(0, offset), manifest.length);
+    const content = manifest.slice(
+      safeOffset,
+      safeOffset + ADAPTIVE_MANIFEST_PAGE_CHARS
+    );
+    const nextOffset = safeOffset + content.length;
+    const hasMore = nextOffset < manifest.length;
 
     this.logger.info(
-      "Adaptive list_files completed",
+      "Adaptive manifest page completed",
       {
-        files:
-          paths.length,
-
-        manifestChars:
-          files[0]?.content.length ?? 0
+        files: fileCount,
+        offset: safeOffset,
+        chars: content.length,
+        manifestChars: manifest.length,
+        hasMore
       }
     );
 
-
-    return files;
+    return {
+      evidence: content
+        ? [{
+            path: "m3-tools/workspace-files.txt",
+            content,
+            chunkIndex: Math.floor(safeOffset / ADAPTIVE_MANIFEST_PAGE_CHARS) + 1,
+            chunkCount: Math.ceil(manifest.length / ADAPTIVE_MANIFEST_PAGE_CHARS),
+            byteStart: Buffer.byteLength(manifest.slice(0, safeOffset), "utf8"),
+            byteEnd: Buffer.byteLength(manifest.slice(0, nextOffset), "utf8"),
+            totalBytes: Buffer.byteLength(manifest, "utf8"),
+            hasMore
+          }]
+        : [],
+      nextOffset,
+      chars: content.length,
+      hasMore
+    };
   }
-
 
   // ==========================================================
   // PATH NORMALIZATION

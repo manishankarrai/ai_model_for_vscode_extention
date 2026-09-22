@@ -12,5 +12,10 @@ export const adaptiveLimits = {
   maxToolResultsPerDecision: 100,
   maxToolOutputChars: 48_000,
   maxCommandChars: 16_000,
-  maxCommandArgs: 200
+  maxCommandArgs: 200 ,
+   ADAPTIVE_MAX_MANIFEST_FILES : 50_000 ,
+ ADAPTIVE_MANIFEST_PAGE_CHARS : 24_000 ,
+ ADAPTIVE_MAX_SEARCH_FILE_BYTES : 2 * 1024 * 1024 ,
+ ADAPTIVE_MANIFEST_CACHE_TTL_MS : 30_000 ,
+ ADAPTIVE_TOOL_CONCURRENCY : 4 ,
 } as const;

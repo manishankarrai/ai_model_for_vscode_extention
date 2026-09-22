@@ -1,4 +1,5 @@
 export type Intent =
+  | "auto"
   | "chat"
   | "analyze"
   | "bug_analysis"
@@ -239,6 +240,7 @@ export interface AIResponse {
   model: string;
   usage: AIUsage;
   decision?: {
+    intent?: Exclude<Intent, "auto">;
     action: AIReasoningDecision;
     answer?: string;
     confidence: number;
