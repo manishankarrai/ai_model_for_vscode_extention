@@ -2,7 +2,7 @@ export const adaptiveLimits = {
   minConfidence: 0.70,
   maxSteps: 2_000,
   maxFiles: 2_000,
-  maxChars: 600_000,
+  maxChars: 180_000,
   maxAICalls: 250,
   maxToolCalls: 2_000,
   maxSearchResults: 400,

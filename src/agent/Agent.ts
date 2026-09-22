@@ -549,8 +549,14 @@ export class Agent {
     accessToken: string
   ): Promise<AIContext> {
     const budget = taskState.task.budget;
-    const maxFiles = budget?.max_files ?? taskState.evidence.length;
-    const maxChars = budget?.max_context_chars ?? Number.MAX_SAFE_INTEGER;
+    const maxFiles = Math.min(
+      budget?.max_files ?? taskState.evidence.length,
+      adaptiveLimits.maxFiles
+    );
+    const maxChars = Math.min(
+      budget?.max_context_chars ?? adaptiveLimits.maxChars,
+      adaptiveLimits.maxChars
+    );
     const files: ContextFile[] = [];
     const parts: ContextPart[] = [];
     let chars = 0;
@@ -789,7 +795,10 @@ export class Agent {
       new InvestigationState({
         maxSteps: task.budget?.max_steps,
         maxFiles: task.budget?.max_files,
-        maxChars: task.budget?.max_context_chars,
+        maxChars: Math.min(
+          task.budget?.max_context_chars ?? adaptiveLimits.maxChars,
+          adaptiveLimits.maxChars
+        ),
         maxAICalls: task.budget?.max_ai_calls,
         maxToolCalls: task.budget?.max_tool_calls
       });
