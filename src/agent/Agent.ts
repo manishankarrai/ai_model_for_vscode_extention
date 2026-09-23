@@ -42,7 +42,11 @@ import type {
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { adaptiveLimits } from "../config/adaptiveLimits";
 import { chunkContextParts } from "../intelligence/contextSelection";
+import { budgetContext } from "../intelligence/contextBudget";
 import { readBoundedTextChunk } from "./adaptiveRead";
+import { ProjectScanner } from "../project/ProjectScanner";
+import { RepositoryRetrieval } from "../project/RepositoryRetrieval";
+import { createRetrievalPlan, formatRetrievalPlan } from "../intelligence/progressiveRetrieval";
 
 
 import { flow } from "../utils/flowLog";
@@ -65,6 +69,7 @@ interface AdaptiveToolRequest {
   targetPath?: string;
   target_path?: string;
   query?: string;
+  symbol?: string;
   command?: string;
   content?: string;
   original?: string;
@@ -209,6 +214,9 @@ export class Agent {
 
   private readonly workspaceTools: WorkspaceToolRegistry;
 
+  private readonly projectScanner: ProjectScanner;
+  private readonly repositoryRetrieval: RepositoryRetrieval;
+
 
   constructor(
     private readonly conversation:
@@ -225,8 +233,16 @@ export class Agent {
   ) {
     flow("Agent.constructor", 1, "enter");
 
+    this.projectScanner = new ProjectScanner(taskStorage);
+    this.repositoryRetrieval = new RepositoryRetrieval(taskStorage);
+
     this.workspaceTools =
-      new WorkspaceToolRegistry(changeApplier, taskStorage);
+      new WorkspaceToolRegistry(changeApplier, taskStorage, this.repositoryRetrieval);
+  }
+
+  invalidateProjectPath(filePath: string): void {
+    this.projectScanner.invalidatePath(filePath);
+    this.repositoryRetrieval.invalidatePath(filePath);
   }
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
@@ -281,6 +297,8 @@ export class Agent {
         "Question cannot be empty."
       );
     }
+
+    const projectIndex = await this.projectScanner.scan(workspace.uri.fsPath);
 
 
     const requestAction: Intent = "auto";
@@ -348,10 +366,33 @@ export class Agent {
       // Start with explicit user context; the backend requests any further tools.
       // ======================================================
 
+      const retrievalPlan = createRetrievalPlan(
+        requestAction,
+        question,
+        this.getConfiguredImplementationRoot()
+      );
       const initialContext: AIContext = {
         files: [],
-        indexSummary: "",
+        indexSummary: [
+          projectIndex.summary,
+          formatRetrievalPlan(createRetrievalPlan(
+            requestAction,
+            question,
+            this.getConfiguredImplementationRoot()
+          ))
+        ].filter(Boolean).join("\n\n"),
         evidence: [],
+        orchestration: {
+          version: 1,
+          intent: retrievalPlan.intent,
+          phases: retrievalPlan.phases,
+          stopConditions: retrievalPlan.stopConditions
+        },
+        taskMemory: {
+          findings: [],
+          openQuestions: [],
+          verification: { required: mode === "agent", completed: false }
+        },
         parts: chunkContextParts(
           selectedContext,
           adaptiveLimits.maxFileChars,
@@ -371,7 +412,7 @@ export class Agent {
         project: {
           id: this.createProjectId(workspace.uri),
           name: workspace.name,
-          indexVersion: 0,
+          indexVersion: projectIndex.indexVersion,
           targetPath: this.getConfiguredImplementationRoot()
         },
         context: initialContext,
@@ -500,6 +541,11 @@ export class Agent {
     }
 
     const context = await this.loadTaskContext(taskState, accessToken);
+    const retrievalPlan = createRetrievalPlan(
+      taskState.task.action,
+      taskState.task.question,
+      taskState.task.project.targetPath
+    );
     const initialRequest: AdaptiveAIRequest = {
       ...(reusableRequest ?? {
         action: taskState.task.action,
@@ -512,7 +558,31 @@ export class Agent {
         plan: taskState.task.plan ?? [],
       }),
       project: taskState.task.project,
-      context,
+      context: {
+        ...context,
+        indexSummary: [
+          context.indexSummary,
+          formatRetrievalPlan(createRetrievalPlan(
+            taskState.task.action,
+            taskState.task.question,
+            taskState.task.project.targetPath
+          ))
+        ].filter(Boolean).join("\n\n"),
+        orchestration: {
+          version: 1,
+          intent: retrievalPlan.intent,
+          phases: retrievalPlan.phases,
+          stopConditions: retrievalPlan.stopConditions
+        },
+        taskMemory: {
+          findings: taskState.task.task_memory?.findings ?? [],
+          openQuestions: taskState.task.task_memory?.openQuestions ?? [],
+          verification: taskState.task.task_memory?.verification ?? {
+            required: taskState.task.mode === "agent",
+            completed: false
+          }
+        }
+      },
       tool_results: undefined
     };
     this.lastRequest = initialRequest;
@@ -628,7 +698,9 @@ export class Agent {
       files,
       indexSummary: "",
       evidence: [],
-      parts
+      parts,
+      orchestration: taskState.task.orchestration,
+      taskMemory: taskState.task.task_memory
     };
   }
 
@@ -649,16 +721,8 @@ export class Agent {
       return;
     }
 
-    const requestedTools = [
-      ...(decision.tools ?? []).map((tool) => tool.tool),
-      ...(decision.tool ? [decision.tool.tool] : [])
-    ].join(", ");
-    const summary = [
-      "Adaptive assistant decision: CONTINUE_INVESTIGATION.",
-      decision.reason ? `Reason: ${decision.reason}` : "",
-      requestedTools ? `Requested tools: ${requestedTools}` : ""
-    ].filter(Boolean).join("\n");
-    this.conversation.addAssistantMessage(summary);
+    // Intermediate decisions are internal control flow. Only the final answer
+    // belongs in the conversation shown to the user.
   }
 
   private emitProgress(
@@ -666,6 +730,9 @@ export class Agent {
     profile: AgentProfile,
     message: string
   ): void {
+    if (!this.isImportantUserProgress(message)) {
+      return;
+    }
     onEvent?.({
       profile,
       type: "progress",
@@ -687,6 +754,9 @@ export class Agent {
     profile: AgentProfile,
     message: string
   ): void {
+    if (!this.isImportantUserProgress(message)) {
+      return;
+    }
     const compact = this.compactInvestigationText(message);
     if (!compact) {
       return;
@@ -699,14 +769,21 @@ export class Agent {
     });
   }
 
+  private isImportantUserProgress(message: string): boolean {
+    return /starting backend investigation|thinking with ai|preparing the final answer|validation reported an error|workspace operation was incomplete|continuing investigation with|change applied|completed|failed|stopped/i.test(message);
+  }
+
   private buildInvestigationSummary(
     entries: string[],
     state: InvestigationState
   ): string {
-    const uniqueEntries = [...new Set(entries.filter(Boolean))].slice(-12);
+    const importantEntries = entries.filter((entry) =>
+      /validation|failed|error|mutation|change applied|file changed|completed successfully/i.test(entry)
+    );
+    const uniqueEntries = [...new Set(importantEntries)].slice(-6);
     const lines = uniqueEntries.length > 0
       ? uniqueEntries.map((entry) => `- ${entry}`)
-      : ["- Reviewed the available project context and completed the requested reasoning."];
+      : ["- Completed the requested investigation using the relevant workspace evidence."];
     lines.push(`- Investigation completed after ${state.steps} step(s), ${state.aiCalls} AI call(s), and ${state.toolCalls} tool call(s).`);
     return [
       "## Investigation Summary",
@@ -731,7 +808,7 @@ export class Agent {
       return undefined;
     }
     const match = message.match(
-      /\b(read_file|search|list_files|get_diagnostics|git_status|git_diff|edit_file|write_file|create_file|delete_file|move_file|rename_file|apply_change_set|apply_patch|run_command|run_task|run_tests)\b/i
+      /\b(read_file|read_file_range|read_symbol|search|search_symbols|list_files|find_definition|find_references|find_callers|find_callees|get_file_summary|get_project_summary|get_diagnostics|git_status|git_diff|edit_file|write_file|create_file|delete_file|move_file|rename_file|apply_change_set|apply_patch|run_command|run_task|run_tests)\b/i
     );
     return match?.[1];
   }
@@ -1061,11 +1138,18 @@ export class Agent {
       // PREPARE REQUEST
       // ======================================================
 
+      const budgetedContext = budgetContext(reasoningContext, {
+        maxTokens: adaptiveLimits.maxContextTokens,
+        reservedTokens: adaptiveLimits.reservedContextTokens,
+        outputTokens: adaptiveLimits.reservedOutputTokens,
+        exactPaths: (reasoningContext.parts ?? []).map((part: ContextPart) => part.path)
+      });
+
       request = {
 
         ...request,
 
-        context: reasoningContext,
+        context: budgetedContext.context,
 
         step:
           currentStep
@@ -1112,7 +1196,13 @@ export class Agent {
             request.context.files.length + requestContextParts.length,
 
           contextChars:
-            requestContextChars
+            requestContextChars,
+
+          estimatedContextTokens:
+            budgetedContext.estimatedTokens,
+
+          omittedContextFiles:
+            budgetedContext.omittedFiles.length
         }
       );
 
@@ -2116,8 +2206,17 @@ export class Agent {
   }> {
     const readOnlyTools = new Set<AdaptiveToolName>([
       "read_file",
+      "read_file_range",
+      "read_symbol",
       "search",
+      "search_symbols",
       "list_files",
+      "find_definition",
+      "find_references",
+      "find_callers",
+      "find_callees",
+      "get_file_summary",
+      "get_project_summary",
       "get_diagnostics",
       "git_status",
       "git_diff"
@@ -2274,6 +2373,21 @@ export class Agent {
     switch (tool.tool) {
       case "read_file":
         return `Reading ${target}.`;
+      case "read_file_range":
+        return `Reading a bounded range from ${target}.`;
+      case "read_symbol":
+        return `Reading symbol ${tool.symbol || tool.query || "the requested symbol"}.`;
+      case "search_symbols":
+        return `Searching symbols for ${tool.query || "the requested name"}.`;
+      case "find_definition":
+      case "find_references":
+      case "find_callers":
+      case "find_callees":
+        return `Finding ${tool.tool.replace("find_", "")} for ${tool.symbol || tool.query || "the requested symbol"}.`;
+      case "get_file_summary":
+        return `Summarizing ${target}.`;
+      case "get_project_summary":
+        return "Summarizing the indexed project.";
       case "search":
         return `Searching for ${tool.query || "relevant code"}.`;
       case "list_files":
@@ -2413,6 +2527,7 @@ export class Agent {
         path: tool.path,
         targetPath: tool.targetPath ?? tool.target_path,
         query: tool.query,
+        symbol: tool.symbol,
         command: tool.command,
         content: tool.content,
         original: tool.original,
@@ -2620,7 +2735,17 @@ export class Agent {
   }>> {
     flow("Agent.executeAdaptiveSearch", 1, "enter", { query });
 
-    const evidence: Array<{ path: string; content: string }> = [];
+    const ranked = await this.repositoryRetrieval.search(workspaceUri.fsPath, query, ADAPTIVE_MAX_SEARCH_RESULTS);
+    const evidence: Array<{ path: string; content: string }> = ranked.map((item) => ({
+      path: item.path,
+      content: `[score=${item.score}; reason=${item.reason}; matched=${item.matchedTerms.join(", ")}]\n${item.snippet}`
+    }));
+    if (ranked.length > 0) {
+      this.logger.info("Adaptive ranked search completed", { query, results: ranked.length });
+      return evidence;
+    }
+
+    const fallbackEvidence: Array<{ path: string; content: string }> = [];
     const uris = await vscode.workspace.findFiles(
       new vscode.RelativePattern(workspaceUri, "**/*"),
       "**/{node_modules,.git,dist,build,out,coverage}/**",
@@ -2647,7 +2772,7 @@ export class Agent {
         ).toString("utf8");
         const matchIndex = content.toLowerCase().indexOf(needle);
         if (matchIndex >= 0) {
-          evidence.push({
+          fallbackEvidence.push({
             path,
             content: this.createSearchSnippet(content, matchIndex)
           });
@@ -2663,10 +2788,10 @@ export class Agent {
       {
         query,
 
-        results: evidence.length
+            results: fallbackEvidence.length
       }
     );
-    return evidence;
+    return fallbackEvidence;
   }
 
   private createSearchSnippet(content: string, matchIndex: number): string {

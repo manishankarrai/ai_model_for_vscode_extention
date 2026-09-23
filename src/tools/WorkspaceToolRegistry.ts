@@ -22,6 +22,7 @@ import {
 import { availableTools, isToolAllowed, isReadOnlyTool } from "./toolPolicy";
 import { parseSafeCommand } from "./commandPolicy";
 import { adaptiveLimits } from "../config/adaptiveLimits";
+import { RepositoryRetrieval } from "../project/RepositoryRetrieval";
 
 import { flow } from "../utils/flowLog";
 
@@ -38,7 +39,8 @@ export class WorkspaceToolRegistry {
 
   constructor(
     private readonly changeApplier = new CodeChangeApplier(),
-    private readonly approvalState?: vscode.Memento
+    private readonly approvalState?: vscode.Memento,
+    private readonly retrieval?: RepositoryRetrieval
   ) {}
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
@@ -98,6 +100,18 @@ export class WorkspaceToolRegistry {
         return this.moveFile(request.path, request.targetPath);
       case "get_diagnostics":
         return this.getDiagnostics(request.path);
+      case "search":
+        return this.executeRankedSearch(request);
+      case "read_file_range":
+      case "read_symbol":
+      case "search_symbols":
+      case "find_definition":
+      case "find_references":
+      case "find_callers":
+      case "find_callees":
+      case "get_file_summary":
+      case "get_project_summary":
+        return this.executeRetrieval(request);
       case "run_task":
         return this.runTask(request.taskName);
       case "run_command":
@@ -111,6 +125,47 @@ export class WorkspaceToolRegistry {
       default:
         throw new Error(`Tool '${request.tool}' must use the existing read-only registry.`);
     }
+  }
+
+  private async executeRetrieval(request: ToolRequest): Promise<ToolResult> {
+    if (!this.retrieval) {
+      throw new Error("Repository retrieval is not configured.");
+    }
+    const workspace = this.requireWorkspace();
+    const query = request.symbol ?? request.query ?? "";
+    const result = request.tool === "read_file_range"
+      ? await this.retrieval.readFileRange(workspace.uri.fsPath, request.path ?? "", request.startLine, request.endLine)
+      : request.tool === "read_symbol"
+        ? await this.retrieval.readSymbol(workspace.uri.fsPath, query, request.path)
+        : request.tool === "search_symbols"
+          ? await this.retrieval.searchSymbols(workspace.uri.fsPath, query)
+          : request.tool === "find_definition"
+            ? await this.retrieval.findDefinition(workspace.uri.fsPath, query)
+            : request.tool === "find_references"
+              ? await this.retrieval.findReferences(workspace.uri.fsPath, query)
+              : request.tool === "find_callers"
+                ? await this.retrieval.findCallers(workspace.uri.fsPath, query)
+                : request.tool === "find_callees"
+                  ? await this.retrieval.findCallees(workspace.uri.fsPath, query)
+                  : request.tool === "get_file_summary"
+                    ? await this.retrieval.getFileSummary(workspace.uri.fsPath, request.path ?? "")
+                    : await this.retrieval.getProjectSummary(workspace.uri.fsPath);
+    return this.result(request.tool, result.success, result.output);
+  }
+
+  private async executeRankedSearch(request: ToolRequest): Promise<ToolResult> {
+    if (!this.retrieval) {
+      throw new Error("Repository retrieval is not configured.");
+    }
+    const workspace = this.requireWorkspace();
+    const results = await this.retrieval.search(workspace.uri.fsPath, request.query ?? "");
+    return this.result(
+      "search",
+      true,
+      results.length > 0
+        ? results.map((item) => `${item.path} score=${item.score} reason=${item.reason}\n${item.snippet}`).join("\n\n")
+        : `No results matched '${request.query ?? ""}'.`
+    );
   }
 
   private async applyChanges(request: ToolRequest): Promise<ToolResult> {

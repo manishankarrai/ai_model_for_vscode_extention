@@ -397,6 +397,9 @@ export class MM3ViewProvider
           this.requestController.signal,
           (event: AgentEvent) => {
             const userEvent = this.toUserFacingAgentEvent(event);
+              if (!this.shouldShowAgentEvent(userEvent)) {
+                return;
+              }
             this.post({
               type: "agent_event",
               event: userEvent
@@ -500,6 +503,9 @@ export class MM3ViewProvider
     try {
       const onEvent = (event: AgentEvent) => {
         const userEvent = this.toUserFacingAgentEvent(event);
+        if (!this.shouldShowAgentEvent(userEvent)) {
+          return;
+        }
         this.post({
           type: "agent_event",
           event: userEvent
@@ -965,6 +971,16 @@ export class MM3ViewProvider
       return { ...event, message: this.sanitizeUserError(event.message) };
     }
     return event;
+  }
+
+  private shouldShowAgentEvent(event: AgentEvent): boolean {
+    if (["failed", "change", "citation", "done"].includes(event.type)) {
+      return true;
+    }
+    if (event.type !== "progress") {
+      return false;
+    }
+    return /starting backend investigation|thinking with ai|preparing the final answer|validation reported an error|workspace operation was incomplete|continuing investigation with|completed|failed|stopped/i.test(event.message);
   }
 
   private post(

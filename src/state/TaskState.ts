@@ -1,8 +1,8 @@
-import { flow } from "../utils/flowLog";
+import { flow } from "../utils/flowLog.ts";
 
-import {
+import type {
   TaskState as MM3TaskState
-} from "../models/types";
+} from "../models/types.ts";
 
 export class TaskState {
 
@@ -20,7 +20,11 @@ export class TaskState {
 
       filesUsed: [],
 
-      aiCalls: 0
+      aiCalls: 0,
+
+      findings: [],
+
+      openQuestions: []
     };
 
   start(
@@ -42,7 +46,11 @@ export class TaskState {
 
       filesUsed: [],
 
-      aiCalls: 0
+      aiCalls: 0,
+
+      findings: [],
+
+      openQuestions: []
     };
   }
 
@@ -68,6 +76,20 @@ export class TaskState {
 
     this.state.aiCalls =
       calls;
+  }
+
+  addFinding(finding: string): void {
+    const value = finding.trim();
+    if (value && !this.state.findings.includes(value)) {
+      this.state.findings.push(value);
+    }
+  }
+
+  addOpenQuestion(question: string): void {
+    const value = question.trim();
+    if (value && !this.state.openQuestions.includes(value)) {
+      this.state.openQuestions.push(value);
+    }
   }
 
   complete(): void {
@@ -97,6 +119,14 @@ export class TaskState {
 
       filesUsed: [
         ...this.state.filesUsed
+      ],
+
+      findings: [
+        ...this.state.findings
+      ],
+
+      openQuestions: [
+        ...this.state.openQuestions
       ]
     };
   }

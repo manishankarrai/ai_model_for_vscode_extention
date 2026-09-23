@@ -31,8 +31,17 @@ export interface AgentSelection {
 
 export type AgentToolName =
   | "read_file"
+  | "read_file_range"
+  | "read_symbol"
   | "search"
+  | "search_symbols"
   | "list_files"
+  | "find_definition"
+  | "find_references"
+  | "find_callers"
+  | "find_callees"
+  | "get_file_summary"
+  | "get_project_summary"
   | "apply_change_set"
   | "apply_patch"
   | "create_file"
@@ -56,6 +65,7 @@ export interface ToolRequest {
   endLine?: number;
   targetPath?: string;
   query?: string;
+  symbol?: string;
   command?: string;
   content?: string;
   original?: string;
@@ -133,8 +143,33 @@ export interface AIContext {
 
   evidence: ContextEvidence[];
 
+  orchestration?: RetrievalOrchestration;
+
+  taskMemory?: TaskMemory;
+
   parts?: ContextPart[];
 
+}
+
+export interface RetrievalOrchestration {
+  version: 1;
+  intent: Exclude<Intent, "auto">;
+  phases: Array<{
+    name: string;
+    tools: string[];
+    purpose: string;
+  }>;
+  stopConditions: string[];
+}
+
+export interface TaskMemory {
+  findings: string[];
+  openQuestions: string[];
+  verification: {
+    required: boolean;
+    completed: boolean;
+    lastResult?: string;
+  };
 }
 
 export type ContextPartKind =
@@ -213,6 +248,10 @@ export interface TaskState {
   filesUsed: string[];
 
   aiCalls: number;
+
+  findings: string[];
+
+  openQuestions: string[];
 }
 
 

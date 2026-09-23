@@ -55,6 +55,40 @@ export function activate(
       context.workspaceState
     );
 
+  const workspace = vscode.workspace.workspaceFolders?.[0];
+  if (workspace) {
+    const watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(workspace, "**/*")
+    );
+    const pendingPaths = new Set<string>();
+    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+    const queueInvalidation = (uri: vscode.Uri): void => {
+      pendingPaths.add(uri.fsPath);
+      if (debounceTimer) {
+        return;
+      }
+      debounceTimer = setTimeout(() => {
+        for (const filePath of pendingPaths) {
+          agent.invalidateProjectPath(filePath);
+        }
+        pendingPaths.clear();
+        debounceTimer = undefined;
+      }, 250);
+    };
+
+    context.subscriptions.push(
+      watcher,
+      watcher.onDidCreate(queueInvalidation),
+      watcher.onDidChange(queueInvalidation),
+      watcher.onDidDelete(queueInvalidation),
+      new vscode.Disposable(() => {
+        if (debounceTimer) {
+          clearTimeout(debounceTimer);
+        }
+      })
+    );
+  }
+
   // ----------------------------------------------------------
   // View provider
   // ----------------------------------------------------------

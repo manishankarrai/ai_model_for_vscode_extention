@@ -97,6 +97,8 @@ export interface AgentTaskRecord {
   agents?: AgentRun[];
   events?: AgentEvent[];
   pending_decision?: AgentTaskPendingDecision;
+  orchestration?: AIContext["orchestration"];
+  task_memory?: AIContext["taskMemory"];
   budget?: {
     max_steps: number;
     max_ai_calls: number;
@@ -202,7 +204,7 @@ export class BackendClient {
         .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
-          "https://api.mm3ai.com"
+          "http://localhost:8080"
         )
         .replace(/\/$/, "");
   }

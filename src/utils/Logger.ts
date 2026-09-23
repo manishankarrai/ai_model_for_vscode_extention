@@ -4,6 +4,9 @@ export class Logger {
   private readonly output =
     vscode.window.createOutputChannel("MM3 AI Agent");
 
+  private readonly debugLogs =
+    vscode.workspace.getConfiguration("mm3").get<boolean>("debugLogs", false);
+
   info(message: string, data?: unknown): void {
     this.write("INFO", message, data);
   }
@@ -17,7 +20,9 @@ export class Logger {
   }
 
   flow(fn: string, step: number, message: string, data?: unknown): void {
-    this.write("FLOW", `${fn}#${step} ${message}`, data);
+    if (this.debugLogs) {
+      this.write("FLOW", `${fn}#${step} ${message}`, data);
+    }
   }
 
   show(): void {

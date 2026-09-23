@@ -2,7 +2,7 @@
   "name": "mm3-ai-agent",
   "displayName": "MM3 AI Agent",
   "description": "AI coding agent for investigating bugs, analyzing code, understanding projects, and answering development questions directly inside VS Code.",
-  "version": "1.2.8",
+  "version": "1.3.0",
   "publisher": "mm3ai",
   "icon": "media/mm3.png",
   "license": "SEE LICENSE IN LICENSE",
@@ -69,7 +69,7 @@
       "properties": {
         "mm3.backendUrl": {
           "type": "string",
-          "default": "https://api.mm3ai.com",
+          "default": "http://localhost:8080",
           "description": "MM3 backend URL"
         },
         "mm3.maxContextChars": {
@@ -86,6 +86,11 @@
           "type": "string",
           "default": "",
           "description": "Optional workspace-relative directory to search and edit for implementation tasks"
+        },
+        "mm3.debugLogs": {
+          "type": "boolean",
+          "default": false,
+          "description": "Include detailed diagnostic flow logs in the MM3 output channel"
         }
       }
     },
@@ -116,7 +121,7 @@
     "lint": "eslint src --ext ts",
     "watch": "npm run check-types && node esbuild.js --watch",
     "package": "npm run compile",
-    "test": "node --experimental-strip-types --test src/agent/adaptiveRead.test.ts src/backend/agentEventStream.test.ts src/intelligence/contextSelection.test.ts src/intelligence/confidence.test.ts src/intelligence/InvestigationState.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
+    "test": "node --experimental-strip-types --test src/agent/adaptiveRead.test.ts src/backend/agentEventStream.test.ts src/intelligence/contextBudget.test.ts src/intelligence/contextSelection.test.ts src/intelligence/confidence.test.ts src/intelligence/InvestigationState.test.ts src/intelligence/progressiveRetrieval.test.ts src/project/ProjectScanner.test.ts src/project/RepositoryRetrieval.test.ts src/project/SearchEngine.test.ts src/project/SymbolIndex.test.ts src/state/TaskState.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
