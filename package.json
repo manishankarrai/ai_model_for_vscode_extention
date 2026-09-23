@@ -69,7 +69,7 @@
       "properties": {
         "mm3.backendUrl": {
           "type": "string",
-          "default": "http://localhost:8080",
+          "default": "https://api.mm3ai.com",
           "description": "MM3 backend URL"
         },
         "mm3.maxContextChars": {
