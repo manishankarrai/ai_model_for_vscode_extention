@@ -8,6 +8,7 @@ export const adaptiveLimits = {
   maxSearchResults: 400,
   maxListFiles: 2_000,
   maxFileChars: 48_000,
+  maxFileLines: 1_200,
   limitExpansionFactor: 2,
   maxToolResultsPerDecision: 100,
   maxToolOutputChars: 48_000,

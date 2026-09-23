@@ -55,6 +55,8 @@ export interface AgentTaskToolRequest {
   tool: AgentToolName;
   path?: string;
   offset?: number;
+  startLine?: number;
+  endLine?: number;
   targetPath?: string;
   target_path?: string;
   query?: string;
@@ -143,6 +145,8 @@ export interface AgentTaskStateResponse {
     hasMore?: boolean;
     startLine?: number;
     endLine?: number;
+    totalLines?: number;
+    remainingLines?: number;
     updated_at: string;
   }>;
 }
@@ -168,6 +172,8 @@ export interface AgentTaskEvidenceRecord {
   language?: string;
   start_line?: number;
   end_line?: number;
+  totalLines?: number;
+  remainingLines?: number;
   chunkIndex?: number;
   chunkCount?: number;
   byteStart?: number;
@@ -196,7 +202,7 @@ export class BackendClient {
         .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
-          "https://api.mm3ai.com"
+          "http://localhost:8080"
         )
         .replace(/\/$/, "");
   }

@@ -69,7 +69,7 @@
       "properties": {
         "mm3.backendUrl": {
           "type": "string",
-          "default": "https://api.mm3ai.com",
+          "default": "http://localhost:8080",
           "description": "MM3 backend URL"
         },
         "mm3.maxContextChars": {
@@ -116,7 +116,7 @@
     "lint": "eslint src --ext ts",
     "watch": "npm run check-types && node esbuild.js --watch",
     "package": "npm run compile",
-    "test": "node --experimental-strip-types --test src/backend/agentEventStream.test.ts src/intelligence/contextSelection.test.ts src/intelligence/confidence.test.ts src/intelligence/InvestigationState.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
+    "test": "node --experimental-strip-types --test src/agent/adaptiveRead.test.ts src/backend/agentEventStream.test.ts src/intelligence/contextSelection.test.ts src/intelligence/confidence.test.ts src/intelligence/InvestigationState.test.ts src/tools/toolPolicy.test.ts src/tools/commandPolicy.test.ts src/safety/changeValidation.test.ts src/quality/diffPreview.test.ts src/evaluation/evaluationSets.test.ts"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

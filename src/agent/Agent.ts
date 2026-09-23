@@ -42,6 +42,7 @@ import type {
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { adaptiveLimits } from "../config/adaptiveLimits";
 import { chunkContextParts } from "../intelligence/contextSelection";
+import { readBoundedTextChunk } from "./adaptiveRead";
 
 
 import { flow } from "../utils/flowLog";
@@ -57,6 +58,10 @@ interface AdaptiveToolRequest {
   tool: AdaptiveToolName;
   path?: string;
   offset?: number;
+  startLine?: number;
+  endLine?: number;
+  start_line?: number;
+  end_line?: number;
   targetPath?: string;
   target_path?: string;
   query?: string;
@@ -179,6 +184,7 @@ const ADAPTIVE_MANIFEST_CACHE_TTL_MS = adaptiveLimits.ADAPTIVE_MANIFEST_CACHE_TT
 const ADAPTIVE_TOOL_CONCURRENCY = adaptiveLimits.ADAPTIVE_TOOL_CONCURRENCY;
 
 const ADAPTIVE_MAX_FILE_CHARS = adaptiveLimits.maxFileChars;
+const ADAPTIVE_MAX_FILE_LINES = adaptiveLimits.maxFileLines;
 const ADAPTIVE_MAX_TOOL_OUTPUT_CHARS = adaptiveLimits.maxToolOutputChars;
 const MIN_ADAPTIVE_CONFIDENCE = adaptiveLimits.minConfidence;
 const ACTIVE_TASK_STORAGE_KEY = "mm3.activeAgentTask";
@@ -225,6 +231,14 @@ export class Agent {
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
     this.workspaceTools.setApprovalHandler(handler);
+  }
+
+  isAllowAllCommands(): boolean {
+    return this.workspaceTools.isAllowAllCommands();
+  }
+
+  async setAllowAllCommands(enabled: boolean): Promise<void> {
+    await this.workspaceTools.setAllowAllCommands(enabled);
   }
 
 
@@ -841,6 +855,7 @@ export class Agent {
       initialContext;
 
     const readOffsets = new Map<string, number>();
+    const readRangeEnds = new Map<string, number | undefined>();
 
     const investigationSummary: string[] = [];
 
@@ -870,7 +885,8 @@ export class Agent {
         onLimitReached,
         initialRequest.agent?.profile || "agent",
         initialRequest.mode,
-        readOffsets
+        readOffsets,
+        readRangeEnds
       );
       context = this.mergeAdaptiveEvidence(context, resumed.evidence);
       reasoningContext = {
@@ -1472,7 +1488,8 @@ export class Agent {
           onLimitReached,
           initialRequest.agent?.profile || "agent",
           initialRequest.mode,
-          readOffsets
+          readOffsets,
+          readRangeEnds
         );
 
       for (const result of toolResults) {
@@ -1980,6 +1997,18 @@ export class Agent {
       throw new Error("read_file requires a path.");
     }
 
+    const startLine = tool.startLine ?? tool.start_line;
+    const endLine = tool.endLine ?? tool.end_line;
+    if (startLine !== undefined && (!Number.isInteger(startLine) || startLine < 1)) {
+      throw new Error("read_file start_line must be a positive integer.");
+    }
+    if (endLine !== undefined && (!Number.isInteger(endLine) || endLine < 1)) {
+      throw new Error("read_file end_line must be a positive integer.");
+    }
+    if (startLine !== undefined && endLine !== undefined && endLine < startLine) {
+      throw new Error("read_file end_line must not precede start_line.");
+    }
+
     if (tool.tool === "search" && !tool.query?.trim()) {
       throw new Error("search requires a query.");
     }
@@ -2077,7 +2106,8 @@ export class Agent {
     onLimitReached?: AdaptiveLimitHandler,
     profile: string = "agent",
     mode: InteractionMode = "agent",
-    readOffsets: Map<string, number> = new Map()
+    readOffsets: Map<string, number> = new Map(),
+    readRangeEnds: Map<string, number | undefined> = new Map()
   ): Promise<{
     evidence: Array<{ path: string; content: string }>;
     toolResults: AdaptiveToolResult[];
@@ -2151,7 +2181,7 @@ export class Agent {
           profile as AgentProfile,
           this.describeToolAction(tool)
         );
-        const result = await this.executeAdaptiveTool(tool, workspaceUri, mode, readOffsets);
+        const result = await this.executeAdaptiveTool(tool, workspaceUri, mode, readOffsets, readRangeEnds);
         evidence.push(...result.evidence);
         toolResults.push({
           tool: tool.tool,
@@ -2171,6 +2201,7 @@ export class Agent {
         if (result.success && resets.has(tool.tool) && tool.path?.trim()) {
           state.clearPathInspectionKeys(tool.path.trim());
           readOffsets.delete(tool.path.trim());
+          readRangeEnds.delete(tool.path.trim());
         }
         if (
           result.success &&
@@ -2178,11 +2209,13 @@ export class Agent {
         ) {
           this.manifestCache = undefined;
           readOffsets.delete("m3-tools/workspace-files.txt");
+          readRangeEnds.delete("m3-tools/workspace-files.txt");
         }
         const target = tool.targetPath ?? tool.target_path;
         if (result.success && (tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
           state.clearPathInspectionKeys(target.trim());
           readOffsets.delete(target.trim());
+          readRangeEnds.delete(target.trim());
         }
         if (onEvent && result.success && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
           onEvent({
@@ -2282,7 +2315,10 @@ export class Agent {
       InteractionMode,
 
     readOffsets:
-      Map<string, number>
+      Map<string, number>,
+
+    readRangeEnds:
+      Map<string, number | undefined>
   ): Promise<AdaptiveToolExecution> {
     flow("Agent.executeAdaptiveTool", 1, "enter", { tool: tool.tool });
 
@@ -2295,17 +2331,24 @@ export class Agent {
       const offset = Number.isInteger(tool.offset) && tool.offset! >= 0
         ? tool.offset!
         : readOffsets.get(normalizedPath) ?? 0;
+      const startLine = tool.startLine ?? tool.start_line;
+      const requestedEndLine = tool.endLine ?? tool.end_line;
+      if (startLine !== undefined || requestedEndLine !== undefined) {
+        readRangeEnds.set(normalizedPath, requestedEndLine);
+      }
+      const endLine = requestedEndLine ?? readRangeEnds.get(normalizedPath);
       const read = normalizedPath === "m3-tools/workspace-files.txt"
         ? await this.executeAdaptiveManifestPage(workspaceUri, offset)
-        : await this.executeAdaptiveReadFile(tool.path!, workspaceUri, offset);
+        : await this.executeAdaptiveReadFile(tool.path!, workspaceUri, offset, startLine, endLine);
       if (read.hasMore) {
         readOffsets.set(normalizedPath, read.nextOffset);
       } else {
         readOffsets.delete(normalizedPath);
+        readRangeEnds.delete(normalizedPath);
       }
       const chunkStatus = read.hasMore
-        ? `\n[read_file chunk offset=${offset} chars=${read.chars}; more content is available. Request read_file for this path again to continue.]`
-        : `\n[read_file complete offset=${offset} chars=${read.chars}]`;
+        ? `\n[read_file lines=${read.startLine}-${read.endLine} of ${read.totalLines}; remainingLines=${read.remainingLines}; offset=${offset} chars=${read.chars}; more content is available. Request read_file for this path again to continue.]`
+        : `\n[read_file complete lines=${read.startLine}-${read.endLine} of ${read.totalLines}; remainingLines=${read.remainingLines}; offset=${offset} chars=${read.chars}]`;
       const chunkOutput = read.evidence.map(item => item.content).filter(Boolean).join("\n\n");
       const availableOutputChars = Math.max(
         0,
@@ -2418,12 +2461,22 @@ export class Agent {
       vscode.Uri,
 
     offset:
+      number,
+
+    requestedStartLine?:
+      number,
+
+    requestedEndLine?:
       number
   ): Promise<{
     evidence: ContextFile[];
     nextOffset: number;
     chars: number;
     hasMore: boolean;
+    startLine: number;
+    endLine: number;
+    totalLines: number;
+    remainingLines: number;
   }> {
     flow("Agent.executeAdaptiveReadFile", 1, "enter", { relativePath });
 
@@ -2478,9 +2531,14 @@ export class Agent {
           .toString("utf8");
 
 
-      const safeOffset = Math.min(Math.max(0, offset), content.length);
-      const chunk = content.slice(safeOffset, safeOffset + ADAPTIVE_MAX_FILE_CHARS);
-      const nextOffset = safeOffset + chunk.length;
+      const chunk = readBoundedTextChunk(
+        content,
+        offset,
+        ADAPTIVE_MAX_FILE_CHARS,
+        ADAPTIVE_MAX_FILE_LINES,
+        requestedStartLine,
+        requestedEndLine
+      );
 
 
       this.logger.info(
@@ -2489,35 +2547,39 @@ export class Agent {
           path:
             normalizedPath,
 
-          offset:
-            safeOffset,
+          offset: requestedStartLine === undefined ? offset : chunk.nextOffset - chunk.chars,
 
-          hasMore:
-            nextOffset < content.length,
-
-          chars:
-            chunk.length
+          hasMore: chunk.hasMore,
+          chars: chunk.chars,
+          startLine: chunk.startLine,
+          endLine: chunk.endLine,
+          totalLines: chunk.totalLines,
+          remainingLines: chunk.remainingLines
         }
       );
 
       return {
         evidence: [{
           path: normalizedPath,
-          content: chunk,
-          chunkIndex: Math.floor(safeOffset / ADAPTIVE_MAX_FILE_CHARS) + 1,
+          content: chunk.content,
+          chunkIndex: Math.floor((requestedStartLine === undefined ? offset : chunk.nextOffset - chunk.chars) / ADAPTIVE_MAX_FILE_CHARS) + 1,
           chunkCount: Math.ceil(content.length / ADAPTIVE_MAX_FILE_CHARS),
-          byteStart: Buffer.byteLength(content.slice(0, safeOffset), "utf8"),
-          byteEnd: Buffer.byteLength(content.slice(0, nextOffset), "utf8"),
+          byteStart: Buffer.byteLength(content.slice(0, requestedStartLine === undefined ? offset : chunk.nextOffset - chunk.chars), "utf8"),
+          byteEnd: Buffer.byteLength(content.slice(0, chunk.nextOffset), "utf8"),
           totalBytes: Buffer.byteLength(content, "utf8"),
-          hasMore: nextOffset < content.length,
-          startLine: content.slice(0, safeOffset).split("\n").length,
-          endLine: content.slice(0, safeOffset).split("\n").length +
-            chunk.split("\n").length -
-            (chunk.endsWith("\n") ? 2 : 1)
+          hasMore: chunk.hasMore,
+          startLine: chunk.startLine,
+          endLine: chunk.endLine,
+          totalLines: chunk.totalLines,
+          remainingLines: chunk.remainingLines
         }],
-        nextOffset,
-        chars: chunk.length,
-        hasMore: nextOffset < content.length
+        nextOffset: chunk.nextOffset,
+        chars: chunk.chars,
+        hasMore: chunk.hasMore,
+        startLine: chunk.startLine,
+        endLine: chunk.endLine,
+        totalLines: chunk.totalLines,
+        remainingLines: chunk.remainingLines
       };
 
 
@@ -2631,6 +2693,10 @@ export class Agent {
     nextOffset: number;
     chars: number;
     hasMore: boolean;
+    startLine: number;
+    endLine: number;
+    totalLines: number;
+    remainingLines: number;
   }> {
     flow("Agent.executeAdaptiveManifestPage", 1, "enter", { offset });
 
@@ -2666,6 +2732,13 @@ export class Agent {
     );
     const nextOffset = safeOffset + content.length;
     const hasMore = nextOffset < manifest.length;
+    const totalLines = manifest ? manifest.split("\n").length : 0;
+    const startLine = manifest
+      ? manifest.slice(0, safeOffset).split("\n").length
+      : 0;
+    const endLine = content
+      ? manifest.slice(0, nextOffset).split("\n").length - (content.endsWith("\n") ? 1 : 0)
+      : startLine;
 
     this.logger.info(
       "Adaptive manifest page completed",
@@ -2674,7 +2747,11 @@ export class Agent {
         offset: safeOffset,
         chars: content.length,
         manifestChars: manifest.length,
-        hasMore
+        hasMore,
+        startLine,
+        endLine,
+        totalLines,
+        remainingLines: Math.max(0, totalLines - endLine)
       }
     );
 
@@ -2693,7 +2770,11 @@ export class Agent {
         : [],
       nextOffset,
       chars: content.length,
-      hasMore
+      hasMore,
+      startLine,
+      endLine,
+      totalLines,
+      remainingLines: Math.max(0, totalLines - endLine)
     };
   }
 

@@ -112,6 +112,11 @@ export class MM3ViewProvider
       },
       undefined
     );
+
+    this.post({
+      type: "settings",
+      allowAllCommands: this.agent.isAllowAllCommands()
+    });
   }
 
   show(): void {
@@ -205,6 +210,14 @@ export class MM3ViewProvider
         this.resolveApproval(message.approvalId, message.decision);
         break;
 
+      case "set_permission_mode":
+        await this.agent.setAllowAllCommands(message.allowAllCommands);
+        this.post({
+          type: "settings",
+          allowAllCommands: message.allowAllCommands
+        });
+        break;
+
       case "limit_response":
         this.resolveLimitDecision(message.continueInvestigation);
         break;
@@ -271,17 +284,16 @@ export class MM3ViewProvider
         break;
 
       case "clear":
-        this.agent.clearConversation();
-        this.selectedContext = [];
-        this.dismissedContextKeys.clear();
-        this.clearFileReviews();
+        this.clearLocalSession();
+        break;
 
-        this.post({
-          type: "cleared",
-        });
+      case "clear_local_session":
+        this.clearLocalSession();
+        vscode.window.showInformationMessage("MM3 local session cleared.");
+        break;
 
-        this.postContextParts();
-
+      case "refresh_extension":
+        await vscode.commands.executeCommand("workbench.action.restartExtensionHost");
         break;
 
       case "open_citation":
@@ -916,6 +928,15 @@ export class MM3ViewProvider
     });
   }
 
+  private clearLocalSession(): void {
+    this.agent.clearConversation();
+    this.selectedContext = [];
+    this.dismissedContextKeys.clear();
+    this.clearFileReviews();
+    this.post({ type: "cleared" });
+    this.postContextParts();
+  }
+
   private resolveApproval(approvalId: string, decision: ToolApprovalDecision): void {
     const resolve = this.pendingApprovals.get(approvalId);
     if (!resolve) {
@@ -1125,6 +1146,102 @@ body {
   flex-shrink: 0;
   color: var(--vscode-descriptionForeground);
   font-size: 10px;
+}
+
+.settings-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 10px 8px;
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.settings-bar .icon-btn {
+  width: 24px;
+  height: 24px;
+  min-height: 24px;
+}
+
+.settings-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  padding: 12px;
+}
+
+.settings-modal[aria-hidden="true"] {
+  display: none;
+}
+
+.settings-backdrop {
+  position: absolute;
+  inset: 0;
+  background: var(--vscode-widget-shadow, rgba(0, 0, 0, 0.35));
+}
+
+.settings-dialog {
+  position: relative;
+  width: min(100%, 360px);
+  max-height: 80vh;
+  overflow-y: auto;
+  padding: 12px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 8px;
+  background: var(--vscode-editor-background);
+  box-shadow: 0 8px 24px var(--vscode-widget-shadow, transparent);
+}
+
+.settings-header,
+.settings-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.settings-header {
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-weight: 600;
+}
+
+.settings-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  border-top: 1px solid var(--vscode-panel-border);
+}
+
+.settings-section + .settings-section {
+  margin-top: 12px;
+}
+
+.settings-label {
+  color: var(--vscode-descriptionForeground);
+  font-size: 11px;
+}
+
+.settings-select,
+.settings-action {
+  width: 100%;
+  min-height: 28px;
+  padding: 5px 8px;
+  border: 1px solid var(--vscode-button-border, var(--vscode-panel-border));
+  border-radius: 4px;
+  color: var(--vscode-button-secondaryForeground);
+  background: var(--vscode-button-secondaryBackground);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.settings-action:hover,
+.settings-select:hover {
+  background: var(--vscode-button-secondaryHoverBackground, var(--vscode-list-hoverBackground));
 }
 
 .credits {
@@ -2068,8 +2185,8 @@ Describe the task, bug, or issue you want MM3 to investigate or fix.
         <button id="attach" class="icon-btn" type="button" title="Attach files">📎</button>
         <button id="add-selection" class="icon-btn" type="button" title="Add selection to chat">↧</button>
         <select id="mode" aria-label="Mode">
-          <option value="ask" selected>Ask</option>
-          <option value="agent">Agent</option>
+          <option value="ask" >Ask</option>
+          <option value="agent" selected>Agent</option>
         </select>
         <select id="agent-profile" aria-label="Agent">
           <option value="">Agents</option>
@@ -2078,6 +2195,33 @@ Describe the task, bug, or issue you want MM3 to investigate or fix.
         <button id="action" class="icon-btn primary" type="button" title="Send">↑</button>
       </div>
     </div>
+  </div>
+
+  <div class="settings-bar">
+    <button id="settings-toggle" class="icon-btn" type="button" title="Settings" aria-label="Settings">⚙</button>
+    <span>Settings</span>
+  </div>
+
+  <div id="settings-modal" class="settings-modal" aria-hidden="true">
+    <div class="settings-backdrop" data-close-settings="true"></div>
+    <section class="settings-dialog" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <div class="settings-header">
+        <span id="settings-title">Settings</span>
+        <button id="settings-close" class="icon-btn" type="button" title="Close settings" aria-label="Close settings">×</button>
+      </div>
+      <div class="settings-section">
+        <span class="settings-label">Command permissions</span>
+        <select id="permission-mode" class="settings-select" aria-label="Command permissions">
+          <option value="ask">Ask each time</option>
+          <option value="allow">Allow all commands</option>
+        </select>
+      </div>
+      <div class="settings-section">
+        <span class="settings-label">Local session</span>
+        <button id="clear-local-session" class="settings-action" type="button">Clear local session</button>
+        <button id="refresh-extension" class="settings-action" type="button">Refresh extension</button>
+      </div>
+    </section>
   </div>
 
 </div>
@@ -2131,6 +2275,24 @@ const empty =
 
 const walletBalance =
   document.getElementById("wallet-balance");
+
+const settingsToggle =
+  document.getElementById("settings-toggle");
+
+const settingsClose =
+  document.getElementById("settings-close");
+
+const settingsModal =
+  document.getElementById("settings-modal");
+
+const permissionMode =
+  document.getElementById("permission-mode");
+
+const clearLocalSession =
+  document.getElementById("clear-local-session");
+
+const refreshExtension =
+  document.getElementById("refresh-extension");
 
 let processing = false;
 let composerState = "idle";
@@ -2209,6 +2371,38 @@ taskHistoryToggle.addEventListener("click", () => {
   if (open) {
     vscode.postMessage({ type: "load_task_history" });
   }
+});
+
+function setSettingsOpen(open) {
+  settingsModal.setAttribute("aria-hidden", open ? "false" : "true");
+}
+
+function renderPermissionSetting(allowAllCommands) {
+  permissionMode.value = allowAllCommands ? "allow" : "ask";
+}
+
+settingsToggle.addEventListener("click", () => setSettingsOpen(true));
+settingsClose.addEventListener("click", () => setSettingsOpen(false));
+settingsModal.addEventListener("click", (event) => {
+  if (event.target?.dataset?.closeSettings === "true") {
+    setSettingsOpen(false);
+  }
+});
+
+permissionMode.addEventListener("change", () => {
+  vscode.postMessage({
+    type: "set_permission_mode",
+    allowAllCommands: permissionMode.value === "allow"
+  });
+});
+
+clearLocalSession.addEventListener("click", () => {
+  setSettingsOpen(false);
+  vscode.postMessage({ type: "clear_local_session" });
+});
+
+refreshExtension.addEventListener("click", () => {
+  vscode.postMessage({ type: "refresh_extension" });
 });
 
 function renderTaskHistory(tasks) {
@@ -2879,9 +3073,6 @@ function addApprovalRequest(approvalId, text) {
   approve.className = "approval-approve";
   approve.type = "button";
   approve.textContent = "Approve";
-  const alwaysApprove = document.createElement("button");
-  alwaysApprove.type = "button";
-  alwaysApprove.textContent = "Always Approve";
   const skip = document.createElement("button");
   skip.type = "button";
   skip.textContent = "Skip";
@@ -2892,12 +3083,8 @@ function addApprovalRequest(approvalId, text) {
     }
     card.dataset.resolved = "true";
     card.classList.add("approval-resolved");
-    label.textContent = decision === "always_approve"
-      ? "Always approved"
-      : decision === "approve"
-        ? "Approved"
-        : "Skipped";
-    [approve, skip, alwaysApprove].forEach((button) => {
+    label.textContent = decision === "approve" ? "Approved" : "Skipped";
+    [approve, skip].forEach((button) => {
       button.disabled = true;
     });
     vscode.postMessage({
@@ -2908,11 +3095,9 @@ function addApprovalRequest(approvalId, text) {
   };
 
   approve.addEventListener("click", () => finish("approve"));
-  alwaysApprove.addEventListener("click", () => finish("always_approve"));
   skip.addEventListener("click", () => finish("skip"));
   actions.appendChild(approve);
   actions.appendChild(skip);
-  actions.appendChild(alwaysApprove);
   card.appendChild(label);
   card.appendChild(actions);
   messages.appendChild(card);
@@ -3680,6 +3865,10 @@ window.addEventListener(
       message.type
     ) {
 
+      case "settings":
+        renderPermissionSetting(message.allowAllCommands);
+        break;
+
       case "thinking":
 
         setProcessing(
@@ -3922,6 +4111,10 @@ type WebviewMessage =
       decision: ToolApprovalDecision;
     }
   | {
+      type: "set_permission_mode";
+      allowAllCommands: boolean;
+    }
+  | {
       type: "limit_response";
       continueInvestigation: boolean;
     }
@@ -3986,6 +4179,12 @@ type WebviewMessage =
   | {
       type: "review_open_diff";
       path: string;
+    }
+  | {
+      type: "clear_local_session";
+    }
+  | {
+      type: "refresh_extension";
     };
 
 type WebviewResponse =
@@ -4071,6 +4270,10 @@ type WebviewResponse =
     }
   | {
       type: "cleared";
+    }
+  | {
+      type: "settings";
+      allowAllCommands: boolean;
     };
 
 class AuthenticationError extends Error {

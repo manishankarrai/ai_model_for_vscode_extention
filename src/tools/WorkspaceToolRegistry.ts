@@ -45,6 +45,14 @@ export class WorkspaceToolRegistry {
     this.approvalHandler = handler;
   }
 
+  isAllowAllCommands(): boolean {
+    return this.approvalState?.get<boolean>(ALWAYS_APPROVE_TERMINAL_KEY) ?? false;
+  }
+
+  async setAllowAllCommands(enabled: boolean): Promise<void> {
+    await this.approvalState?.update(ALWAYS_APPROVE_TERMINAL_KEY, enabled);
+  }
+
   getAvailableTools(
     mode: InteractionMode
   ): AgentToolName[] {

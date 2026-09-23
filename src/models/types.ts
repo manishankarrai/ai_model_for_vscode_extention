@@ -52,6 +52,8 @@ export interface ToolRequest {
   tool: AgentToolName;
   path?: string;
   offset?: number;
+  startLine?: number;
+  endLine?: number;
   targetPath?: string;
   query?: string;
   command?: string;
@@ -105,6 +107,8 @@ export interface ContextFile {
   hasMore?: boolean;
   startLine?: number;
   endLine?: number;
+  totalLines?: number;
+  remainingLines?: number;
 }
 export interface ContextEvidence {
 
