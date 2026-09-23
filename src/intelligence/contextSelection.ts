@@ -149,10 +149,7 @@ export function resolveRequestContext(options: {
 
   if (options.mode === "ask") {
     return {
-      files: selected.map((part) => ({
-        path: part.path,
-        content: part.content
-      })),
+      files: [],
       indexSummary: options.indexSummary,
       evidence: selected.map((part) => ({
         path: part.path,
@@ -168,34 +165,11 @@ export function resolveRequestContext(options: {
   }
 
   const files: ContextFile[] = [];
-  const seen = new Set<string>();
+  // Selected context is sent through `parts` and rendered as selected context
+  // by the backend. Keep it out of `files` to avoid sending and counting it twice.
+  const seen = new Set(selected.map((part) => part.path));
 
-  // 1) Selected full-file attachments first (highest priority).
-  for (const part of selected) {
-    if (files.length >= options.maxFiles) {
-      break;
-    }
-    if (part.kind === "selection" || seen.has(part.path)) {
-      continue;
-    }
-    seen.add(part.path);
-    files.push({ path: part.path, content: part.content });
-  }
-
-  // 2) Selected code is authoritative. The agent can request the live full file
-  // with read_file before editing, so stale indexed content must not replace it.
-  for (const part of selected) {
-    if (files.length >= options.maxFiles) {
-      break;
-    }
-    if (part.kind !== "selection" || seen.has(part.path)) {
-      continue;
-    }
-    seen.add(part.path);
-    files.push({ path: part.path, content: part.content });
-  }
-
-  // 3) Remaining investigated evidence.
+  // Add only separately investigated evidence to the project-file context.
   for (const file of options.investigated) {
     if (files.length >= options.maxFiles) {
       break;

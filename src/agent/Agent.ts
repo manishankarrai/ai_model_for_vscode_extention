@@ -1082,6 +1082,16 @@ export class Agent {
         `Thinking with AI (step ${currentStep}).`
       );
 
+      const requestContextParts = request.context.parts ?? [];
+      const requestContextChars = Buffer.byteLength(request.context.indexSummary ?? "", "utf8") +
+        request.context.files.reduce(
+          (total: number, file: any) => total + Buffer.byteLength(file.content, "utf8"),
+          0
+        ) +
+        requestContextParts.reduce(
+          (total: number, part: any) => total + Buffer.byteLength(part.content, "utf8"),
+          0
+        );
 
       this.logger.info(
         "Sending adaptive reasoning request",
@@ -1099,18 +1109,10 @@ export class Agent {
             state.maxAICalls,
 
           contextFiles:
-            context.files.length,
+            request.context.files.length + requestContextParts.length,
 
           contextChars:
-            context.files.reduce(
-              (
-                total: number,
-                file: any
-              ) =>
-                total +
-                file.content.length,
-              0
-            )
+            requestContextChars
         }
       );
 

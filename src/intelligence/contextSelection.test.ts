@@ -49,8 +49,7 @@ describe("context selection", () => {
       maxFiles: 8
     });
 
-    assert.equal(context.files.length, 1);
-    assert.equal(context.files[0].path, "src/app.ts");
+    assert.equal(context.files.length, 0);
     assert.equal(context.parts?.[0].kind, "selection");
   });
 
@@ -74,7 +73,8 @@ describe("context selection", () => {
       maxFiles: 8
     });
 
-    assert.equal(context.files[0].content, "func GetShop() {}");
+    assert.equal(context.files.length, 0);
+    assert.equal(context.parts?.[0].content, "func GetShop() {}");
     assert.equal(context.parts?.[0].kind, "selection");
   });
 
