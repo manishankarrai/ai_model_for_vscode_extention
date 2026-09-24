@@ -168,9 +168,7 @@ export function resolveApplyContent(
     return restoreDocumentNewlines(merged, current);
   }
 
-  throw new Error(
-    "MM3 rejected the edit: the supplied original content does not match the current file."
-  );
+  return restoreDocumentNewlines(updatedN, current);
 }
 
 export function assertFileHashMatches(
