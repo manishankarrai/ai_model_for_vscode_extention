@@ -14,6 +14,7 @@ import {
   AgentRun,
   AgentTaskStatus,
   BillingAgent,
+  CheapestBillingAgent,
   CreditPlan,
   WalletSummary,
   AgentSelection,
@@ -204,7 +205,7 @@ export class BackendClient {
         .getConfiguration("mm3")
         .get<string>(
           "backendUrl",
-          "https://api.mm3ai.com"
+          "http://localhost:8080"
         )
         .replace(/\/$/, "");
   }
@@ -350,6 +351,16 @@ export class BackendClient {
     return this.get<{ agents: BillingAgent[] }>("/api/v1/agents", accessToken);
   }
 
+  async getCheapestAgent(
+    accessToken: string
+  ): Promise<{ agent: CheapestBillingAgent | null; checked_at: string }> {
+    flow("BackendClient.getCheapestAgent", 1, "enter");
+    return this.get<{ agent: CheapestBillingAgent | null; checked_at: string }>(
+      "/api/v1/cheapest-agent",
+      accessToken
+    );
+  }
+
   async getPlans(
     accessToken: string
   ): Promise<{ plans: CreditPlan[] }> {
@@ -453,6 +464,9 @@ export class BackendClient {
       );
 
     } catch (error) {
+      if (error instanceof Error && error.name === "AbortError") {
+        throw error;
+      }
       throw formatConnectError(error);
     }
 

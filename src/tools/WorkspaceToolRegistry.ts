@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
+import { dirname } from "node:path";
 import { promisify } from "node:util";
 
 import {
@@ -109,6 +110,10 @@ export class WorkspaceToolRegistry {
       case "find_references":
       case "find_callers":
       case "find_callees":
+      case "find_tests":
+      case "find_routes":
+      case "find_reads":
+      case "find_writes":
       case "get_file_summary":
       case "get_project_summary":
         return this.executeRetrieval(request);
@@ -147,6 +152,14 @@ export class WorkspaceToolRegistry {
                 ? await this.retrieval.findCallers(workspace.uri.fsPath, query)
                 : request.tool === "find_callees"
                   ? await this.retrieval.findCallees(workspace.uri.fsPath, query)
+                  : request.tool === "find_tests"
+                    ? await this.retrieval.findTests(workspace.uri.fsPath, query)
+                    : request.tool === "find_routes"
+                      ? await this.retrieval.findRoutes(workspace.uri.fsPath, query)
+                      : request.tool === "find_reads"
+                        ? await this.retrieval.findReads(workspace.uri.fsPath, query)
+                        : request.tool === "find_writes"
+                          ? await this.retrieval.findWrites(workspace.uri.fsPath, query)
                   : request.tool === "get_file_summary"
                     ? await this.retrieval.getFileSummary(workspace.uri.fsPath, request.path ?? "")
                     : await this.retrieval.getProjectSummary(workspace.uri.fsPath);
@@ -302,11 +315,11 @@ export class WorkspaceToolRegistry {
   }
 
   private async runTests(): Promise<ToolResult> {
-    const command = await this.detectTestCommand();
-    return this.runCommand(command, "run_tests");
+    const testCommand = await this.detectTestCommand();
+    return this.runCommand(testCommand.command, "run_tests", testCommand.cwd);
   }
 
-  private async detectTestCommand(): Promise<string> {
+  private async detectTestCommand(): Promise<{ command: string; cwd: string }> {
     const workspace = this.requireWorkspace();
     const root = workspace.uri.fsPath;
 
@@ -315,7 +328,7 @@ export class WorkspaceToolRegistry {
         await fs.readFile(`${root}/package.json`, "utf8")
       ) as { scripts?: Record<string, string> };
       if (packageJson.scripts?.test) {
-        return "npm test";
+        return { command: "npm test", cwd: root };
       }
     } catch {
       // no package.json
@@ -323,14 +336,48 @@ export class WorkspaceToolRegistry {
 
     try {
       await fs.access(`${root}/go.mod`);
-      return "go test ./...";
+      return { command: "go test ./...", cwd: root };
     } catch {
       // not a Go module
     }
 
+    const goModules = await vscode.workspace.findFiles(
+      "**/go.mod",
+      "**/{node_modules,.git}/**",
+      1
+    );
+    if (goModules.length > 0) {
+      return {
+        command: "go test ./...",
+        cwd: dirname(goModules[0].fsPath)
+      };
+    }
+
+    const packageFiles = await vscode.workspace.findFiles(
+      "**/package.json",
+      "**/{node_modules,.git}/**",
+      1
+    );
+    if (packageFiles.length > 0) {
+      try {
+        const packagePath = packageFiles[0].fsPath;
+        const packageJson = JSON.parse(await fs.readFile(packagePath, "utf8")) as {
+          scripts?: Record<string, string>;
+        };
+        if (packageJson.scripts?.test) {
+          return {
+            command: "npm test",
+            cwd: dirname(packageFiles[0].fsPath)
+          };
+        }
+      } catch {
+        // keep looking for another supported project
+      }
+    }
+
     try {
       await fs.access(`${root}/pytest.ini`);
-      return "python -m pytest";
+      return { command: "python -m pytest", cwd: root };
     } catch {
       // no pytest.ini
     }
@@ -340,7 +387,8 @@ export class WorkspaceToolRegistry {
 
   private async runCommand(
     command?: string,
-    tool: AgentToolName = "run_command"
+    tool: AgentToolName = "run_command",
+    cwd?: string
   ): Promise<ToolResult> {
     assertWorkspaceTrusted(vscode.workspace.isTrusted);
     const rawCommand = command ?? "";
@@ -368,7 +416,7 @@ export class WorkspaceToolRegistry {
 
     try {
       const result = await execFileAsync(shell, shellArgs, {
-        cwd: workspace.uri.fsPath,
+        cwd: cwd ?? workspace.uri.fsPath,
         timeout: tool === "run_tests" ? 180_000 : 60_000,
         maxBuffer: adaptiveLimits.maxToolOutputChars * 4,
         env: process.env

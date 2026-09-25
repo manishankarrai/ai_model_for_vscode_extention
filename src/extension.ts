@@ -57,6 +57,10 @@ export function activate(
 
   const workspace = vscode.workspace.workspaceFolders?.[0];
   if (workspace) {
+    const prewarmController = new AbortController();
+    void agent.prewarmProject(workspace.uri.fsPath, prewarmController.signal).catch((error) => {
+      logger.warn("Background project prewarming unavailable", error);
+    });
     const watcher = vscode.workspace.createFileSystemWatcher(
       new vscode.RelativePattern(workspace, "**/*")
     );
@@ -73,6 +77,7 @@ export function activate(
         }
         pendingPaths.clear();
         debounceTimer = undefined;
+        agent.scheduleProjectPrewarm(workspace.uri.fsPath, prewarmController.signal);
       }, 250);
     };
 
@@ -82,6 +87,7 @@ export function activate(
       watcher.onDidChange(queueInvalidation),
       watcher.onDidDelete(queueInvalidation),
       new vscode.Disposable(() => {
+        prewarmController.abort();
         if (debounceTimer) {
           clearTimeout(debounceTimer);
         }
@@ -125,6 +131,9 @@ export function activate(
       }
     )
   );
+  context.subscriptions.push(
+    new vscode.Disposable(() => provider.dispose())
+  );
 
 
   context.subscriptions.push(
@@ -147,6 +156,13 @@ export function activate(
           vscode.window.showInformationMessage("MM3 access token updated.");
         }
       }
+    )
+  );
+
+  context.subscriptions.push(
+    vscode.commands.registerCommand(
+      "mm3.restartExtension",
+      restartExtension
     )
   );
 
@@ -191,6 +207,16 @@ export function activate(
   logger.info(
     "MM3 AI Agent activated."
   );
+}
+
+async function restartExtension(): Promise<void> {
+  const commands = await vscode.commands.getCommands(true);
+  if (commands.includes("workbench.action.restartExtensionHost")) {
+    await vscode.commands.executeCommand("workbench.action.restartExtensionHost");
+    return;
+  }
+
+  await vscode.commands.executeCommand("workbench.action.reloadWindow");
 }
 
 async function getAccessToken(

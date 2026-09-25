@@ -27,7 +27,7 @@ import {
   userFacingErrorHelp,
   type UserFacingErrorHelp
 } from "../backend/userFacingError";
-import type { BillingAgent, CreditPlan, WalletSummary } from "../models/types";
+import type { BillingAgent, CheapestBillingAgent, CreditPlan, WalletSummary } from "../models/types";
 import { adaptiveLimits } from "../config/adaptiveLimits";
 
 export class MM3ViewProvider
@@ -44,6 +44,10 @@ export class MM3ViewProvider
 
   private readonly billingClient =
     new BackendClient();
+
+  private billingRefreshTimer?: ReturnType<typeof setInterval>;
+
+  private cancellationRequested = false;
 
   private requestController?: AbortController;
 
@@ -89,6 +93,18 @@ export class MM3ViewProvider
 
     void this.refreshBilling();
     void this.refreshTaskHistory();
+    if (this.agent.hasActiveTask()) {
+      void this.restoreActiveTask();
+    }
+    this.billingRefreshTimer = setInterval(() => {
+      void this.refreshBilling(true);
+    }, 5 * 60 * 1000);
+    webviewView.onDidDispose(() => {
+      if (this.billingRefreshTimer) {
+        clearInterval(this.billingRefreshTimer);
+        this.billingRefreshTimer = undefined;
+      }
+    });
 
     webviewView.webview.onDidReceiveMessage(
       async (message: WebviewMessage) => {
@@ -137,14 +153,16 @@ export class MM3ViewProvider
       if (!accessToken) {
         return;
       }
-      const [wallet, agents] = await Promise.all([
+      const [wallet, agents, cheapest] = await Promise.all([
         this.billingClient.getWallet(accessToken),
-        this.billingClient.getAgents(accessToken)
+        this.billingClient.getAgents(accessToken),
+        this.billingClient.getCheapestAgent(accessToken)
       ]);
       this.post({
         type: "billing",
         wallet,
         agents: agents.agents ?? [],
+        cheapest: cheapest.agent,
         plans: []
       });
     } catch (error) {
@@ -174,6 +192,26 @@ export class MM3ViewProvider
       );
     }
   }
+
+  private async restoreActiveTask(): Promise<void> {
+    try {
+      await this.resumeLastTask();
+    } catch (error) {
+      this.logger.warn(
+        `Unable to restore the interrupted task: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  dispose(): void {
+    if (this.billingRefreshTimer) {
+      clearInterval(this.billingRefreshTimer);
+      this.billingRefreshTimer = undefined;
+    }
+    this.requestController?.abort();
+    this.resolvePendingApprovals("skip");
+    this.resolveLimitDecision(false);
+  }
  // handle message
   private async handleMessage(
     message: WebviewMessage
@@ -190,6 +228,11 @@ export class MM3ViewProvider
         break;
 
       case "cancel_request":
+        if (!this.isProcessing || this.cancellationRequested) {
+          break;
+        }
+        this.cancellationRequested = true;
+        this.post({ type: "cancelling" });
         this.resolvePendingApprovals("skip");
         this.resolveLimitDecision(false);
         this.requestController?.abort();
@@ -200,7 +243,7 @@ export class MM3ViewProvider
           type: "agent_event",
           event: {
             profile: this.lastQuestion?.agentProfile || "agent",
-            type: "progress",
+            type: "agent.progress",
             message: message.decision === "skip"
               ? "Approval skipped. Continuing investigation."
               : "Approval granted. Resuming investigation.",
@@ -293,7 +336,7 @@ export class MM3ViewProvider
         break;
 
       case "refresh_extension":
-        await vscode.commands.executeCommand("workbench.action.restartExtensionHost");
+        await vscode.commands.executeCommand("mm3.restartExtension");
         break;
 
       case "open_citation":
@@ -361,6 +404,7 @@ export class MM3ViewProvider
 
     this.clearFileReviews();
     this.isProcessing = true;
+    this.cancellationRequested = false;
     this.requestController = new AbortController();
     this.lastQuestion = {
       question: trimmedQuestion,
@@ -416,6 +460,8 @@ export class MM3ViewProvider
         model: response.model,
       });
 
+      this.clearSelectedContext();
+
       await this.refreshBilling(true);
 
       if (response.implementation_plan?.changes?.length) {
@@ -433,7 +479,10 @@ export class MM3ViewProvider
 
     } catch (error) {
 
-      if (error instanceof DOMException && error.name === "AbortError") {
+      if (
+        this.cancellationRequested ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
         this.post({
           type: "cancelled"
         });
@@ -476,6 +525,7 @@ export class MM3ViewProvider
       this.resolvePendingApprovals("skip");
       this.resolveLimitDecision(false);
       this.isProcessing = false;
+      this.cancellationRequested = false;
       this.requestController = undefined;
 
       this.post({
@@ -499,6 +549,8 @@ export class MM3ViewProvider
     }
 
     this.isProcessing = true;
+    this.cancellationRequested = false;
+    this.requestController = new AbortController();
     this.post({ type: "thinking" });
     try {
       const onEvent = (event: AgentEvent) => {
@@ -515,13 +567,13 @@ export class MM3ViewProvider
         ? await this.agent.resumeTask(
             requestID,
             accessToken,
-            undefined,
+            this.requestController.signal,
             onEvent,
             async (details) => this.askToExtendLimit(details)
           )
         : await this.agent.resumeLastTask(
             accessToken,
-            undefined,
+            this.requestController.signal,
             onEvent,
             async (details) => this.askToExtendLimit(details),
             preferredProfile
@@ -537,6 +589,7 @@ export class MM3ViewProvider
         requestId: response.request_id,
         model: response.model,
       });
+      this.clearSelectedContext();
       await this.refreshBilling(true);
       if (response.implementation_plan?.changes?.length) {
         try {
@@ -551,13 +604,22 @@ export class MM3ViewProvider
       this.postPendingFileReviews();
       return true;
     } catch (error) {
-      this.postError(error);
+      if (
+        this.cancellationRequested ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        this.post({ type: "cancelled" });
+      } else {
+        this.postError(error);
+      }
       this.logger.error("MM3 task resume failed", error);
       return true;
     } finally {
       this.resolvePendingApprovals("skip");
       this.resolveLimitDecision(false);
       this.isProcessing = false;
+      this.cancellationRequested = false;
+      this.requestController = undefined;
       this.post({ type: "ready" });
     }
   }
@@ -578,11 +640,14 @@ export class MM3ViewProvider
     }
 
     this.isProcessing = true;
+  this.cancellationRequested = false;
+  this.requestController = new AbortController();
     this.post({ type: "thinking" });
     try {
       const answer = await this.agent.retrySpecialist(
         profile,
-        accessToken
+        accessToken,
+        this.requestController.signal
       );
       this.post({
         type: "answer",
@@ -597,8 +662,19 @@ export class MM3ViewProvider
         requestId: "retry",
         model: "",
       });
+    } catch (error) {
+      if (
+        this.cancellationRequested ||
+        (error instanceof Error && error.name === "AbortError")
+      ) {
+        this.post({ type: "cancelled" });
+        return;
+      }
+      throw error;
     } finally {
       this.isProcessing = false;
+      this.cancellationRequested = false;
+      this.requestController = undefined;
       this.post({ type: "ready" });
     }
   }
@@ -936,10 +1012,14 @@ export class MM3ViewProvider
 
   private clearLocalSession(): void {
     this.agent.clearConversation();
-    this.selectedContext = [];
-    this.dismissedContextKeys.clear();
+    this.clearSelectedContext();
     this.clearFileReviews();
     this.post({ type: "cleared" });
+  }
+
+  private clearSelectedContext(): void {
+    this.selectedContext = [];
+    this.dismissedContextKeys.clear();
     this.postContextParts();
   }
 
@@ -967,17 +1047,20 @@ export class MM3ViewProvider
   }
 
   private toUserFacingAgentEvent(event: AgentEvent): AgentEvent {
-    if (event.type === "failed") {
+    if (event.type === "agent.failed" || event.type === "failed") {
       return { ...event, message: this.sanitizeUserError(event.message) };
     }
     return event;
   }
 
   private shouldShowAgentEvent(event: AgentEvent): boolean {
-    if (["failed", "change", "citation", "done"].includes(event.type)) {
+    if ([
+      "agent.failed", "failed", "change.applied", "change", "citation.created", "citation",
+      "response.completed", "done", "tool.started", "tool.completed", "tool.failed"
+    ].includes(event.type)) {
       return true;
     }
-    if (event.type !== "progress") {
+    if (event.type !== "agent.progress" && event.type !== "progress") {
       return false;
     }
     return /starting backend investigation|thinking with ai|preparing the final answer|validation reported an error|workspace operation was incomplete|continuing investigation with|completed|failed|stopped/i.test(event.message);
@@ -1269,6 +1352,21 @@ body {
 
 .model {
   display: none;
+}
+
+.cheapest-agent {
+  display: block;
+  width: auto;
+  margin: 0 10px 8px;
+  padding: 7px 9px;
+  border: 1px solid var(--vscode-panel-border);
+  border-radius: 6px;
+  background: var(--vscode-editor-background);
+  color: var(--vscode-textLink-foreground);
+  font-size: 11px;
+  font-weight: 600;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -2149,7 +2247,7 @@ textarea:disabled {
 
     <div class="header-title">
 
-      <span>MM3 AI Agent</span>
+    
       <span id="wallet-balance" class="credits">0 credits</span>
       <span id="model" class="model"></span>
 
@@ -2205,7 +2303,7 @@ Describe the task, bug, or issue you want MM3 to investigate or fix.
           <option value="agent" selected>Agent</option>
         </select>
         <select id="agent-profile" aria-label="Agent">
-          <option value="">Agents</option>
+          <option value="auto" selected>Auto (Cheapest)</option>
         </select>
         <span class="spacer"></span>
         <button id="action" class="icon-btn primary" type="button" title="Send">↑</button>
@@ -2217,6 +2315,8 @@ Describe the task, bug, or issue you want MM3 to investigate or fix.
     <button id="settings-toggle" class="icon-btn" type="button" title="Settings" aria-label="Settings">⚙</button>
     <span>Settings</span>
   </div>
+
+  <div id="cheapest-agent" class="cheapest-agent" aria-live="polite"></div>
 
   <div id="settings-modal" class="settings-modal" aria-hidden="true">
     <div class="settings-backdrop" data-close-settings="true"></div>
@@ -3765,6 +3865,11 @@ function setComposerState(next) {
     action.title = "Stop";
     return;
   }
+  if (next === "cancelling") {
+    action.textContent = "...";
+    action.title = "Stopping";
+    return;
+  }
   if (next === "failed") {
     action.textContent = "↻";
     action.title = "Retry";
@@ -3786,7 +3891,7 @@ function sendMessage() {
   if (processing) {
     return;
   }
-  if (!agentProfile.value) {
+  if (!agentProfile.value || agentProfile.options[agentProfile.selectedIndex]?.disabled) {
     addMessage("Choose an agent from the list.", "error");
     return;
   }
@@ -3813,6 +3918,9 @@ function sendMessage() {
 /* -------------------------------------------------------------------------- */
 
 action.addEventListener("click", () => {
+  if (composerState === "cancelling") {
+    return;
+  }
   if (composerState === "running") {
     vscode.postMessage({ type: "cancel_request" });
     return;
@@ -3832,8 +3940,6 @@ action.addEventListener("click", () => {
   }
   sendMessage();
 });
-
-vscode.postMessage({ type: "load_billing" });
 
 input.addEventListener("input", () => {
   if (composerState === "failed" && input.value.trim()) {
@@ -3941,13 +4047,13 @@ window.addEventListener(
         if (composerState !== "running") {
           break;
         }
-        if (message.event.type === "token" && message.event.delta) {
+        if ((message.event.type === "response.delta" || message.event.type === "token" || message.event.type === "provider_delta") && message.event.delta) {
           noteStreamActivity("Writing");
           updateStreamingPanel("Writing", message.event.delta);
           break;
         }
 
-        if (message.event.type === "change") {
+        if (message.event.type === "change.applied" || message.event.type === "change") {
           updateStreamingPanel("Change applied", "");
           break;
         }
@@ -3956,6 +4062,12 @@ window.addEventListener(
           message.event.message || "Working",
           ""
         );
+        break;
+
+      case "cancelling":
+        hideThinking();
+        setComposerState("cancelling");
+        setStatus("Stopping");
         break;
 
       case "approval_request":
@@ -3991,14 +4103,21 @@ window.addEventListener(
           walletBalance.textContent =
             Number(message.wallet?.balance ?? 0).toFixed(2) + " credits";
         }
+        const cheapestAgent = document.getElementById("cheapest-agent");
+        if (cheapestAgent) {
+          cheapestAgent.textContent = message.cheapest
+            ? "Suggest Agent : " + message.cheapest.name
+            : "";
+        }
         if (agentProfile && Array.isArray(message.agents)) {
           const selected = agentProfile.value;
           agentProfile.innerHTML = "";
+          const autoOption = document.createElement("option");
+          autoOption.value = "auto";
+          autoOption.textContent = "Auto (Cheapest)";
+          agentProfile.appendChild(autoOption);
           if (message.agents.length === 0) {
-            const option = document.createElement("option");
-            option.value = "";
-            option.textContent = "No agents";
-            agentProfile.appendChild(option);
+            autoOption.disabled = true;
           } else {
             message.agents.forEach((agent) => {
               const option = document.createElement("option");
@@ -4228,6 +4347,9 @@ type WebviewResponse =
       type: "cancelled";
     }
   | {
+      type: "cancelling";
+    }
+  | {
       type: "agent_event";
       event: AgentEvent;
     }
@@ -4268,6 +4390,7 @@ type WebviewResponse =
       type: "billing";
       wallet: WalletSummary;
       agents: BillingAgent[];
+      cheapest: CheapestBillingAgent | null;
       plans: CreditPlan[];
     }
   | {

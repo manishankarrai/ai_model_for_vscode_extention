@@ -40,6 +40,10 @@ export type AgentToolName =
   | "find_references"
   | "find_callers"
   | "find_callees"
+  | "find_tests"
+  | "find_routes"
+  | "find_reads"
+  | "find_writes"
   | "get_file_summary"
   | "get_project_summary"
   | "apply_change_set"
@@ -79,6 +83,7 @@ export interface ToolResult {
   tool: AgentToolName;
   success: boolean;
   output: string;
+  duration_ms?: number;
   approval?: ToolApprovalStatus;
   path?: string;
   reason?: string;
@@ -119,6 +124,7 @@ export interface ContextFile {
   endLine?: number;
   totalLines?: number;
   remainingLines?: number;
+  compressed?: boolean;
 }
 export interface ContextEvidence {
 
@@ -132,6 +138,21 @@ export interface ContextEvidence {
 
   matchedTerms: string[];
 
+}
+
+export interface ContextManifest {
+  version: 1;
+  estimatedTokens: number;
+  availableTokens: number;
+  reservedTokens: number;
+  entries: Array<{
+    path: string;
+    kind: "file" | "part";
+    status: "included" | "omitted" | "deduplicated" | "compressed";
+    estimatedTokens: number;
+    reason: string;
+  }>;
+  cacheHit?: boolean;
 }
 
 
@@ -149,6 +170,16 @@ export interface AIContext {
 
   parts?: ContextPart[];
 
+  manifest?: ContextManifest;
+
+  runtimeMetrics?: RuntimeMetricSnapshot;
+
+}
+
+export interface RuntimeMetricSnapshot {
+  counters: Record<string, number>;
+  durations: Record<string, number>;
+  gauges?: Record<string, number>;
 }
 
 export interface RetrievalOrchestration {
@@ -160,6 +191,15 @@ export interface RetrievalOrchestration {
     purpose: string;
   }>;
   stopConditions: string[];
+  branches?: RetrievalBranch[];
+}
+
+export interface RetrievalBranch {
+  id: string;
+  phase: string;
+  tools: string[];
+  purpose: string;
+  parallelizable: boolean;
 }
 
 export interface TaskMemory {
@@ -301,15 +341,62 @@ export interface AIResponse {
 
 export interface AgentEvent {
   profile: AgentProfile;
-  type: "started" | "completed" | "failed" | "synthesizing" | "progress" | "change" | "token" | "citation" | "quality" | "done";
+  type:
+    | "agent.started"
+    | "agent.completed"
+    | "agent.failed"
+    | "agent.synthesizing"
+    | "agent.progress"
+    | "change.applied"
+    | "tool.started"
+    | "tool.completed"
+    | "tool.failed"
+    | "response.delta"
+    | "response.completed"
+    | "citation.created"
+    | "quality.recorded"
+    | "started"
+    | "completed"
+    | "failed"
+    | "synthesizing"
+    | "progress"
+    | "change"
+    | "token"
+    | "provider_delta"
+    | "citation"
+    | "quality"
+    | "done";
+  request_id?: string;
   message: string;
   timestamp: number;
+  latency_ms?: number;
+  duration_ms?: number;
+  tool?: string;
+  success?: boolean;
   delta?: string;
   path?: string;
   quote?: string;
   start_line?: number;
   end_line?: number;
   confidence?: number;
+}
+
+export function normalizeAgentEvent(event: AgentEvent): AgentEvent {
+  const typeMap: Record<string, AgentEvent["type"]> = {
+    started: "agent.started",
+    completed: "agent.completed",
+    failed: "agent.failed",
+    synthesizing: "agent.synthesizing",
+    progress: "agent.progress",
+    change: "change.applied",
+    token: "response.delta",
+    provider_delta: "response.delta",
+    citation: "citation.created",
+    quality: "quality.recorded",
+    done: "response.completed"
+  };
+  const normalizedType = typeMap[event.type] ?? event.type;
+  return normalizedType === event.type ? event : { ...event, type: normalizedType };
 }
 
 export interface AgentTaskStatus {
@@ -345,6 +432,7 @@ export interface CodeChange {
 
 export interface AIUsage {
   input_tokens: number;
+  input_cache_hit_tokens?: number;
   output_tokens: number;
   total_tokens: number;
   ai_api_calls: number;
@@ -363,6 +451,17 @@ export interface BillingAgent {
   active: boolean;
   input_cost_per_1m: number;
   output_cost_per_1m: number;
+}
+
+export interface CheapestBillingAgent {
+  id: string;
+  name: string;
+  model: string;
+  category: string;
+  input_cost_per_1m: number;
+  output_cost_per_1m: number;
+  combined_cost_per_1m: number;
+  peak: boolean;
 }
 
 export interface CreditPlan {

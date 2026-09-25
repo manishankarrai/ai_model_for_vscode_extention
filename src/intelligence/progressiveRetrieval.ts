@@ -49,7 +49,7 @@ export function createRetrievalPlan(
     ],
     analyze: [
       { name: "target", tools: target, purpose: "Locate the requested subject and its direct implementation." },
-      { name: "relationships", tools: ["find_definition", "find_references", "find_callers", "find_callees"], purpose: "Trace nearby dependencies and callers." }
+      { name: "relationships", tools: ["find_definition", "find_references", "find_callers", "find_callees", "find_tests", "find_routes", "find_reads", "find_writes"], purpose: "Trace dependencies, callers, tests, routes, and data access." }
     ],
     bug_analysis: [
       { name: "symptoms", tools: ["get_diagnostics", "git_diff", "search"], purpose: "Start from diagnostics, current changes, and reported failure terms." },
@@ -58,7 +58,7 @@ export function createRetrievalPlan(
     ],
     architecture: [
       { name: "map", tools: ["get_project_summary", "list_files", "search"], purpose: "Map project boundaries and major modules." },
-      { name: "relationships", tools: ["find_definition", "find_references", "find_callers", "find_callees"], purpose: "Trace interfaces and dependency relationships." },
+      { name: "relationships", tools: ["find_definition", "find_references", "find_callers", "find_callees", "find_tests", "find_routes", "find_reads", "find_writes"], purpose: "Trace interfaces, dependencies, tests, routes, and data access." },
       { name: "evidence", tools: ["read_file_range", "get_file_summary"], purpose: "Read representative files at identified boundaries." }
     ],
     implementation: [

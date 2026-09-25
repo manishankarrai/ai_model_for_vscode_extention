@@ -1,4 +1,4 @@
-import type { AgentEvent } from "../models/types.ts";
+import { normalizeAgentEvent, type AgentEvent } from "../models/types.ts";
 
 export class AgentEventStreamHttpError extends Error {
   readonly status: number;
@@ -108,14 +108,14 @@ async function consumeEventStream(
           continue;
         }
 
-        const event = JSON.parse(data.slice(6)) as AgentEvent;
+        const event = normalizeAgentEvent(JSON.parse(data.slice(6)) as AgentEvent);
         const key = eventKey(event);
         if (seenEvents.has(key)) {
           continue;
         }
         seenEvents.add(key);
         onEvent(event);
-        if (event.type === "done") {
+        if (event.type === "response.completed") {
           return true;
         }
       }

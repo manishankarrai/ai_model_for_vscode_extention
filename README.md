@@ -3,28 +3,9 @@
 MM3 is an AI coding workspace for investigating, understanding, and safely improving your code from inside VS Code.
 
 The VS Code extension builds local project intelligence and enforces safety. The MM3 backend handles AI reasoning, specialist agents, model routing, accounts, and credits. File access stays under the extension's control.
-
-## What You Can Do
-
-- Ask questions about your project, files, or selected code.
-- Investigate bugs, architecture, dependencies, and implementation tasks.
-- Use Ask mode for answers based on the context you provide.
-- Use Agent mode for adaptive read-only investigation and grounded coding plans.
-- Attach files or the current editor selection to a question.
-- View citations, quoted code, validation checks, confidence, and proposed diffs.
-- Review, accept, reject, or roll back approved file changes.
-- Choose specialist agents for exploration, bugs, reviews, architecture, implementation, testing, or project memory.
 ## Preview
 ![MM3 AI Agent Insert Token](https://api.mm3ai.com/assets/9584332c106dbd40e0707a01c362f058.png)
 ![MM3 AI Agent preview](https://api.mm3ai.com/assets/635777d9ec0f060eae2b52135259ecd7.png)
-## Safety And Privacy
-
-- The backend does not receive direct filesystem or terminal access.
-- File reads and investigation tools run locally through validated extension APIs.
-- Ask mode cannot investigate, run tools, or modify files.
-- Agent mode can propose changes, but changes require your explicit approval.
-- Workspace boundaries and sensitive-path checks are applied before local access.
-- The extension sends only the context and evidence needed for the request.
 
 ## Getting Started
 
@@ -37,6 +18,26 @@ The VS Code extension builds local project intelligence and enforces safety. The
 Use the paperclip button to attach files. You can also use **MM3: Add Selection to Chat** from the editor context menu.
 
 AI requests use MM3 credits. Plans and available models are managed through your MM3 account.
+
+## What You Can Do
+
+- Ask questions about your project, files, or selected code.
+- Investigate bugs, architecture, dependencies, and implementation tasks.
+- Use Ask mode for answers based on the context you provide.
+- Use Agent mode for adaptive read-only investigation and grounded coding plans.
+- Attach files or the current editor selection to a question.
+- View citations, quoted code, validation checks, confidence, and proposed diffs.
+- Review, accept, reject, or roll back approved file changes.
+- Choose specialist agents for exploration, bugs, reviews, architecture, implementation, testing, or project memory.
+## Safety And Privacy
+
+- The backend does not receive direct filesystem or terminal access.
+- File reads and investigation tools run locally through validated extension APIs.
+- Ask mode cannot investigate, run tools, or modify files.
+- Agent mode can propose changes, but changes require your explicit approval.
+- Workspace boundaries and sensitive-path checks are applied before local access.
+- The extension sends only the context and evidence needed for the request.
+
 
 ## Review Changes
 

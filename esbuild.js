@@ -11,7 +11,8 @@ const options = {
   target: "node20",
   outfile: "dist/extension.js",
   sourcemap: true,
-  minify: false
+  minify: true,
+  legalComments: "none"
 };
 
 async function build() {

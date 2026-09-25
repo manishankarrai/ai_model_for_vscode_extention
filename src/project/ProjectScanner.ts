@@ -59,6 +59,8 @@ const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".py": "Python",
   ".rs": "Rust",
   ".java": "Java",
+  ".cs": "CSharp",
+  ".php": "PHP",
   ".kt": "Kotlin",
   ".json": "JSON",
   ".md": "Markdown",

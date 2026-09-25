@@ -8,11 +8,13 @@ import {
   Intent,
   AgentProfile,
   AgentEvent,
+  normalizeAgentEvent,
   AgentTaskStatus,
   ContextPart,
   ContextFile,
   InteractionMode,
   ImplementationPlan,
+  RuntimeMetricSnapshot,
 } from "../models/types";
 
 import { InvestigationState } from "../intelligence/InvestigationState";
@@ -42,11 +44,15 @@ import type {
 import { CodeChangeApplier } from "../safety/CodeChangeApplier";
 import { adaptiveLimits } from "../config/adaptiveLimits";
 import { chunkContextParts } from "../intelligence/contextSelection";
-import { budgetContext } from "../intelligence/contextBudget";
+import { ContextManager } from "../intelligence/ContextManager";
+import { MementoContextCacheStore } from "../intelligence/ContextCache";
+import { AgentRuntime } from "./AgentRuntime";
+import { VerificationManager, type VerificationOutcome } from "./VerificationManager";
 import { readBoundedTextChunk } from "./adaptiveRead";
 import { ProjectScanner } from "../project/ProjectScanner";
 import { RepositoryRetrieval } from "../project/RepositoryRetrieval";
-import { createRetrievalPlan, formatRetrievalPlan } from "../intelligence/progressiveRetrieval";
+import { runBoundedParallel } from "../utils/parallel";
+import type { RetrievalBranch } from "../models/types";
 
 
 import { flow } from "../utils/flowLog";
@@ -84,6 +90,7 @@ interface AdaptiveToolResult {
   tool: AdaptiveToolName;
   path?: string;
   success: boolean;
+  duration_ms?: number;
   approval?: ToolApprovalStatus;
   reason?: string;
   output: string;
@@ -213,9 +220,14 @@ export class Agent {
 
 
   private readonly workspaceTools: WorkspaceToolRegistry;
+  private prewarmTimer: ReturnType<typeof setTimeout> | undefined;
+  private prewarmRunning = false;
+  private prewarmQueued = false;
 
   private readonly projectScanner: ProjectScanner;
   private readonly repositoryRetrieval: RepositoryRetrieval;
+  private readonly contextManager: ContextManager;
+  private readonly runtime: AgentRuntime;
 
 
   constructor(
@@ -233,6 +245,11 @@ export class Agent {
   ) {
     flow("Agent.constructor", 1, "enter");
 
+    this.contextManager = new ContextManager(
+      taskStorage ? new MementoContextCacheStore(taskStorage) : undefined
+    );
+    this.runtime = new AgentRuntime(this.contextManager);
+
     this.projectScanner = new ProjectScanner(taskStorage);
     this.repositoryRetrieval = new RepositoryRetrieval(taskStorage);
 
@@ -243,6 +260,7 @@ export class Agent {
   invalidateProjectPath(filePath: string): void {
     this.projectScanner.invalidatePath(filePath);
     this.repositoryRetrieval.invalidatePath(filePath);
+    this.runtime.invalidatePath(filePath);
   }
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
@@ -255,6 +273,50 @@ export class Agent {
 
   async setAllowAllCommands(enabled: boolean): Promise<void> {
     await this.workspaceTools.setAllowAllCommands(enabled);
+  }
+
+  async prewarmProject(workspacePath: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted) {
+      throw new Error("Project prewarming cancelled");
+    }
+    await this.repositoryRetrieval.refresh(workspacePath);
+  }
+
+  scheduleProjectPrewarm(workspacePath: string, signal?: AbortSignal, delayMs = 400): void {
+    if (signal?.aborted) {
+      return;
+    }
+    this.prewarmQueued = true;
+    if (this.prewarmTimer) {
+      clearTimeout(this.prewarmTimer);
+    }
+    this.prewarmTimer = setTimeout(() => {
+      this.prewarmTimer = undefined;
+      void this.runScheduledPrewarm(workspacePath, signal);
+    }, delayMs);
+  }
+
+  private async runScheduledPrewarm(workspacePath: string, signal?: AbortSignal): Promise<void> {
+    if (signal?.aborted || this.prewarmRunning || !this.prewarmQueued) {
+      return;
+    }
+    this.prewarmQueued = false;
+    this.prewarmRunning = true;
+    try {
+      await this.prewarmProject(workspacePath, signal);
+    } finally {
+      this.prewarmRunning = false;
+      if (this.prewarmQueued && !signal?.aborted) {
+        this.scheduleProjectPrewarm(workspacePath, signal);
+      }
+    }
+  }
+
+  hasActiveTask(): boolean {
+    return Boolean(
+      this.lastRequest?.request_id ??
+      this.taskStorage?.get<string>(ACTIVE_TASK_STORAGE_KEY)
+    );
   }
 
 
@@ -319,13 +381,13 @@ export class Agent {
         try {
           const state = await this.backend.getAgentTaskState(requestId, accessToken);
           for (const event of state.task.events ?? []) {
-            onEvent(event);
+            onEvent(normalizeAgentEvent(event));
           }
         } catch (statusError) {
           try {
             const task = await this.backend.getAgentTask(requestId, accessToken);
             for (const event of (task as AgentTaskStatus).events ?? []) {
-              onEvent(event);
+              onEvent(normalizeAgentEvent(event));
             }
           } catch (legacyStatusError) {
             this.logger.warn("Unable to reload agent task status", legacyStatusError);
@@ -366,16 +428,17 @@ export class Agent {
       // Start with explicit user context; the backend requests any further tools.
       // ======================================================
 
-      const retrievalPlan = createRetrievalPlan(
+      const retrievalPlan = this.runtime.createPlan(
         requestAction,
         question,
         this.getConfiguredImplementationRoot()
       );
+      const specialistPolicy = this.runtime.resolveSpecialistPolicy(agentProfile, mode, agentCount);
       const initialContext: AIContext = {
         files: [],
         indexSummary: [
           projectIndex.summary,
-          formatRetrievalPlan(createRetrievalPlan(
+          this.runtime.formatPlan(this.runtime.createPlan(
             requestAction,
             question,
             this.getConfiguredImplementationRoot()
@@ -386,7 +449,8 @@ export class Agent {
           version: 1,
           intent: retrievalPlan.intent,
           phases: retrievalPlan.phases,
-          stopConditions: retrievalPlan.stopConditions
+          stopConditions: retrievalPlan.stopConditions,
+          branches: this.runtime.createBranches(retrievalPlan)
         },
         taskMemory: {
           findings: [],
@@ -407,7 +471,7 @@ export class Agent {
         tool_policy: getToolPolicy(mode),
         agent: {
           profile: agentProfile,
-          count: Math.max(1, Math.min(agentCount, mode === "ask" ? 1 : 5))
+          count: specialistPolicy.maxAgents
         },
         project: {
           id: this.createProjectId(workspace.uri),
@@ -541,10 +605,15 @@ export class Agent {
     }
 
     const context = await this.loadTaskContext(taskState, accessToken);
-    const retrievalPlan = createRetrievalPlan(
+    const retrievalPlan = this.runtime.createPlan(
       taskState.task.action,
       taskState.task.question,
       taskState.task.project.targetPath
+    );
+    const specialistPolicy = this.runtime.resolveSpecialistPolicy(
+      taskState.task.agent?.profile || "coordinator",
+      taskState.task.mode,
+      taskState.task.agent?.count ?? 1
     );
     const initialRequest: AdaptiveAIRequest = {
       ...(reusableRequest ?? {
@@ -557,12 +626,18 @@ export class Agent {
         tool_policy: taskState.task.tool_policy,
         plan: taskState.task.plan ?? [],
       }),
+      agent: taskState.task.agent
+        ? {
+            ...taskState.task.agent,
+            count: specialistPolicy.maxAgents
+          }
+        : undefined,
       project: taskState.task.project,
       context: {
         ...context,
         indexSummary: [
           context.indexSummary,
-          formatRetrievalPlan(createRetrievalPlan(
+          this.runtime.formatPlan(this.runtime.createPlan(
             taskState.task.action,
             taskState.task.question,
             taskState.task.project.targetPath
@@ -572,7 +647,8 @@ export class Agent {
           version: 1,
           intent: retrievalPlan.intent,
           phases: retrievalPlan.phases,
-          stopConditions: retrievalPlan.stopConditions
+          stopConditions: retrievalPlan.stopConditions,
+          branches: this.runtime.createBranches(retrievalPlan)
         },
         taskMemory: {
           findings: taskState.task.task_memory?.findings ?? [],
@@ -735,7 +811,7 @@ export class Agent {
     }
     onEvent?.({
       profile,
-      type: "progress",
+      type: "agent.progress",
       message,
       timestamp: Date.now()
     });
@@ -763,7 +839,7 @@ export class Agent {
     }
     onEvent?.({
       profile,
-      type: "progress",
+      type: "agent.progress",
       message: compact,
       timestamp: Date.now()
     });
@@ -808,7 +884,7 @@ export class Agent {
       return undefined;
     }
     const match = message.match(
-      /\b(read_file|read_file_range|read_symbol|search|search_symbols|list_files|find_definition|find_references|find_callers|find_callees|get_file_summary|get_project_summary|get_diagnostics|git_status|git_diff|edit_file|write_file|create_file|delete_file|move_file|rename_file|apply_change_set|apply_patch|run_command|run_task|run_tests)\b/i
+      /\b(read_file|read_file_range|read_symbol|search|search_symbols|list_files|find_definition|find_references|find_callers|find_callees|find_tests|find_routes|find_reads|find_writes|get_file_summary|get_project_summary|get_diagnostics|git_status|git_diff|edit_file|write_file|create_file|delete_file|move_file|rename_file|apply_change_set|apply_patch|run_command|run_task|run_tests)\b/i
     );
     return match?.[1];
   }
@@ -883,7 +959,7 @@ export class Agent {
     // --------------------------------------------------------
 
     const state =
-      new InvestigationState({
+      this.runtime.createInvestigationState({
         maxSteps: task.budget?.max_steps,
         maxFiles: task.budget?.max_files,
         maxChars: Math.min(
@@ -935,6 +1011,10 @@ export class Agent {
     const readRangeEnds = new Map<string, number | undefined>();
 
     const investigationSummary: string[] = [];
+    let mutationApplied = false;
+    let verificationAttempts = 0;
+    const verificationManager = new VerificationManager();
+    const verificationOutcomes: VerificationOutcome[] = [];
 
     if (existingTask && pendingDecision) {
       for (let step = 0; step < (existingTask.current_step ?? 0); step++) {
@@ -966,6 +1046,7 @@ export class Agent {
         readRangeEnds
       );
       context = this.mergeAdaptiveEvidence(context, resumed.evidence);
+      context.taskMemory = this.runtime.updateVerificationMemory(context.taskMemory, resumed.toolResults);
       reasoningContext = {
         ...context,
         files: context.files
@@ -984,6 +1065,15 @@ export class Agent {
           `Evidence update: ${toolSummary}`
         );
         investigationSummary.push(toolSummary);
+        if (result.success && [
+          "edit_file", "write_file", "create_file", "delete_file", "rename_file",
+          "move_file", "apply_change_set", "apply_patch"
+        ].includes(result.tool)) {
+          mutationApplied = true;
+        }
+        if (result.tool === "get_diagnostics" || result.tool === "run_tests" || result.tool === "run_command") {
+          verificationOutcomes.push({ tool: result.tool, success: result.success });
+        }
       }
     }
 
@@ -1138,18 +1228,29 @@ export class Agent {
       // PREPARE REQUEST
       // ======================================================
 
-      const budgetedContext = budgetContext(reasoningContext, {
+      const contextStartedAt = Date.now();
+      const budgetedContext = this.runtime.prepareContext(reasoningContext, {
         maxTokens: adaptiveLimits.maxContextTokens,
         reservedTokens: adaptiveLimits.reservedContextTokens,
         outputTokens: adaptiveLimits.reservedOutputTokens,
         exactPaths: (reasoningContext.parts ?? []).map((part: ContextPart) => part.path)
       });
+      this.runtime.recordMetric("context.prepare_ms", Date.now() - contextStartedAt);
+      if (budgetedContext.cacheHit) {
+        this.runtime.recordMetric("context.cache_hits");
+      }
+      this.runtime.setGauge("budget.remaining_chars", state.maxChars - state.totalChars);
+      this.runtime.setGauge("budget.remaining_tool_calls", state.maxToolCalls - state.toolCalls);
+      this.runtime.setGauge("budget.remaining_ai_calls", state.maxAICalls - state.aiCalls);
 
       request = {
 
         ...request,
 
-        context: budgetedContext.context,
+        context: {
+          ...budgetedContext.context,
+          runtimeMetrics: this.runtime.metricsSnapshot()
+        },
 
         step:
           currentStep
@@ -1213,6 +1314,7 @@ export class Agent {
 
       let rawResponse: AIResponse;
       try {
+        const modelStartedAt = Date.now();
         rawResponse = await this.backend.decideAgentTask(
           request.request_id,
           {
@@ -1223,6 +1325,7 @@ export class Agent {
           accessToken,
           signal
         );
+        this.runtime.recordMetric("model.request_ms", Date.now() - modelStartedAt);
       } catch (error) {
         const invalidTool = this.getAdaptiveToolRequestFailure(error);
         if (!invalidTool) {
@@ -1423,6 +1526,42 @@ export class Agent {
         "FINAL_ANSWER"
       ) {
 
+        const verification = verificationManager.evaluate(verificationOutcomes);
+        context.taskMemory = context.taskMemory
+          ? {
+              ...context.taskMemory,
+              verification: {
+                ...context.taskMemory.verification,
+                completed: verification.completed,
+                lastResult: verification.summary
+              }
+            }
+          : context.taskMemory;
+        const verificationPassed = verification.completed;
+        if (mutationApplied && !verificationPassed && verificationAttempts < 2) {
+          verificationAttempts += 1;
+          response.decision = {
+            ...response.decision,
+            action: "CONTINUE_INVESTIGATION",
+            reason: "A workspace mutation succeeded; run diagnostics and tests before finalizing.",
+            tool: undefined,
+            tools: [
+              {
+                tool: "get_diagnostics",
+                reason: "Check diagnostics after the successful workspace mutation."
+              },
+              {
+                tool: "run_tests",
+                reason: "Run the workspace test suite after the successful workspace mutation."
+              }
+            ]
+          };
+        }
+
+        if (response.decision.action !== "FINAL_ANSWER") {
+          continue;
+        }
+
         this.emitProgress(onEvent, initialRequest.agent?.profile || "agent", "Preparing the final answer.");
 
         const answer =
@@ -1583,6 +1722,7 @@ export class Agent {
           readOffsets,
           readRangeEnds
         );
+      context.taskMemory = this.runtime.updateVerificationMemory(context.taskMemory, toolResults);
 
       for (const result of toolResults) {
         const toolSummary = this.summarizeAdaptiveToolResult(result);
@@ -1592,6 +1732,15 @@ export class Agent {
           `Evidence update: ${toolSummary}`
         );
         investigationSummary.push(toolSummary);
+        if (result.success && [
+          "edit_file", "write_file", "create_file", "delete_file", "rename_file",
+          "move_file", "apply_change_set", "apply_patch"
+        ].includes(result.tool)) {
+          mutationApplied = true;
+        }
+        if (result.tool === "get_diagnostics" || result.tool === "run_tests" || result.tool === "run_command") {
+          verificationOutcomes.push({ tool: result.tool, success: result.success });
+        }
         if (!result.success && (result.tool === "run_command" || result.tool === "run_tests" || result.tool === "get_diagnostics")) {
           this.emitInvestigationUpdate(
             onEvent,
@@ -2215,6 +2364,10 @@ export class Agent {
       "find_references",
       "find_callers",
       "find_callees",
+      "find_tests",
+      "find_routes",
+      "find_reads",
+      "find_writes",
       "get_file_summary",
       "get_project_summary",
       "get_diagnostics",
@@ -2272,11 +2425,23 @@ export class Agent {
     };
 
     const executeOne = async (tool: AdaptiveToolRequest): Promise<void> => {
+      if (signal?.aborted) {
+        throw new Error("Adaptive investigation cancelled");
+      }
       const toolKey = this.createToolRequestKey(tool);
       if (!state.recordAIRequest(toolKey) || !await reserveToolCall()) {
         throw new Error(`Adaptive investigation stopped: ${state.stopReason}`);
       }
+      const startedAt = Date.now();
       try {
+        onEvent?.({
+          profile: profile as AgentEvent["profile"],
+          type: "tool.started",
+          tool: tool.tool,
+          path: tool.path,
+          message: this.describeToolAction(tool),
+          timestamp: Date.now()
+        });
         this.emitProgress(
           onEvent,
           profile as AgentProfile,
@@ -2288,10 +2453,23 @@ export class Agent {
           tool: tool.tool,
           path: tool.path,
           success: result.success,
+          duration_ms: Math.max(0, Date.now() - startedAt),
           approval: result.approval,
           reason: tool.reason,
           output: result.output,
           error: result.error
+        });
+        this.runtime.recordMetric(`tool.${tool.tool}.count`);
+        this.runtime.recordMetric("tool.total_ms", Math.max(0, Date.now() - startedAt));
+        onEvent?.({
+          profile: profile as AgentEvent["profile"],
+          type: result.success ? "tool.completed" : "tool.failed",
+          tool: tool.tool,
+          path: tool.path,
+          success: result.success,
+          duration_ms: Math.max(0, Date.now() - startedAt),
+          message: result.success ? `${tool.tool} completed.` : `${tool.tool} failed.`,
+          timestamp: Date.now()
         });
 
         const resets = new Set([
@@ -2309,19 +2487,23 @@ export class Agent {
           ["edit_file", "write_file", "create_file", "delete_file", "rename_file", "move_file", "apply_change_set", "apply_patch"].includes(tool.tool)
         ) {
           this.manifestCache = undefined;
+          if (tool.path?.trim()) {
+            this.contextManager.invalidatePath(tool.path.trim());
+          }
           readOffsets.delete("m3-tools/workspace-files.txt");
           readRangeEnds.delete("m3-tools/workspace-files.txt");
         }
         const target = tool.targetPath ?? tool.target_path;
         if (result.success && (tool.tool === "rename_file" || tool.tool === "move_file") && target?.trim()) {
           state.clearPathInspectionKeys(target.trim());
+          this.contextManager.invalidatePath(target.trim());
           readOffsets.delete(target.trim());
           readRangeEnds.delete(target.trim());
         }
         if (onEvent && result.success && resets.has(tool.tool) && tool.tool !== "get_diagnostics") {
           onEvent({
             profile: profile as AgentEvent["profile"],
-            type: "change",
+            type: "change.applied",
             message: [
               "Changed `" + (tool.path || "file") + "`",
               result.output
@@ -2332,15 +2514,36 @@ export class Agent {
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("not approved")) {
+          onEvent?.({
+            profile: profile as AgentEvent["profile"],
+            type: "tool.failed",
+            tool: tool.tool,
+            path: tool.path,
+            success: false,
+            duration_ms: Math.max(0, Date.now() - startedAt),
+            message,
+            timestamp: Date.now()
+          });
           throw error;
         }
         toolResults.push({
           tool: tool.tool,
           path: tool.path,
           success: false,
+          duration_ms: Math.max(0, Date.now() - startedAt),
           reason: tool.reason,
           output: "",
           error: message
+        });
+        onEvent?.({
+          profile: profile as AgentEvent["profile"],
+          type: "tool.failed",
+          tool: tool.tool,
+          path: tool.path,
+          success: false,
+          duration_ms: Math.max(0, Date.now() - startedAt),
+          message,
+          timestamp: Date.now()
         });
         evidence.push({
           path: `m3-tools/${tool.tool}.txt`,
@@ -2350,21 +2553,21 @@ export class Agent {
       }
     };
 
-    const parallel = tools.filter(tool => readOnlyTools.has(tool.tool));
-    const ordered = tools.filter(tool => !readOnlyTools.has(tool.tool));
-    const workerCount = Math.min(ADAPTIVE_TOOL_CONCURRENCY, parallel.length);
-    let nextParallelIndex = 0;
-    await Promise.all(
-      Array.from({ length: workerCount }, async () => {
-        while (nextParallelIndex < parallel.length) {
-          const tool = parallel[nextParallelIndex++];
-          await executeOne(tool);
-        }
-      })
+    const branches: RetrievalBranch[] = tools.map((tool, index) => ({
+      id: `adaptive-${step}-${index}`,
+      phase: "adaptive-tools",
+      tools: [tool.tool],
+      purpose: tool.reason ?? `Execute ${tool.tool}`,
+      parallelizable: readOnlyTools.has(tool.tool)
+    }));
+    const branchTools = new Map(branches.map((branch, index) => [branch.id, tools[index]]));
+    const parallelCount = branches.filter((branch) => branch.parallelizable).length;
+    await this.runtime.runInvestigationBranches(
+      branches,
+      async (branch) => executeOne(branchTools.get(branch.id)!),
+      Math.min(ADAPTIVE_TOOL_CONCURRENCY, Math.max(1, parallelCount)),
+      signal
     );
-    for (const tool of ordered) {
-      await executeOne(tool);
-    }
     return { evidence, toolResults };
   }
 
@@ -2383,6 +2586,10 @@ export class Agent {
       case "find_references":
       case "find_callers":
       case "find_callees":
+      case "find_tests":
+      case "find_routes":
+      case "find_reads":
+      case "find_writes":
         return `Finding ${tool.tool.replace("find_", "")} for ${tool.symbol || tool.query || "the requested symbol"}.`;
       case "get_file_summary":
         return `Summarizing ${target}.`;
@@ -2736,6 +2943,12 @@ export class Agent {
     flow("Agent.executeAdaptiveSearch", 1, "enter", { query });
 
     const ranked = await this.repositoryRetrieval.search(workspaceUri.fsPath, query, ADAPTIVE_MAX_SEARCH_RESULTS);
+    this.runtime.recordMetric("retrieval.search_ms", this.repositoryRetrieval.lastSearchTiming.totalMs);
+    this.runtime.recordMetric("retrieval.semantic_ms", this.repositoryRetrieval.lastSearchTiming.semanticMs);
+    this.runtime.recordMetric("retrieval.ranking_ms", this.repositoryRetrieval.lastSearchTiming.rankingMs);
+    if (this.repositoryRetrieval.lastSearchTiming.cacheHit) {
+      this.runtime.recordMetric("retrieval.cache_hits");
+    }
     const evidence: Array<{ path: string; content: string }> = ranked.map((item) => ({
       path: item.path,
       content: `[score=${item.score}; reason=${item.reason}; matched=${item.matchedTerms.join(", ")}]\n${item.snippet}`
