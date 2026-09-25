@@ -64,8 +64,10 @@ export class RepositoryRetrieval {
   private readonly storage?: ProjectScannerStorage;
   private readonly semanticIndexedPaths = new Set<string>();
   private readonly searchCache = new Map<string, RankedSearchResult[]>();
+  private readonly pendingPaths = new Set<string>();
   private workspacePath?: string;
   private restoredSearchCacheVersion?: number;
+  private refreshPromise?: Promise<ProjectIndexSnapshot>;
 
   constructor(storage?: ProjectScannerStorage, semanticIndex = new LocalSemanticIndex()) {
     this.storage = storage;
@@ -75,66 +77,126 @@ export class RepositoryRetrieval {
 
   invalidatePath(filePath: string): void {
     this.scanner.invalidatePath(filePath);
+    this.pendingPaths.add(path.resolve(filePath));
   }
 
-  async refresh(workspacePath: string): Promise<ProjectIndexSnapshot> {
+  reset(): void {
+    this.snapshot = undefined;
+    this.workspacePath = undefined;
+    this.contents.clear();
+    this.symbols.clear();
+    this.semanticIndex.clear();
+    this.semanticIndexedPaths.clear();
+    this.relationships = [];
+    this.searchCache.clear();
+    this.pendingPaths.clear();
+    this.restoredSearchCacheVersion = undefined;
+    this.scanner.reset();
+  }
+
+  async refresh(workspacePath: string, forceFresh = false): Promise<ProjectIndexSnapshot> {
+    if (this.refreshPromise) {
+      return this.refreshPromise;
+    }
+
+    const operation = this.refreshInternal(workspacePath, forceFresh);
+    this.refreshPromise = operation;
+    try {
+      return await operation;
+    } finally {
+      if (this.refreshPromise === operation) {
+        this.refreshPromise = undefined;
+      }
+    }
+  }
+
+  private async refreshInternal(workspacePath: string, forceFresh: boolean): Promise<ProjectIndexSnapshot> {
     const resolvedWorkspace = path.resolve(workspacePath);
-    if (this.workspacePath !== resolvedWorkspace) {
+    const workspaceChanged = this.workspacePath !== resolvedWorkspace;
+    if (workspaceChanged || forceFresh) {
       this.workspacePath = resolvedWorkspace;
       this.contents.clear();
       this.symbols.clear();
       this.semanticIndex.clear();
       this.semanticIndexedPaths.clear();
+      this.relationships = [];
       this.searchCache.clear();
       this.restoredSearchCacheVersion = undefined;
       this.snapshot = undefined;
     }
-    this.snapshot = await this.scanner.scan(workspacePath);
-    if (this.snapshot.changedPaths.length > 0 || this.snapshot.removedPaths.length > 0) {
-      this.searchCache.clear();
-    }
-    if (this.restoredSearchCacheVersion !== this.snapshot.indexVersion) {
-      this.restoreSearchCache(resolvedWorkspace, this.snapshot.indexVersion);
-      this.restoredSearchCacheVersion = this.snapshot.indexVersion;
-    }
-    const restored = this.restoreSymbols(resolvedWorkspace, this.snapshot.indexVersion);
-    const activePaths = new Set(this.snapshot.files.map((file) => file.path));
-    for (const filePath of this.contents.keys()) {
-      if (!activePaths.has(filePath)) {
-        this.contents.delete(filePath);
-        this.symbols.removeFile(filePath);
-        this.semanticIndex.removeFile(filePath);
-        this.semanticIndexedPaths.delete(filePath);
-      }
-    }
 
-    for (const filePath of this.snapshot.changedPaths) {
-      this.semanticIndex.removeFile(filePath);
-      this.semanticIndexedPaths.delete(filePath);
-      await this.indexFile(workspacePath, filePath);
-      this.indexSemanticFile(filePath);
-    }
-    if (!restored && this.symbols.getSymbols().length === 0 && this.snapshot.files.length > 0) {
-      for (const file of this.snapshot.files) {
-        await this.indexFile(workspacePath, file.path);
-        this.indexSemanticFile(file.path);
-      }
-    }
-    if (restored) {
-      for (const file of this.snapshot.files) {
-        if (!this.contents.has(file.path)) {
-          await this.loadContent(workspacePath, file.path);
+    if (!this.snapshot) {
+      this.snapshot = await this.scanner.scan(resolvedWorkspace, forceFresh);
+      this.pendingPaths.clear();
+      const restored = !forceFresh && this.restoreSymbols(resolvedWorkspace, this.snapshot.indexVersion);
+      if (!restored) {
+        for (const file of this.snapshot.files) {
+          await this.indexFile(resolvedWorkspace, file.path);
+          this.indexSemanticFile(file.path);
         }
-        if (!this.semanticIndexedPaths.has(file.path)) {
+      } else {
+        for (const file of this.snapshot.files) {
+          await this.loadContent(resolvedWorkspace, file.path);
           this.indexSemanticFile(file.path);
         }
       }
+      const restoredRelationships = restored && this.restoreRelationships(resolvedWorkspace, this.snapshot.indexVersion);
+      this.relationships = restoredRelationships ? restoredRelationships : this.buildRelationships();
+      if (!forceFresh) {
+        this.restoreSearchCache(resolvedWorkspace, this.snapshot.indexVersion);
+        this.restoredSearchCacheVersion = this.snapshot.indexVersion;
+      }
+      this.codeGraph.rebuild(this.relationships, this.symbols.getSymbols());
+      this.persistSymbols(resolvedWorkspace, this.snapshot.indexVersion);
+      this.persistRelationships(resolvedWorkspace, this.snapshot.indexVersion);
+      return this.snapshot;
     }
-    const restoredRelationships = restored && this.restoreRelationships(resolvedWorkspace, this.snapshot.indexVersion);
-    this.relationships = restoredRelationships ? restoredRelationships : this.buildRelationships();
-    this.codeGraph.rebuild(this.relationships, this.symbols.getSymbols());
-    this.persistSymbols(resolvedWorkspace, this.snapshot.indexVersion);
-    this.persistRelationships(resolvedWorkspace, this.snapshot.indexVersion);
+
+    if (this.pendingPaths.size === 0) {
+      return this.snapshot;
+    }
+
+    const changedPaths = new Set<string>();
+    const removedPaths = new Set<string>();
+    const oldSymbols = new Map<string, IndexedSymbol[]>();
+    const pendingPaths = [...this.pendingPaths];
+    this.pendingPaths.clear();
+
+    for (const absolutePath of pendingPaths) {
+      const relativePath = path.relative(resolvedWorkspace, absolutePath).split(path.sep).join("/");
+      if (!relativePath || relativePath === ".." || relativePath.startsWith("../")) {
+        continue;
+      }
+      oldSymbols.set(relativePath, this.symbols.getSymbols(relativePath));
+      const nextSnapshot = await this.scanner.updatePath(resolvedWorkspace, absolutePath);
+      nextSnapshot.changedPaths.forEach((filePath) => changedPaths.add(filePath));
+      nextSnapshot.removedPaths.forEach((filePath) => removedPaths.add(filePath));
+      this.snapshot = nextSnapshot;
+    }
+
+    const affectedPaths = new Set([...changedPaths, ...removedPaths]);
+    if (affectedPaths.size === 0) {
+      return this.snapshot;
+    }
+
+    for (const filePath of affectedPaths) {
+      this.contents.delete(filePath);
+      this.symbols.removeFile(filePath);
+      this.semanticIndex.removeFile(filePath);
+      this.semanticIndexedPaths.delete(filePath);
+    }
+    for (const filePath of changedPaths) {
+      await this.indexFile(resolvedWorkspace, filePath);
+      this.indexSemanticFile(filePath);
+    }
+
+    if (changedPaths.size > 0 || removedPaths.size > 0) {
+      this.searchCache.clear();
+      this.rebuildRelationshipsIncrementally(affectedPaths, oldSymbols);
+      this.codeGraph.rebuild(this.relationships, this.symbols.getSymbols());
+      this.persistSymbols(resolvedWorkspace, this.snapshot.indexVersion);
+      this.persistRelationships(resolvedWorkspace, this.snapshot.indexVersion);
+    }
     return this.snapshot;
   }
 
@@ -495,6 +557,117 @@ export class RepositoryRetrieval {
       }
     }
     return [...new Map(relationships.map((item) => [`${item.from}:${item.to}:${item.kind}`, item])).values()];
+  }
+
+  private rebuildRelationshipsIncrementally(
+    affectedPaths: Set<string>,
+    oldSymbols: Map<string, IndexedSymbol[]>
+  ): void {
+    const changedNames = new Set<string>();
+    const changedFroms = new Set<string>();
+    for (const symbols of oldSymbols.values()) {
+      for (const symbol of symbols) {
+        changedNames.add(symbol.name);
+        changedNames.add(symbol.qualifiedName);
+        changedFroms.add(symbol.qualifiedName);
+      }
+    }
+    for (const filePath of affectedPaths) {
+      for (const symbol of this.symbols.getSymbols(filePath)) {
+        changedNames.add(symbol.name);
+        changedNames.add(symbol.qualifiedName);
+        changedFroms.add(symbol.qualifiedName);
+      }
+    }
+
+    const kept = this.relationships.filter((relationship) =>
+      !affectedPaths.has(relationship.sourcePath ?? "") &&
+      !changedFroms.has(relationship.from) &&
+      !changedNames.has(relationship.to)
+    );
+    const symbols = this.symbols.getSymbols();
+    const byName = new Map<string, IndexedSymbol>();
+    for (const symbol of symbols) {
+      byName.set(symbol.name, symbol);
+      byName.set(symbol.qualifiedName, symbol);
+    }
+    const additions: Relationship[] = [];
+
+    for (const source of symbols) {
+      const sourceChanged = affectedPaths.has(source.path);
+      const content = this.contents.get(source.path) ?? "";
+      for (const [name, target] of byName) {
+        if ((!sourceChanged && !changedNames.has(name)) || target.id === source.id || !new RegExp(`\\b${this.escapeRegExp(name)}\\b`).test(content)) {
+          continue;
+        }
+        const callLine = this.findCallLine(content, name, source.startLine, source.endLine);
+        const isTest = this.isTestPath(source.path) && callLine !== undefined;
+        additions.push({
+          from: source.qualifiedName,
+          to: target.qualifiedName,
+          kind: isTest ? "test" : callLine === undefined ? "reference" : "call",
+          line: callLine ?? source.startLine,
+          provenance: isTest ? "test-reference" : callLine === undefined ? "symbol-reference" : "symbol-call",
+          confidence: isTest ? 0.95 : callLine === undefined ? 0.6 : 0.9,
+          ...(isTest ? { sourcePath: source.path } : {})
+        });
+      }
+      if (sourceChanged) {
+        const language = this.snapshot?.files.find((file) => file.path === source.path)?.language ?? "Other";
+        for (const access of this.extractDataAccesses(language, content, source.startLine, source.endLine)) {
+          additions.push({
+            from: source.qualifiedName,
+            to: access.path,
+            kind: access.kind,
+            line: access.line,
+            provenance: "data-access",
+            confidence: 0.85,
+            sourcePath: source.path
+          });
+        }
+      }
+    }
+
+    for (const filePath of affectedPaths) {
+      const content = this.contents.get(filePath);
+      if (content === undefined) {
+        continue;
+      }
+      const language = this.snapshot?.files.find((file) => file.path === filePath)?.language ?? "Other";
+      for (const imported of this.extractImports(language, content)) {
+        const resolvedPath = language === "TypeScript" || language === "JavaScript"
+          ? this.resolveImportPath(filePath, imported.path)
+          : language === "Go" ? this.resolveGoImportPath(imported.path)
+            : this.resolveModuleImportPath(language, filePath, imported.path);
+        const dependency = resolvedPath === undefined ? this.dependencyInfo(imported.path, language) : undefined;
+        additions.push({
+          from: filePath,
+          to: imported.path,
+          kind: "import",
+          line: imported.line,
+          sourcePath: filePath,
+          provenance: resolvedPath === undefined ? "external-import" : "import-declaration",
+          confidence: resolvedPath === undefined ? 0.7 : 0.95,
+          ...(dependency ?? {}),
+          ...(resolvedPath === undefined ? {} : { resolvedPath })
+        });
+      }
+      for (const route of this.extractRoutes(language, filePath, content)) {
+        additions.push({
+          from: filePath,
+          to: `${route.method} ${route.path}`,
+          kind: "route",
+          line: route.line,
+          sourcePath: filePath,
+          provenance: "route-registration",
+          confidence: 0.95
+        });
+      }
+    }
+
+    this.relationships = [...new Map(
+      [...kept, ...additions].map((item) => [`${item.from}:${item.to}:${item.kind}`, item])
+    ).values()];
   }
 
   private indexSemanticFile(filePath: string): void {

@@ -37,7 +37,8 @@ interface CachedFile extends ProjectFileRecord {
 
 interface PersistedProjectIndex {
   indexVersion: number;
-  files: CachedFile[];
+  paths?: string[];
+  files?: CachedFile[];
 }
 
 const IGNORED_DIRECTORIES = new Set([
@@ -86,6 +87,15 @@ export class ProjectScanner {
     this.storage = storage;
   }
 
+  reset(): void {
+    this.workspacePath = undefined;
+    this.indexVersion = 0;
+    this.cache.clear();
+    this.invalidatedPaths.clear();
+    this.pendingInvalidations.clear();
+    this.restoredWorkspace = undefined;
+  }
+
   invalidatePath(filePath: string): void {
     const absolutePath = path.resolve(filePath);
     if (!this.workspacePath) {
@@ -99,8 +109,13 @@ export class ProjectScanner {
     }
   }
 
-  async scan(workspacePath: string): Promise<ProjectIndexSnapshot> {
+  async scan(workspacePath: string, forceFresh = false): Promise<ProjectIndexSnapshot> {
     const resolvedWorkspace = path.resolve(workspacePath);
+    if (forceFresh && this.workspacePath === resolvedWorkspace) {
+      this.indexVersion = 0;
+      this.cache.clear();
+      this.restoredWorkspace = undefined;
+    }
     if (this.workspacePath !== resolvedWorkspace) {
       this.workspacePath = resolvedWorkspace;
       this.indexVersion = 0;
@@ -108,7 +123,9 @@ export class ProjectScanner {
       this.restoredWorkspace = undefined;
     }
     if (this.restoredWorkspace !== resolvedWorkspace) {
-      await this.restore(resolvedWorkspace);
+      if (!forceFresh) {
+        await this.restore(resolvedWorkspace);
+      }
       this.restoredWorkspace = resolvedWorkspace;
       for (const absolutePath of this.pendingInvalidations) {
         this.invalidatePath(absolutePath);
@@ -176,18 +193,77 @@ export class ProjectScanner {
     };
   }
 
+  async updatePath(workspacePath: string, filePath: string): Promise<ProjectIndexSnapshot> {
+    const resolvedWorkspace = path.resolve(workspacePath);
+    if (this.workspacePath !== resolvedWorkspace || this.restoredWorkspace !== resolvedWorkspace) {
+      return this.scan(resolvedWorkspace);
+    }
+
+    const absolutePath = path.resolve(filePath);
+    const relativePath = this.toRelativePath(resolvedWorkspace, absolutePath);
+    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || this.isIgnoredPath(relativePath)) {
+      return this.snapshot([], []);
+    }
+
+    const previous = this.cache.get(relativePath);
+    const changedPaths: string[] = [];
+    const removedPaths: string[] = [];
+
+    try {
+      const stats = await fs.stat(absolutePath);
+      if (!stats.isFile()) {
+        return this.snapshot([], []);
+      }
+
+      const record = await this.readFileRecord(absolutePath, relativePath, stats.size);
+      const nextRecord: CachedFile = {
+        ...record,
+        modifiedTimeMs: stats.mtimeMs,
+        fingerprint: {
+          size: stats.size,
+          modifiedTimeMs: stats.mtimeMs
+        }
+      };
+      this.cache.set(relativePath, nextRecord);
+      if (!previous || previous.hash !== nextRecord.hash) {
+        changedPaths.push(relativePath);
+        this.indexVersion += 1;
+      }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
+      if (previous) {
+        this.cache.delete(relativePath);
+        removedPaths.push(relativePath);
+        this.indexVersion += 1;
+      }
+    }
+
+    this.invalidatedPaths.delete(relativePath);
+    await this.persistPath(resolvedWorkspace, relativePath);
+    return this.snapshot(changedPaths, removedPaths);
+  }
+
   private storageKey(workspacePath: string): string {
     return `mm3.project-index.v1.${createHash("sha256").update(workspacePath).digest("hex")}`;
   }
 
+  private fileStorageKey(workspacePath: string, filePath: string): string {
+    return `mm3.project-file.v1.${createHash("sha256").update(`${workspacePath}\0${filePath}`).digest("hex")}`;
+  }
+
   private async restore(workspacePath: string): Promise<void> {
     const persisted = this.storage?.get<PersistedProjectIndex>(this.storageKey(workspacePath));
-    if (!persisted || !Number.isInteger(persisted.indexVersion) || !Array.isArray(persisted.files)) {
+    if (!persisted || !Number.isInteger(persisted.indexVersion)) {
       return;
     }
 
     this.indexVersion = persisted.indexVersion;
-    for (const record of persisted.files) {
+    const records = Array.isArray(persisted.files)
+      ? persisted.files
+      : (persisted.paths ?? []).map((filePath) => this.storage?.get<CachedFile>(this.fileStorageKey(workspacePath, filePath)));
+    for (const record of records) {
       if (
         record &&
         typeof record.path === "string" &&
@@ -208,7 +284,29 @@ export class ProjectScanner {
     try {
       await this.storage.update(this.storageKey(workspacePath), {
         indexVersion: this.indexVersion,
-        files: [...this.cache.values()]
+        paths: [...this.cache.keys()].sort()
+      } satisfies PersistedProjectIndex);
+      for (const [filePath, record] of this.cache) {
+        await this.storage.update(this.fileStorageKey(workspacePath, filePath), record);
+      }
+    } catch {
+      // A cache write must not prevent local retrieval from working.
+    }
+  }
+
+  private async persistPath(workspacePath: string, filePath: string): Promise<void> {
+    if (!this.storage) {
+      return;
+    }
+
+    try {
+      await this.storage.update(
+        this.fileStorageKey(workspacePath, filePath),
+        this.cache.get(filePath)
+      );
+      await this.storage.update(this.storageKey(workspacePath), {
+        indexVersion: this.indexVersion,
+        paths: [...this.cache.keys()].sort()
       } satisfies PersistedProjectIndex);
     } catch {
       // A cache write must not prevent local retrieval from working.
@@ -232,6 +330,25 @@ export class ProjectScanner {
     }
 
     return files.sort();
+  }
+
+  private isIgnoredPath(relativePath: string): boolean {
+    return relativePath.split("/").some((segment) => IGNORED_DIRECTORIES.has(segment));
+  }
+
+  private snapshot(changedPaths: string[], removedPaths: string[]): ProjectIndexSnapshot {
+    const files = [...this.cache.values()]
+      .map(({ fingerprint: _fingerprint, ...record }) => record)
+      .sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+
+    return {
+      indexVersion: this.indexVersion,
+      scannedAt: Date.now(),
+      files,
+      changedPaths: changedPaths.sort(),
+      removedPaths: removedPaths.sort(),
+      summary: this.buildSummary(files, changedPaths, removedPaths)
+    };
   }
 
   private async readFileRecord(

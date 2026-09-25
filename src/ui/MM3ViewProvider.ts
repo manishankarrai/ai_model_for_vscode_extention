@@ -38,6 +38,8 @@ export class MM3ViewProvider
   private view?: vscode.WebviewView;
 
   private isProcessing = false;
+  private projectScanning = false;
+  private initializedWorkspace?: string;
 
   private selectedContext: ContextPart[] = [];
   private readonly dismissedContextKeys = new Set<string>();
@@ -72,6 +74,7 @@ export class MM3ViewProvider
   ) {
     flow("MM3ViewProvider.constructor", 1, "enter");
     this.agent.setApprovalHandler((message) => this.requestToolApproval(message));
+    this.agent.setProjectStatusHandler((scanning) => this.setProjectScanning(scanning));
   }
 
   resolveWebviewView(
@@ -91,6 +94,8 @@ export class MM3ViewProvider
     webviewView.webview.html =
       this.getHtml(webviewView.webview);
 
+    this.post({ type: "project_status", scanning: true });
+    void this.initializeProject();
     void this.refreshBilling();
     void this.refreshTaskHistory();
     if (this.agent.hasActiveTask()) {
@@ -211,6 +216,51 @@ export class MM3ViewProvider
     this.requestController?.abort();
     this.resolvePendingApprovals("skip");
     this.resolveLimitDecision(false);
+    this.agent.setProjectStatusHandler(undefined);
+  }
+
+  async handleWorkspaceChanged(): Promise<void> {
+    this.initializedWorkspace = undefined;
+    if (!this.view) {
+      return;
+    }
+    this.requestController?.abort();
+    this.clearFileReviews();
+    this.clearSelectedContext();
+    await this.initializeProject();
+  }
+
+  private async initializeProject(): Promise<void> {
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      this.projectScanning = false;
+      this.post({ type: "project_status", scanning: false });
+      this.postError(new Error("Please open a workspace first."));
+      return;
+    }
+
+    if (this.initializedWorkspace === workspace.uri.fsPath && this.agent.isProjectReady()) {
+      this.projectScanning = false;
+      this.post({ type: "project_status", scanning: false });
+      return;
+    }
+
+    this.initializedWorkspace = workspace.uri.fsPath;
+    this.setProjectScanning(true);
+    try {
+      await this.agent.prewarmProject(workspace.uri.fsPath);
+      this.setProjectScanning(false);
+    } catch (error) {
+      this.projectScanning = false;
+      this.post({ type: "project_status", scanning: false });
+      this.postError(error);
+      this.logger.error("Project scanning failed", error);
+    }
+  }
+
+  private setProjectScanning(scanning: boolean): void {
+    this.projectScanning = scanning;
+    this.post({ type: "project_status", scanning });
   }
  // handle message
   private async handleMessage(
@@ -394,6 +444,11 @@ export class MM3ViewProvider
       question.trim();
 
     if (!trimmedQuestion) {
+      return;
+    }
+
+    if (this.projectScanning || !this.agent.isProjectReady()) {
+      this.post({ type: "project_status", scanning: true });
       return;
     }
 
@@ -2303,7 +2358,7 @@ Describe the task, bug, or issue you want MM3 to investigate or fix.
           <option value="agent" selected>Agent</option>
         </select>
         <select id="agent-profile" aria-label="Agent">
-          <option value="auto" selected>Auto (Cheapest)</option>
+          <option value="auto" selected>Auto</option>
         </select>
         <span class="spacer"></span>
         <button id="action" class="icon-btn primary" type="button" title="Send">↑</button>
@@ -2412,6 +2467,7 @@ const refreshExtension =
 
 let processing = false;
 let composerState = "idle";
+let projectScanning = false;
 let streamPauseTimer = 0;
 let streamingText = "";
 let streamingPanelSequence = 0;
@@ -3859,7 +3915,8 @@ function noteStreamActivity(label) {
 function setComposerState(next) {
   composerState = next;
   processing = next === "running";
-  input.disabled = next === "running";
+  input.disabled = next === "running" || next === "project-scanning" || projectScanning;
+  action.disabled = next === "project-scanning" || projectScanning;
   if (next === "running") {
     action.textContent = "■";
     action.title = "Stop";
@@ -3883,12 +3940,33 @@ function setProcessing(value) {
   setComposerState(value ? "running" : "idle");
 }
 
+function setProjectScanning(value) {
+  projectScanning = Boolean(value);
+  if (projectScanning) {
+    input.disabled = true;
+    if (composerState === "idle") {
+      setComposerState("project-scanning");
+      showThinking("Scanning project...");
+    }
+    setStatus("Scanning project...");
+    return;
+  }
+  if (composerState === "project-scanning") {
+    hideThinking();
+    setComposerState("idle");
+    setStatus("Ready");
+  } else {
+    input.disabled = composerState === "running";
+    action.disabled = false;
+  }
+}
+
 /* -------------------------------------------------------------------------- */
 /* Send message                                                               */
 /* -------------------------------------------------------------------------- */
 
 function sendMessage() {
-  if (processing) {
+  if (processing || projectScanning) {
     return;
   }
   if (!agentProfile.value || agentProfile.options[agentProfile.selectedIndex]?.disabled) {
@@ -3986,6 +4064,10 @@ window.addEventListener(
     switch (
       message.type
     ) {
+
+      case "project_status":
+        setProjectScanning(message.scanning);
+        break;
 
       case "settings":
         renderPermissionSetting(message.allowAllCommands);
@@ -4114,7 +4196,7 @@ window.addEventListener(
           agentProfile.innerHTML = "";
           const autoOption = document.createElement("option");
           autoOption.value = "auto";
-          autoOption.textContent = "Auto (Cheapest)";
+          autoOption.textContent = "Auto";
           agentProfile.appendChild(autoOption);
           if (message.agents.length === 0) {
             autoOption.disabled = true;
@@ -4323,6 +4405,10 @@ type WebviewMessage =
     };
 
 type WebviewResponse =
+  | {
+      type: "project_status";
+      scanning: boolean;
+    }
   | {
       type: "thinking";
     }

@@ -64,7 +64,7 @@ describe("agent event stream", () => {
     let fetchCalls = 0;
 
     await streamAgentEvents({
-      url: "https://api.mm3ai.com/api/v1/ai/events?request_id=test",
+      url: "http://localhost:8080/api/v1/ai/events?request_id=test",
       accessToken: "token",
       onEvent: (receivedEvent) => received.push(receivedEvent),
       fetchImpl: async () => {
@@ -88,7 +88,7 @@ describe("agent event stream", () => {
     let fetchCalls = 0;
 
     await streamAgentEvents({
-      url: "https://api.mm3ai.com/api/v1/ai/events?request_id=test",
+      url: "http://localhost:8080/api/v1/ai/events?request_id=test",
       accessToken: "token",
       onEvent: () => undefined,
       signal: controller.signal,
@@ -106,7 +106,7 @@ describe("agent event stream", () => {
 
     await assert.rejects(
       streamAgentEvents({
-        url: "https://api.mm3ai.com/api/v1/ai/events?request_id=test",
+        url: "http://localhost:8080/api/v1/ai/events?request_id=test",
         accessToken: "token",
         onEvent: () => undefined,
         fetchImpl: async () => {
@@ -126,7 +126,7 @@ describe("agent event stream", () => {
     const received: AgentEvent[] = [];
 
     await streamAgentEvents({
-      url: "https://api.mm3ai.com/api/v1/ai/events?request_id=timing",
+      url: "http://localhost:8080/api/v1/ai/events?request_id=timing",
       accessToken: "token",
       onEvent: (receivedEvent) => received.push(receivedEvent),
       fetchImpl: async () => responseWithReads([

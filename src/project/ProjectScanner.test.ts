@@ -82,3 +82,26 @@ test("ProjectScanner restores persisted metadata and honors path invalidation", 
     await fs.rm(workspace, { recursive: true, force: true });
   }
 });
+
+test("ProjectScanner updates only the changed path", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "mm3-project-scanner-incremental-"));
+  try {
+    const firstPath = path.join(workspace, "first.ts");
+    const secondPath = path.join(workspace, "second.ts");
+    await fs.writeFile(firstPath, "const first = 1;\n", "utf8");
+    await fs.writeFile(secondPath, "const second = 2;\n", "utf8");
+
+    const scanner = new ProjectScanner();
+    const initial = await scanner.scan(workspace);
+    await fs.writeFile(firstPath, "const first = 3;\n", "utf8");
+
+    const updated = await scanner.updatePath(workspace, firstPath);
+
+    assert.equal(updated.indexVersion, initial.indexVersion + 1);
+    assert.deepEqual(updated.changedPaths, ["first.ts"]);
+    assert.deepEqual(updated.removedPaths, []);
+    assert.equal(updated.files.find((file) => file.path === "second.ts")?.hash, initial.files.find((file) => file.path === "second.ts")?.hash);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});

@@ -4,8 +4,8 @@ MM3 is an AI coding workspace for investigating, understanding, and safely impro
 
 The VS Code extension builds local project intelligence and enforces safety. The MM3 backend handles AI reasoning, specialist agents, model routing, accounts, and credits. File access stays under the extension's control.
 ## Preview
-![MM3 AI Agent Insert Token](https://api.mm3ai.com/assets/9584332c106dbd40e0707a01c362f058.png)
-![MM3 AI Agent preview](https://api.mm3ai.com/assets/635777d9ec0f060eae2b52135259ecd7.png)
+![MM3 AI Agent Insert Token](http://localhost:8080/assets/9584332c106dbd40e0707a01c362f058.png)
+![MM3 AI Agent preview](http://localhost:8080/assets/635777d9ec0f060eae2b52135259ecd7.png)
 
 ## Getting Started
 

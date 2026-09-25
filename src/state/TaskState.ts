@@ -62,6 +62,20 @@ export class TaskState {
       status;
   }
 
+  reset(): void {
+    this.state = {
+      requestId: "",
+      question: "",
+      intent: "chat",
+      status: "idle",
+      startedAt: 0,
+      filesUsed: [],
+      aiCalls: 0,
+      findings: [],
+      openQuestions: []
+    };
+  }
+
   setFiles(
     files: string[]
   ): void {

@@ -49,7 +49,6 @@ import { MementoContextCacheStore } from "../intelligence/ContextCache";
 import { AgentRuntime } from "./AgentRuntime";
 import { VerificationManager, type VerificationOutcome } from "./VerificationManager";
 import { readBoundedTextChunk } from "./adaptiveRead";
-import { ProjectScanner } from "../project/ProjectScanner";
 import { RepositoryRetrieval } from "../project/RepositoryRetrieval";
 import { runBoundedParallel } from "../utils/parallel";
 import type { RetrievalBranch } from "../models/types";
@@ -221,10 +220,13 @@ export class Agent {
 
   private readonly workspaceTools: WorkspaceToolRegistry;
   private prewarmTimer: ReturnType<typeof setTimeout> | undefined;
-  private prewarmRunning = false;
   private prewarmQueued = false;
+  private projectScanPromise?: Promise<void>;
+  private projectWorkspacePath?: string;
+  private projectReady = false;
+  private projectScanning = false;
+  private projectStatusHandler?: (scanning: boolean) => void;
 
-  private readonly projectScanner: ProjectScanner;
   private readonly repositoryRetrieval: RepositoryRetrieval;
   private readonly contextManager: ContextManager;
   private readonly runtime: AgentRuntime;
@@ -250,7 +252,6 @@ export class Agent {
     );
     this.runtime = new AgentRuntime(this.contextManager);
 
-    this.projectScanner = new ProjectScanner(taskStorage);
     this.repositoryRetrieval = new RepositoryRetrieval(taskStorage);
 
     this.workspaceTools =
@@ -258,9 +259,19 @@ export class Agent {
   }
 
   invalidateProjectPath(filePath: string): void {
-    this.projectScanner.invalidatePath(filePath);
     this.repositoryRetrieval.invalidatePath(filePath);
     this.runtime.invalidatePath(filePath);
+  }
+
+  setProjectStatusHandler(handler: ((scanning: boolean) => void) | undefined): void {
+    this.projectStatusHandler = handler;
+    if (handler && this.projectScanning) {
+      handler(true);
+    }
+  }
+
+  isProjectReady(): boolean {
+    return this.projectReady && !this.projectScanning;
   }
 
   setApprovalHandler(handler: ToolApprovalHandler | undefined): void {
@@ -279,11 +290,55 @@ export class Agent {
     if (signal?.aborted) {
       throw new Error("Project prewarming cancelled");
     }
-    await this.repositoryRetrieval.refresh(workspacePath);
+    if (this.projectScanPromise) {
+      return this.projectScanPromise;
+    }
+
+    const resolvedWorkspacePath = workspacePath;
+    const workspaceChanged = this.projectWorkspacePath !== resolvedWorkspacePath;
+    if (workspaceChanged) {
+      this.projectWorkspacePath = resolvedWorkspacePath;
+      this.projectReady = false;
+      this.conversation.clear();
+      this.taskState.reset();
+      this.contextManager.clear();
+      this.lastRequest = undefined;
+      this.repositoryRetrieval.reset();
+      await this.clearPersistedTask();
+    }
+
+    const operation = this.runProjectPrewarm(resolvedWorkspacePath, signal, workspaceChanged);
+    this.projectScanPromise = operation;
+    try {
+      await operation;
+    } finally {
+      if (this.projectScanPromise === operation) {
+        this.projectScanPromise = undefined;
+      }
+    }
+  }
+
+  private async runProjectPrewarm(
+    workspacePath: string,
+    signal: AbortSignal | undefined,
+    forceFresh: boolean
+  ): Promise<void> {
+    this.projectScanning = true;
+    this.projectStatusHandler?.(true);
+    try {
+      if (signal?.aborted) {
+        throw new Error("Project prewarming cancelled");
+      }
+      await this.repositoryRetrieval.refresh(workspacePath, forceFresh);
+      this.projectReady = true;
+    } finally {
+      this.projectScanning = false;
+      this.projectStatusHandler?.(false);
+    }
   }
 
   scheduleProjectPrewarm(workspacePath: string, signal?: AbortSignal, delayMs = 400): void {
-    if (signal?.aborted) {
+    if (signal?.aborted || !this.projectReady || this.projectWorkspacePath !== workspacePath) {
       return;
     }
     this.prewarmQueued = true;
@@ -297,15 +352,13 @@ export class Agent {
   }
 
   private async runScheduledPrewarm(workspacePath: string, signal?: AbortSignal): Promise<void> {
-    if (signal?.aborted || this.prewarmRunning || !this.prewarmQueued) {
+    if (signal?.aborted || !this.prewarmQueued) {
       return;
     }
     this.prewarmQueued = false;
-    this.prewarmRunning = true;
     try {
       await this.prewarmProject(workspacePath, signal);
     } finally {
-      this.prewarmRunning = false;
       if (this.prewarmQueued && !signal?.aborted) {
         this.scheduleProjectPrewarm(workspacePath, signal);
       }
@@ -360,7 +413,11 @@ export class Agent {
       );
     }
 
-    const projectIndex = await this.projectScanner.scan(workspace.uri.fsPath);
+    if (!this.isProjectReady() || this.projectWorkspacePath !== workspace.uri.fsPath) {
+      throw new Error("Project scanning is still in progress. Please wait until scanning finishes.");
+    }
+
+    const projectIndex = await this.repositoryRetrieval.refresh(workspace.uri.fsPath);
 
 
     const requestAction: Intent = "auto";

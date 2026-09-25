@@ -55,46 +55,6 @@ export function activate(
       context.workspaceState
     );
 
-  const workspace = vscode.workspace.workspaceFolders?.[0];
-  if (workspace) {
-    const prewarmController = new AbortController();
-    void agent.prewarmProject(workspace.uri.fsPath, prewarmController.signal).catch((error) => {
-      logger.warn("Background project prewarming unavailable", error);
-    });
-    const watcher = vscode.workspace.createFileSystemWatcher(
-      new vscode.RelativePattern(workspace, "**/*")
-    );
-    const pendingPaths = new Set<string>();
-    let debounceTimer: ReturnType<typeof setTimeout> | undefined;
-    const queueInvalidation = (uri: vscode.Uri): void => {
-      pendingPaths.add(uri.fsPath);
-      if (debounceTimer) {
-        return;
-      }
-      debounceTimer = setTimeout(() => {
-        for (const filePath of pendingPaths) {
-          agent.invalidateProjectPath(filePath);
-        }
-        pendingPaths.clear();
-        debounceTimer = undefined;
-        agent.scheduleProjectPrewarm(workspace.uri.fsPath, prewarmController.signal);
-      }, 250);
-    };
-
-    context.subscriptions.push(
-      watcher,
-      watcher.onDidCreate(queueInvalidation),
-      watcher.onDidChange(queueInvalidation),
-      watcher.onDidDelete(queueInvalidation),
-      new vscode.Disposable(() => {
-        prewarmController.abort();
-        if (debounceTimer) {
-          clearTimeout(debounceTimer);
-        }
-      })
-    );
-  }
-
   // ----------------------------------------------------------
   // View provider
   // ----------------------------------------------------------
@@ -119,6 +79,70 @@ export function activate(
       },
       changeApplier
     );
+
+  let watcher: vscode.FileSystemWatcher | undefined;
+  let watcherDisposables: vscode.Disposable[] = [];
+  let prewarmController = new AbortController();
+  let debounceTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const disposeWorkspaceWatcher = (): void => {
+    watcher?.dispose();
+    watcher = undefined;
+    for (const disposable of watcherDisposables) {
+      disposable.dispose();
+    }
+    watcherDisposables = [];
+    prewarmController.abort();
+    prewarmController = new AbortController();
+    if (debounceTimer) {
+      clearTimeout(debounceTimer);
+      debounceTimer = undefined;
+    }
+  };
+
+  const bindWorkspaceWatcher = (): void => {
+    disposeWorkspaceWatcher();
+    const workspace = vscode.workspace.workspaceFolders?.[0];
+    if (!workspace) {
+      return;
+    }
+
+    watcher = vscode.workspace.createFileSystemWatcher(
+      new vscode.RelativePattern(workspace, "**/*")
+    );
+    const pendingPaths = new Set<string>();
+    const queueInvalidation = (uri: vscode.Uri): void => {
+      pendingPaths.add(uri.fsPath);
+      if (debounceTimer) {
+        clearTimeout(debounceTimer);
+      }
+      debounceTimer = setTimeout(() => {
+        for (const filePath of pendingPaths) {
+          agent.invalidateProjectPath(filePath);
+        }
+        pendingPaths.clear();
+        debounceTimer = undefined;
+        agent.scheduleProjectPrewarm(workspace.uri.fsPath, prewarmController.signal);
+      }, 250);
+    };
+
+    watcherDisposables = [
+      watcher.onDidCreate(queueInvalidation),
+      watcher.onDidChange(queueInvalidation),
+      watcher.onDidDelete(queueInvalidation)
+    ];
+  };
+
+  bindWorkspaceWatcher();
+  context.subscriptions.push(
+    new vscode.Disposable(disposeWorkspaceWatcher),
+    vscode.workspace.onDidChangeWorkspaceFolders(() => {
+      bindWorkspaceWatcher();
+      void provider.handleWorkspaceChanged().catch((error) => {
+        logger.warn("Workspace reinitialization unavailable", error);
+      });
+    })
+  );
 
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider(
