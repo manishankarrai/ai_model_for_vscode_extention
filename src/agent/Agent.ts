@@ -1072,6 +1072,7 @@ export class Agent {
     const investigationSummary: string[] = [];
     let mutationApplied = false;
     let verificationAttempts = 0;
+    const failedToolAttempts = new Map<string, number>();
     const verificationManager = new VerificationManager();
     const verificationOutcomes: VerificationOutcome[] = [];
 
@@ -1791,6 +1792,21 @@ export class Agent {
           `Evidence update: ${toolSummary}`
         );
         investigationSummary.push(toolSummary);
+        const failureKey = `${result.tool}|${result.path ?? ""}`;
+        if (result.success) {
+          failedToolAttempts.delete(failureKey);
+        } else {
+          const attempts = (failedToolAttempts.get(failureKey) ?? 0) + 1;
+          failedToolAttempts.set(failureKey, attempts);
+          if (attempts >= 2) {
+            state.stop("repeated_tool_failure");
+            this.logger.warn("Adaptive investigation stopped after repeated tool failures", {
+              tool: result.tool,
+              path: result.path,
+              attempts
+            });
+          }
+        }
         if (result.success && [
           "edit_file", "write_file", "create_file", "delete_file", "rename_file",
           "move_file", "apply_change_set", "apply_patch"

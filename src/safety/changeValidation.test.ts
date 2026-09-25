@@ -67,28 +67,28 @@ describe("stale-file protection", () => {
       ),
       "header\nfunc Update() { return nil }\nfooter\n"
     );
-    assert.equal(
-      resolveApplyContent("current-full-file\n", "stale-snippet", "new-full-file\n"),
-      "new-full-file\n"
+    assert.throws(
+      () => resolveApplyContent("current-full-file\n", "stale-snippet", "new-full-file\n"),
+      /original content was not found uniquely/i
     );
   });
 
-  it("applies the latest payload when a selected edit is stale or ambiguous", () => {
-    assert.equal(
-      resolveApplyContent(
+  it("rejects a stale or ambiguous selected edit", () => {
+    assert.throws(
+      () => resolveApplyContent(
         "function A() {}\nfunction B() {}\n",
         "function Missing() {}",
         "function Missing() { return true; }"
       ),
-      "function Missing() { return true; }"
+      /original content was not found uniquely/i
     );
-    assert.equal(
-      resolveApplyContent(
+    assert.throws(
+      () => resolveApplyContent(
         "function A() {}\nfunction A() {}\n",
         "function A() {}",
         "function A() { return true; }"
       ),
-      "function A() { return true; }"
+      /original content was not found uniquely/i
     );
   });
 

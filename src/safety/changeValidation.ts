@@ -168,7 +168,9 @@ export function resolveApplyContent(
     return restoreDocumentNewlines(merged, current);
   }
 
-  return restoreDocumentNewlines(updatedN, current);
+    throw new Error(
+      "MM3 rejected the edit: the original content was not found uniquely in the current file. Re-read the file before editing."
+    );
 }
 
 export function assertFileHashMatches(

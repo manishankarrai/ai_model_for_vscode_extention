@@ -10,6 +10,7 @@ export type InvestigationStopReason =
   | "max_tool_calls"
   | "timeout"
   | "insufficient_evidence"
+  | "repeated_tool_failure"
   | "error";
 
 export interface InvestigationLimits {

@@ -315,74 +315,141 @@ export class WorkspaceToolRegistry {
   }
 
   private async runTests(): Promise<ToolResult> {
-    const testCommand = await this.detectTestCommand();
-    return this.runCommand(testCommand.command, "run_tests", testCommand.cwd);
+    const testCommands = await this.detectTestCommands();
+    const displayCommands = testCommands
+      .map((item) => `${item.command} (cwd: ${item.cwd})`)
+      .join("\n");
+    const approval = await this.confirm(`Run the workspace test suites?\n${displayCommands}`);
+    if (approval === "skip") {
+      return this.result(
+        "run_tests",
+        false,
+        "Skipped workspace tests because the user chose Skip.",
+        "skip"
+      );
+    }
+
+    const outputs: string[] = [];
+    let allSucceeded = true;
+    for (const testCommand of testCommands) {
+      const parsed = parseSafeCommand(testCommand.command);
+      const displayCommand = [parsed.binary, ...parsed.args]
+        .map((part) => /\s/.test(part) ? JSON.stringify(part) : part)
+        .join(" ");
+      const shell = process.platform === "win32"
+        ? (process.env.ComSpec || "cmd.exe")
+        : (process.env.SHELL || "/bin/sh");
+      const shellArgs = process.platform === "win32"
+        ? ["/d", "/s", "/c", testCommand.command]
+        : ["-lc", testCommand.command];
+
+      try {
+        const result = await execFileAsync(shell, shellArgs, {
+          cwd: testCommand.cwd,
+          timeout: 180_000,
+          maxBuffer: adaptiveLimits.maxToolOutputChars * 4,
+          env: process.env
+        });
+        outputs.push([
+          "exit_code=0",
+          `cwd=${testCommand.cwd}`,
+          `command=${displayCommand}`,
+          result.stdout || "",
+          result.stderr || ""
+        ].join("\n").trim());
+      } catch (error) {
+        allSucceeded = false;
+        const execError = error as {
+          code?: number;
+          stdout?: string;
+          stderr?: string;
+          message?: string;
+        };
+        outputs.push([
+          `exit_code=${execError.code ?? 1}`,
+          `cwd=${testCommand.cwd}`,
+          `command=${displayCommand}`,
+          execError.stdout ?? "",
+          execError.stderr ?? execError.message ?? String(error)
+        ].join("\n").trim());
+      }
+    }
+
+    return this.result(
+      "run_tests",
+      allSucceeded,
+      outputs.join("\n\n"),
+      approval
+    );
   }
 
-  private async detectTestCommand(): Promise<{ command: string; cwd: string }> {
+  private async detectTestCommands(): Promise<Array<{ command: string; cwd: string }>> {
     const workspace = this.requireWorkspace();
     const root = workspace.uri.fsPath;
+    const commands: Array<{ command: string; cwd: string }> = [];
+    const seen = new Set<string>();
+    const add = (command: string, cwd: string): void => {
+      const key = `${cwd}\0${command}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        commands.push({ command, cwd });
+      }
+    };
+
+    const addPackageTest = async (packagePath: string): Promise<void> => {
+      try {
+        const packageJson = JSON.parse(
+          await fs.readFile(packagePath, "utf8")
+        ) as { scripts?: Record<string, string> };
+        if (packageJson.scripts?.test) {
+          add("npm test", dirname(packagePath));
+        }
+      } catch {
+        // Ignore malformed or unreadable package manifests and inspect others.
+      }
+    };
 
     try {
-      const packageJson = JSON.parse(
-        await fs.readFile(`${root}/package.json`, "utf8")
-      ) as { scripts?: Record<string, string> };
-      if (packageJson.scripts?.test) {
-        return { command: "npm test", cwd: root };
-      }
+      await addPackageTest(`${root}/package.json`);
     } catch {
-      // no package.json
+      // no root package.json
     }
 
     try {
       await fs.access(`${root}/go.mod`);
-      return { command: "go test ./...", cwd: root };
+      add("go test ./...", root);
     } catch {
-      // not a Go module
+      // not a root Go module
     }
 
     const goModules = await vscode.workspace.findFiles(
       "**/go.mod",
-      "**/{node_modules,.git}/**",
-      1
+      "**/{node_modules,.git}/**"
     );
-    if (goModules.length > 0) {
-      return {
-        command: "go test ./...",
-        cwd: dirname(goModules[0].fsPath)
-      };
+    for (const goModule of goModules) {
+      add("go test ./...", dirname(goModule.fsPath));
     }
 
     const packageFiles = await vscode.workspace.findFiles(
       "**/package.json",
-      "**/{node_modules,.git}/**",
-      1
+      "**/{node_modules,.git}/**"
     );
-    if (packageFiles.length > 0) {
-      try {
-        const packagePath = packageFiles[0].fsPath;
-        const packageJson = JSON.parse(await fs.readFile(packagePath, "utf8")) as {
-          scripts?: Record<string, string>;
-        };
-        if (packageJson.scripts?.test) {
-          return {
-            command: "npm test",
-            cwd: dirname(packageFiles[0].fsPath)
-          };
-        }
-      } catch {
-        // keep looking for another supported project
-      }
+    for (const packageFile of packageFiles) {
+      await addPackageTest(packageFile.fsPath);
     }
 
-    try {
-      await fs.access(`${root}/pytest.ini`);
-      return { command: "python -m pytest", cwd: root };
-    } catch {
-      // no pytest.ini
+    const pytestConfigs = await vscode.workspace.findFiles(
+      "**/pytest.ini",
+      "**/{node_modules,.git}/**"
+    );
+    for (const pytestConfig of pytestConfigs) {
+      add("python -m pytest", dirname(pytestConfig.fsPath));
     }
 
-    throw new Error("MM3 could not detect a test command for this workspace.");
+    if (commands.length === 0) {
+      throw new Error("MM3 could not detect a test command for this workspace.");
+    }
+    return commands;
   }
 
   private async runCommand(
