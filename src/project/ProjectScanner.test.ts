@@ -56,6 +56,51 @@ test("ProjectScanner builds a local snapshot and reuses unchanged files", async 
   }
 });
 
+test("ProjectScanner creates a fast manifest without reading binary content", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "mm3-project-scanner-manifest-"));
+  try {
+    await fs.mkdir(path.join(workspace, "node_modules"));
+    await fs.writeFile(path.join(workspace, "main.ts"), "const answer = 42;\n", "utf8");
+    await fs.writeFile(path.join(workspace, "image.png"), Buffer.from([0, 1, 2, 3]));
+    await fs.writeFile(path.join(workspace, "node_modules", "ignored.ts"), "ignored\n", "utf8");
+
+    const manifest = await new ProjectScanner().scanManifest(workspace);
+
+    assert.deepEqual(manifest.files.map((file) => file.path), ["main.ts"]);
+    assert.equal(manifest.files[0]?.lines, 0);
+    assert.equal(manifest.files[0]?.hash, "");
+    assert.match(manifest.summary, /Content indexing is deferred/);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("ProjectScanner applies workspace .gitignore rules before indexing", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "mm3-project-scanner-gitignore-"));
+  try {
+    await fs.writeFile(path.join(workspace, ".gitignore"), [
+      ".angular/",
+      ".vscode/",
+      "build/",
+      "*.log"
+    ].join("\n"), "utf8");
+    await fs.mkdir(path.join(workspace, ".angular", "cache"), { recursive: true });
+    await fs.mkdir(path.join(workspace, ".vscode"));
+    await fs.mkdir(path.join(workspace, "build"));
+    await fs.writeFile(path.join(workspace, ".angular", "cache", "state.js"), "generated\n", "utf8");
+    await fs.writeFile(path.join(workspace, ".vscode", "settings.json"), "{}\n", "utf8");
+    await fs.writeFile(path.join(workspace, "build", "output.js"), "generated\n", "utf8");
+    await fs.writeFile(path.join(workspace, "server.log"), "log\n", "utf8");
+    await fs.writeFile(path.join(workspace, "main.ts"), "export const answer = 42;\n", "utf8");
+
+    const manifest = await new ProjectScanner().scanManifest(workspace);
+
+    assert.deepEqual(manifest.files.map((file) => file.path), [".gitignore", "main.ts"]);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("ProjectScanner restores persisted metadata and honors path invalidation", async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "mm3-project-scanner-persisted-"));
   try {

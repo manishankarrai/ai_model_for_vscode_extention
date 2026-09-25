@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 import { promises as fs, createReadStream } from "node:fs";
 import * as path from "node:path";
 
+import { GitignoreRules, loadGitignoreRules } from "../utils/gitignore.ts";
+import { hasBinaryFileExtension, isProbablyBinary } from "../utils/textFile.ts";
+
 export interface ProjectFileRecord {
   path: string;
   size: number;
@@ -48,8 +51,37 @@ const IGNORED_DIRECTORIES = new Set([
   "build",
   "out",
   ".next",
-  "coverage"
+  "coverage",
+  ".cache",
+  ".turbo",
+  ".venv",
+  "__pycache__",
+  "target",
+  "tmp",
+  "temp",
+  "logs"
 ]);
+
+const MAX_INDEXABLE_FILE_BYTES = 2 * 1024 * 1024;
+const FILE_SCAN_CONCURRENCY = 32;
+
+async function forEachConcurrent<T>(
+  items: T[],
+  concurrency: number,
+  callback: (item: T) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex];
+      nextIndex += 1;
+      await callback(item);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker())
+  );
+}
 
 const LANGUAGE_BY_EXTENSION: Record<string, string> = {
   ".ts": "TypeScript",
@@ -109,8 +141,46 @@ export class ProjectScanner {
     }
   }
 
+  async scanManifest(workspacePath: string): Promise<ProjectIndexSnapshot> {
+    const resolvedWorkspace = path.resolve(workspacePath);
+    const gitignore = await loadGitignoreRules(resolvedWorkspace);
+    const filePaths = await this.findFiles(resolvedWorkspace, gitignore);
+    const files: ProjectFileRecord[] = [];
+
+    await forEachConcurrent(filePaths, FILE_SCAN_CONCURRENCY, async (absolutePath) => {
+      const stats = await fs.stat(absolutePath);
+      if (stats.size > MAX_INDEXABLE_FILE_BYTES || await this.isBinaryFile(absolutePath)) {
+        return;
+      }
+      const relativePath = this.toRelativePath(resolvedWorkspace, absolutePath);
+      files.push({
+        path: relativePath,
+        size: stats.size,
+        extension: path.extname(relativePath).toLowerCase(),
+        language: LANGUAGE_BY_EXTENSION[path.extname(relativePath).toLowerCase()] ?? "Other",
+        lines: 0,
+        modifiedTimeMs: stats.mtimeMs,
+        hash: ""
+      });
+    });
+
+    files.sort((left, right) => left.path < right.path ? -1 : left.path > right.path ? 1 : 0);
+    return {
+      indexVersion: this.indexVersion,
+      scannedAt: Date.now(),
+      files,
+      changedPaths: [],
+      removedPaths: [],
+      summary: [
+        `Discovered ${files.length} files.`,
+        "Content indexing is deferred until it is needed."
+      ].join("\n")
+    };
+  }
+
   async scan(workspacePath: string, forceFresh = false): Promise<ProjectIndexSnapshot> {
     const resolvedWorkspace = path.resolve(workspacePath);
+    const gitignore = await loadGitignoreRules(resolvedWorkspace);
     if (forceFresh && this.workspacePath === resolvedWorkspace) {
       this.indexVersion = 0;
       this.cache.clear();
@@ -133,13 +203,16 @@ export class ProjectScanner {
       this.pendingInvalidations.clear();
     }
 
-    const filePaths = await this.findFiles(resolvedWorkspace);
+    const filePaths = await this.findFiles(resolvedWorkspace, gitignore);
     const nextCache = new Map<string, CachedFile>();
     const changedPaths: string[] = [];
 
-    for (const absolutePath of filePaths) {
+    await forEachConcurrent(filePaths, FILE_SCAN_CONCURRENCY, async (absolutePath) => {
       const relativePath = this.toRelativePath(resolvedWorkspace, absolutePath);
       const stats = await fs.stat(absolutePath);
+      if (stats.size > MAX_INDEXABLE_FILE_BYTES || await this.isBinaryFile(absolutePath)) {
+        return;
+      }
       const previous = this.cache.get(relativePath);
       const fingerprint = {
         size: stats.size,
@@ -148,12 +221,13 @@ export class ProjectScanner {
 
       if (
         previous &&
+        previous.hash &&
         !this.invalidatedPaths.has(relativePath) &&
         previous.fingerprint.size === fingerprint.size &&
         previous.fingerprint.modifiedTimeMs === fingerprint.modifiedTimeMs
       ) {
         nextCache.set(relativePath, { ...previous, fingerprint });
-        continue;
+        return;
       }
 
       nextCache.set(relativePath, {
@@ -162,7 +236,7 @@ export class ProjectScanner {
         fingerprint
       });
       changedPaths.push(relativePath);
-    }
+    });
 
     const removedPaths = [...this.cache.keys()]
       .filter((filePath) => !nextCache.has(filePath))
@@ -195,13 +269,14 @@ export class ProjectScanner {
 
   async updatePath(workspacePath: string, filePath: string): Promise<ProjectIndexSnapshot> {
     const resolvedWorkspace = path.resolve(workspacePath);
+    const gitignore = await loadGitignoreRules(resolvedWorkspace);
     if (this.workspacePath !== resolvedWorkspace || this.restoredWorkspace !== resolvedWorkspace) {
       return this.scan(resolvedWorkspace);
     }
 
     const absolutePath = path.resolve(filePath);
     const relativePath = this.toRelativePath(resolvedWorkspace, absolutePath);
-    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || this.isIgnoredPath(relativePath)) {
+    if (!relativePath || relativePath === ".." || relativePath.startsWith("../") || this.isIgnoredPath(relativePath, gitignore)) {
       return this.snapshot([], []);
     }
 
@@ -212,6 +287,10 @@ export class ProjectScanner {
     try {
       const stats = await fs.stat(absolutePath);
       if (!stats.isFile()) {
+        return this.snapshot([], []);
+      }
+
+      if (stats.size > MAX_INDEXABLE_FILE_BYTES || this.isIgnoredFile(relativePath, gitignore) || await this.isBinaryFile(absolutePath)) {
         return this.snapshot([], []);
       }
 
@@ -284,11 +363,9 @@ export class ProjectScanner {
     try {
       await this.storage.update(this.storageKey(workspacePath), {
         indexVersion: this.indexVersion,
-        paths: [...this.cache.keys()].sort()
+        paths: [...this.cache.keys()].sort(),
+        files: [...this.cache.values()]
       } satisfies PersistedProjectIndex);
-      for (const [filePath, record] of this.cache) {
-        await this.storage.update(this.fileStorageKey(workspacePath, filePath), record);
-      }
     } catch {
       // A cache write must not prevent local retrieval from working.
     }
@@ -306,25 +383,33 @@ export class ProjectScanner {
       );
       await this.storage.update(this.storageKey(workspacePath), {
         indexVersion: this.indexVersion,
-        paths: [...this.cache.keys()].sort()
+        paths: [...this.cache.keys()].sort(),
+        files: [...this.cache.values()]
       } satisfies PersistedProjectIndex);
     } catch {
       // A cache write must not prevent local retrieval from working.
     }
   }
 
-  private async findFiles(root: string): Promise<string[]> {
+  private async findFiles(root: string, gitignore: GitignoreRules): Promise<string[]> {
     const files: string[] = [];
     const pending = [root];
 
     while (pending.length > 0) {
-      const directory = pending.pop() as string;
-      const entries = await fs.readdir(directory, { withFileTypes: true });
-      for (const entry of entries) {
-        if (entry.isDirectory() && !IGNORED_DIRECTORIES.has(entry.name)) {
-          pending.push(path.join(directory, entry.name));
-        } else if (entry.isFile()) {
-          files.push(path.join(directory, entry.name));
+      const batch = pending.splice(0, FILE_SCAN_CONCURRENCY);
+      const results = await Promise.all(batch.map(async (directory) => ({
+        directory,
+        entries: await fs.readdir(directory, { withFileTypes: true })
+      })));
+      for (const { directory, entries } of results) {
+        for (const entry of entries) {
+          const entryPath = path.join(directory, entry.name);
+          const relativePath = this.toRelativePath(root, entryPath);
+          if (entry.isDirectory() && !this.isIgnoredPath(relativePath, gitignore)) {
+            pending.push(entryPath);
+          } else if (entry.isFile() && !this.isIgnoredFile(relativePath, gitignore)) {
+            files.push(entryPath);
+          }
         }
       }
     }
@@ -332,8 +417,23 @@ export class ProjectScanner {
     return files.sort();
   }
 
-  private isIgnoredPath(relativePath: string): boolean {
-    return relativePath.split("/").some((segment) => IGNORED_DIRECTORIES.has(segment));
+  private isIgnoredPath(relativePath: string, gitignore?: GitignoreRules): boolean {
+    return gitignore?.isIgnored(relativePath) === true || relativePath.split("/").some((segment) => IGNORED_DIRECTORIES.has(segment));
+  }
+
+  private isIgnoredFile(relativePath: string, gitignore?: GitignoreRules): boolean {
+    return this.isIgnoredPath(relativePath, gitignore) || hasBinaryFileExtension(relativePath);
+  }
+
+  private async isBinaryFile(absolutePath: string): Promise<boolean> {
+    const handle = await fs.open(absolutePath, "r");
+    try {
+      const sample = Buffer.alloc(8 * 1024);
+      const { bytesRead } = await handle.read(sample, 0, sample.length, 0);
+      return isProbablyBinary(sample.subarray(0, bytesRead));
+    } finally {
+      await handle.close();
+    }
   }
 
   private snapshot(changedPaths: string[], removedPaths: string[]): ProjectIndexSnapshot {

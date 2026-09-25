@@ -51,6 +51,8 @@ import { VerificationManager, type VerificationOutcome } from "./VerificationMan
 import { readBoundedTextChunk } from "./adaptiveRead";
 import { RepositoryRetrieval } from "../project/RepositoryRetrieval";
 import { runBoundedParallel } from "../utils/parallel";
+import { loadGitignoreRules } from "../utils/gitignore.ts";
+import { hasBinaryFileExtension, isProbablyBinary } from "../utils/textFile.ts";
 import type { RetrievalBranch } from "../models/types";
 
 
@@ -329,7 +331,7 @@ export class Agent {
       if (signal?.aborted) {
         throw new Error("Project prewarming cancelled");
       }
-      await this.repositoryRetrieval.refresh(workspacePath, forceFresh);
+      await this.repositoryRetrieval.prepare(workspacePath, forceFresh);
       this.projectReady = true;
     } finally {
       this.projectScanning = false;
@@ -417,7 +419,7 @@ export class Agent {
       throw new Error("Project scanning is still in progress. Please wait until scanning finishes.");
     }
 
-    const projectIndex = await this.repositoryRetrieval.refresh(workspace.uri.fsPath);
+    const projectIndex = await this.repositoryRetrieval.prepare(workspace.uri.fsPath);
 
 
     const requestAction: Intent = "auto";
@@ -2890,6 +2892,11 @@ export class Agent {
       );
     }
 
+    const gitignore = await loadGitignoreRules(workspaceUri.fsPath);
+    if (gitignore.isIgnored(normalizedPath)) {
+      throw new Error(`Ignored file is not readable: ${normalizedPath}`);
+    }
+
 
     const fileUri =
       vscode.Uri.joinPath(
@@ -2904,6 +2911,10 @@ export class Agent {
         await vscode.workspace.fs.readFile(
           fileUri
         );
+
+      if (isProbablyBinary(bytes)) {
+        throw new Error(`Binary file is not readable: ${normalizedPath}`);
+      }
 
 
       let content =
@@ -2977,9 +2988,10 @@ export class Agent {
       );
 
 
-      throw new Error(
-        `Unable to read file: ${normalizedPath}`
-      );
+      if (error instanceof Error && error.message.startsWith("Binary file is not readable:")) {
+        throw error;
+      }
+      throw new Error(`Unable to read file: ${normalizedPath}`);
     }
   }
 
@@ -3016,6 +3028,7 @@ export class Agent {
     }
 
     const fallbackEvidence: Array<{ path: string; content: string }> = [];
+    const gitignore = await loadGitignoreRules(workspaceUri.fsPath);
     const uris = await vscode.workspace.findFiles(
       new vscode.RelativePattern(workspaceUri, "**/*"),
       "**/{node_modules,.git,dist,build,out,coverage}/**",
@@ -3029,7 +3042,7 @@ export class Agent {
       const path = this.normalizeRelativePath(
         vscode.workspace.asRelativePath(uri, false)
       );
-      if (!path || this.isSensitivePath(path)) {
+      if (!path || this.isSensitivePath(path) || gitignore.isIgnored(path)) {
         continue;
       }
       try {
@@ -3037,9 +3050,11 @@ export class Agent {
         if (stat.size > ADAPTIVE_MAX_SEARCH_FILE_BYTES) {
           continue;
         }
-        const content = Buffer.from(
-          await vscode.workspace.fs.readFile(uri)
-        ).toString("utf8");
+        const bytes = await vscode.workspace.fs.readFile(uri);
+        if (isProbablyBinary(bytes)) {
+          continue;
+        }
+        const content = Buffer.from(bytes).toString("utf8");
         const matchIndex = content.toLowerCase().indexOf(needle);
         if (matchIndex >= 0) {
           fallbackEvidence.push({
@@ -3106,14 +3121,30 @@ export class Agent {
     let manifest = cachedManifest;
     let fileCount = 0;
     if (manifest === undefined) {
+      const gitignore = await loadGitignoreRules(workspaceUri.fsPath);
       const uris = await vscode.workspace.findFiles(
         "**/*",
         "**/{node_modules,.git,dist,build,out,coverage}/**",
         ADAPTIVE_MAX_MANIFEST_FILES
       );
-      const paths = uris
-        .map(uri => this.normalizeRelativePath(vscode.workspace.asRelativePath(uri, false)))
-        .filter(path => Boolean(path) && !this.isSensitivePath(path));
+      const paths: string[] = [];
+      for (const uri of uris) {
+        const path = this.normalizeRelativePath(vscode.workspace.asRelativePath(uri, false));
+        if (!path || this.isSensitivePath(path) || gitignore.isIgnored(path) || hasBinaryFileExtension(path)) {
+          continue;
+        }
+        const fileName = path.split("/").pop() ?? path;
+        if (!fileName.includes(".")) {
+          try {
+            if (isProbablyBinary(await vscode.workspace.fs.readFile(uri))) {
+              continue;
+            }
+          } catch {
+            continue;
+          }
+        }
+        paths.push(path);
+      }
       manifest = paths.join("\n");
       fileCount = paths.length;
       this.manifestCache = {

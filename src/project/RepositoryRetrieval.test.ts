@@ -88,6 +88,23 @@ test("RepositoryRetrieval reads ranges, symbols, summaries, and relationships", 
   }
 });
 
+test("RepositoryRetrieval prepares metadata before full indexing", async () => {
+  const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "mm3-retrieval-prepare-"));
+  try {
+    await fs.writeFile(path.join(workspace, "service.ts"), "export function loadProjectConfig() { return true; }\n", "utf8");
+
+    const retrieval = new RepositoryRetrieval();
+    const manifest = await retrieval.prepare(workspace);
+
+    assert.equal(manifest.files[0]?.hash, "");
+    assert.equal(manifest.files[0]?.lines, 0);
+    const results = await retrieval.search(workspace, "project config", 10);
+    assert.equal(results.some((result) => result.path === "service.ts"), true);
+  } finally {
+    await fs.rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("RepositoryRetrieval records import edges with provenance", async () => {
   const workspace = await fs.mkdtemp(path.join(os.tmpdir(), "mm3-retrieval-imports-"));
   try {

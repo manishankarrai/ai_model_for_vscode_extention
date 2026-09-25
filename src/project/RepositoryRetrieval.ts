@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
+import { execFile } from "node:child_process";
 import { promises as fs } from "node:fs";
 import * as path from "node:path";
+import { promisify } from "node:util";
 
 import { ProjectScanner, type ProjectIndexSnapshot, type ProjectScannerStorage } from "./ProjectScanner.ts";
 import { SymbolIndex, type IndexedSymbol, type SymbolIndexSnapshot } from "./SymbolIndex.ts";
@@ -8,6 +10,8 @@ import { SearchEngine, type RankedSearchResult } from "./SearchEngine.ts";
 import { LocalSemanticIndex } from "./LocalSemanticIndex.ts";
 import { CodeGraph, type CodeGraphSnapshot } from "./CodeGraph.ts";
 import { flow } from "../utils/flowLog.ts";
+import { loadGitignoreRules } from "../utils/gitignore.ts";
+import { hasBinaryFileExtension, isProbablyBinary } from "../utils/textFile.ts";
 
 type DependencyType = "dependency" | "devDependency" | "peerDependency" | "builtin" | "unknown";
 
@@ -21,6 +25,29 @@ interface DependencyMetadata {
 interface PersistedSearchCache {
   indexVersion: number;
   entries: Array<{ key: string; results: RankedSearchResult[] }>;
+}
+
+const execFileAsync = promisify(execFile);
+const FAST_SEARCH_FILE_LIMIT = 200;
+const FAST_SEARCH_FILE_BYTES = 2 * 1024 * 1024;
+const FULL_INDEX_CONCURRENCY = 16;
+
+async function forEachConcurrent<T>(
+  items: T[],
+  concurrency: number,
+  callback: (item: T) => Promise<void>
+): Promise<void> {
+  let nextIndex = 0;
+  const worker = async (): Promise<void> => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex];
+      nextIndex += 1;
+      await callback(item);
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, () => worker())
+  );
 }
 
 export interface Relationship {
@@ -68,6 +95,7 @@ export class RepositoryRetrieval {
   private workspacePath?: string;
   private restoredSearchCacheVersion?: number;
   private refreshPromise?: Promise<ProjectIndexSnapshot>;
+  private metadataOnly = false;
 
   constructor(storage?: ProjectScannerStorage, semanticIndex = new LocalSemanticIndex()) {
     this.storage = storage;
@@ -78,6 +106,7 @@ export class RepositoryRetrieval {
   invalidatePath(filePath: string): void {
     this.scanner.invalidatePath(filePath);
     this.pendingPaths.add(path.resolve(filePath));
+    this.searchCache.clear();
   }
 
   reset(): void {
@@ -91,6 +120,7 @@ export class RepositoryRetrieval {
     this.searchCache.clear();
     this.pendingPaths.clear();
     this.restoredSearchCacheVersion = undefined;
+    this.metadataOnly = false;
     this.scanner.reset();
   }
 
@@ -110,6 +140,36 @@ export class RepositoryRetrieval {
     }
   }
 
+  async prepare(workspacePath: string, forceFresh = false): Promise<ProjectIndexSnapshot> {
+    const resolvedWorkspace = path.resolve(workspacePath);
+    const workspaceChanged = this.workspacePath !== resolvedWorkspace;
+    const needsManifest = forceFresh || workspaceChanged || !this.snapshot || this.pendingPaths.size > 0;
+    if (!needsManifest && this.snapshot) {
+      return this.snapshot;
+    }
+
+    if (workspaceChanged || forceFresh) {
+      this.workspacePath = resolvedWorkspace;
+      this.contents.clear();
+      this.symbols.clear();
+      this.semanticIndex.clear();
+      this.semanticIndexedPaths.clear();
+      this.relationships = [];
+      this.searchCache.clear();
+      this.restoredSearchCacheVersion = undefined;
+      this.snapshot = undefined;
+      this.metadataOnly = false;
+      if (forceFresh) {
+        this.scanner.reset();
+      }
+    }
+
+    this.snapshot = await this.scanner.scanManifest(resolvedWorkspace);
+    this.metadataOnly = true;
+    this.searchCache.clear();
+    return this.snapshot;
+  }
+
   private async refreshInternal(workspacePath: string, forceFresh: boolean): Promise<ProjectIndexSnapshot> {
     const resolvedWorkspace = path.resolve(workspacePath);
     const workspaceChanged = this.workspacePath !== resolvedWorkspace;
@@ -125,20 +185,21 @@ export class RepositoryRetrieval {
       this.snapshot = undefined;
     }
 
-    if (!this.snapshot) {
+    if (!this.snapshot || this.metadataOnly) {
       this.snapshot = await this.scanner.scan(resolvedWorkspace, forceFresh);
+      this.metadataOnly = false;
       this.pendingPaths.clear();
       const restored = !forceFresh && this.restoreSymbols(resolvedWorkspace, this.snapshot.indexVersion);
       if (!restored) {
-        for (const file of this.snapshot.files) {
+        await forEachConcurrent(this.snapshot.files, FULL_INDEX_CONCURRENCY, async (file) => {
           await this.indexFile(resolvedWorkspace, file.path);
           this.indexSemanticFile(file.path);
-        }
+        });
       } else {
-        for (const file of this.snapshot.files) {
+        await forEachConcurrent(this.snapshot.files, FULL_INDEX_CONCURRENCY, async (file) => {
           await this.loadContent(resolvedWorkspace, file.path);
           this.indexSemanticFile(file.path);
-        }
+        });
       }
       const restoredRelationships = restored && this.restoreRelationships(resolvedWorkspace, this.snapshot.indexVersion);
       this.relationships = restoredRelationships ? restoredRelationships : this.buildRelationships();
@@ -207,7 +268,18 @@ export class RepositoryRetrieval {
     endLine?: number
   ): Promise<RetrievalResult> {
     const safePath = this.validatePath(filePath);
-    const content = await fs.readFile(path.join(workspacePath, ...safePath.split("/")), "utf8");
+    const gitignore = await loadGitignoreRules(workspacePath);
+    if (gitignore.isIgnored(safePath)) {
+      return { success: false, path: safePath, output: `Ignored file is not readable: ${safePath}` };
+    }
+    if (hasBinaryFileExtension(safePath)) {
+      return { success: false, path: safePath, output: `Binary file is not readable: ${safePath}` };
+    }
+    const bytes = await fs.readFile(path.join(workspacePath, ...safePath.split("/")));
+    if (isProbablyBinary(bytes)) {
+      return { success: false, path: safePath, output: `Binary file is not readable: ${safePath}` };
+    }
+    const content = bytes.toString("utf8");
     const lines = content.split("\n");
     const first = Math.max(1, startLine);
     const last = Math.min(lines.length, endLine ?? first + 199);
@@ -244,6 +316,20 @@ export class RepositoryRetrieval {
   }
 
   async search(workspacePath: string, query: string, limit = 50, explicitPaths: string[] = [], signal?: AbortSignal): Promise<RankedSearchResult[]> {
+    if (this.metadataOnly) {
+      const fastCacheKey = this.searchCacheKey(query, limit, explicitPaths);
+      const cachedFastResults = this.searchCache.get(fastCacheKey);
+      if (cachedFastResults) {
+        this.lastSearchTiming = { semanticMs: 0, rankingMs: 0, totalMs: 0, cacheHit: true };
+        return cachedFastResults.map((result) => ({ ...result, matchedSymbols: [...result.matchedSymbols], matchedTerms: [...result.matchedTerms] }));
+      }
+      const fastResults = await this.searchManifest(workspacePath, query, limit, explicitPaths, signal);
+      if (fastResults !== undefined) {
+        this.lastSearchTiming = { semanticMs: 0, rankingMs: 0, totalMs: 0, cacheHit: false };
+        this.searchCache.set(fastCacheKey, fastResults.map((result) => ({ ...result, matchedSymbols: [...result.matchedSymbols], matchedTerms: [...result.matchedTerms] })));
+        return fastResults;
+      }
+    }
     await this.ensureRefreshed(workspacePath);
     if (signal?.aborted) {
       throw new Error("Repository search cancelled");
@@ -384,7 +470,94 @@ export class RepositoryRetrieval {
   }
 
   private async ensureRefreshed(workspacePath: string): Promise<ProjectIndexSnapshot> {
-    return this.snapshot ?? this.refresh(workspacePath);
+    return !this.snapshot || this.metadataOnly
+      ? this.refresh(workspacePath)
+      : this.snapshot;
+  }
+
+  private async searchManifest(
+    workspacePath: string,
+    query: string,
+    limit: number,
+    explicitPaths: string[],
+    signal?: AbortSignal
+  ): Promise<RankedSearchResult[] | undefined> {
+    if (signal?.aborted) {
+      throw new Error("Repository search cancelled");
+    }
+    const terms = [...new Set(query.toLowerCase().split(/\s+/).map((term) => term.trim()).filter(Boolean))];
+    if (terms.length === 0) {
+      return [];
+    }
+
+    let output: string;
+    try {
+      const args = [
+        "--files-with-matches",
+        "--hidden",
+        "--glob", "!.git/**",
+        "--glob", "!node_modules/**",
+        "--glob", "!**/node_modules/**",
+        "--glob", "!dist/**",
+        "--glob", "!**/dist/**",
+        "--glob", "!build/**",
+        "--glob", "!**/build/**",
+        "--glob", "!coverage/**",
+        "--glob", "!**/coverage/**",
+        "--glob", "!**/.env*",
+        "--glob", "!**/*.{png,jpg,jpeg,gif,webp,ico,pdf,zip,tar,gz,mp3,mp4}",
+        "-i",
+        "-F"
+      ];
+      for (const term of terms) {
+        args.push("-e", term);
+      }
+      args.push("--", ".");
+      ({ stdout: output } = await execFileAsync("rg", args, {
+        cwd: path.resolve(workspacePath),
+        maxBuffer: 2 * 1024 * 1024
+      }));
+    } catch (error) {
+      if ((error as { code?: number }).code === 1) {
+        return [];
+      }
+      return undefined;
+    }
+
+    const candidatePaths = output
+      .split(/\r?\n/)
+      .map((filePath) => filePath.trim().replace(/^[.][\\/]/, "").replace(/\\/g, "/"))
+      .filter(Boolean)
+      .filter((filePath) => {
+        try {
+          this.validatePath(filePath);
+          return true;
+        } catch {
+          return false;
+        }
+      })
+      .slice(0, FAST_SEARCH_FILE_LIMIT);
+    const documents: Array<{ path: string; content: string; symbols: [] }> = [];
+    const selectedPaths = new Set(explicitPaths);
+    await forEachConcurrent(candidatePaths, 16, async (filePath) => {
+      if (signal?.aborted) {
+        throw new Error("Repository search cancelled");
+      }
+      try {
+        const content = await fs.readFile(path.join(workspacePath, ...filePath.split("/")), "utf8");
+        if (Buffer.byteLength(content, "utf8") <= FAST_SEARCH_FILE_BYTES) {
+          documents.push({ path: filePath, content, symbols: [] });
+        }
+      } catch {
+        // Ignore files that disappear or cannot be decoded while searching.
+      }
+    });
+
+    return this.searchEngine.search(query, documents.map((document) => ({
+      ...document,
+      explicit: selectedPaths.has(document.path),
+      recentChange: false
+    })), [], limit);
   }
 
   private async indexFile(workspacePath: string, filePath: string): Promise<void> {
