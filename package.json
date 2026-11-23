@@ -7,7 +7,12 @@
   "icon": "media/mm3.png",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://www.mm3ai.com",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/manishankarrai/m3.git"
+  },
   "bugs": {
+    "url": "https://github.com/manishankarrai/m3/issues",
     "email": "support@mm3ai.com"
   },
   "engines": {
